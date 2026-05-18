@@ -72,7 +72,7 @@ jobs:
     name: stage 1 - non-streaming
     needs: docs
     runs-on: [self-hosted]
-    timeout-minutes: 5
+    timeout-minutes: 15
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -84,6 +84,24 @@ jobs:
         with:
           venv-name: omni-s2pro
 
+      - name: Prepare speaker similarity assets
+        shell: bash
+        run: |
+          source omni-s2pro/bin/activate
+          SIM_ROOT=/github/home/seedtts-wavlm-sim
+          mkdir -p "${SIM_ROOT}/s3prl"
+          if [ ! -f "${SIM_ROOT}/wavlm_large_finetune.pth" ]; then
+            huggingface-cli download popsoda2002/seedtts-wavlm-sim wavlm_large_finetune.pth --local-dir "${SIM_ROOT}"
+          fi
+          if [ ! -f "${SIM_ROOT}/s3prl/wavlm_large.pt" ]; then
+            huggingface-cli download s3prl/converted_ckpts wavlm_large.pt --local-dir "${SIM_ROOT}/s3prl"
+          fi
+          if [ ! -d "${SIM_ROOT}/s3prl/s3prl_s3prl_main" ]; then
+            git clone --depth 1 https://github.com/s3prl/s3prl "${SIM_ROOT}/s3prl/s3prl_s3prl_main"
+          fi
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+
       - name: Run benchmark stage
         shell: bash
         run: |
@@ -93,6 +111,7 @@ jobs:
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
+          SEEDTTS_SIM_CHECKPOINT: /github/home/seedtts-wavlm-sim/wavlm_large_finetune.pth
           S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/nonstream
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
 
@@ -105,6 +124,7 @@ jobs:
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
+            */similarity_results.json
           artifact-upload-name: s2pro-stage-1-results
           artifact-upload-path: stage-results/nonstream
           artifact-if-no-files-found: error
