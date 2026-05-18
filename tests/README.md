@@ -28,6 +28,7 @@ tests/
     │   ├── test_runtime_adapter.py
     │   ├── test_runtime_schema.py
     │   ├── test_scheduler.py
+    │   ├── test_simple_scheduler_concurrent.py
     │   ├── test_stage.py
     │   ├── test_stage_process_env.py
     │   └── test_stage_streaming.py
@@ -134,6 +135,10 @@ Relevant model CI ownership:
   init from `conftest.py`, shared by every Qwen3-Omni vision-encoder benchmark
   module — avoids re-initializing the process-global TP group when the combined
   `-m benchmark` command runs more than one module.
+- `test_qwen3_omni_realtime.py`: starts `examples/run_qwen3_omni_server.py`
+  with `--enable-realtime` and drives `/v1/realtime` through a real WebSocket
+  client to cover text responses, server VAD transcription, and disconnect
+  teardown.
 - CLI flags `--s2pro-stage {nonstream,stream,consistency,all}` and
   `--concurrency {1,2,4,8,16,all}`: scope an S2-Pro CI sweep without editing
   source.
@@ -165,7 +170,9 @@ that happened to contain an older version of the test.
   - IPC lifecycle
   - scheduler batching
   - scheduler errors
-  - scheduler concurrency.
+  - scheduler concurrency
+  - scheduler callable contracts, including sync wrappers and callable objects
+    that return awaitables.
 - `unit_test/qwen3_omni/` Qwen3-Omni unit tests:
 
   - public CLI/config behavior
