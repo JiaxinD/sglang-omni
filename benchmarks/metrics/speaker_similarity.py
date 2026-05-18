@@ -159,14 +159,13 @@ class ECAPATDNNWavLM(nn.Module):
     def __init__(
         self,
         *,
+        feature_extract: nn.Module,
         feat_dim: int = 1024,
         channels: int = 512,
         emb_dim: int = 256,
-        ssl_model_path: str | None = None,
-        s3prl_repo_path: str | None = None,
     ):
         super().__init__()
-        self.feature_extract = load_wavlm(s3prl_repo_path, ssl_model_path)
+        self.feature_extract = feature_extract
         if len(self.feature_extract.model.encoder.layers) == 24:
             for idx in (23, 11):
                 layer = self.feature_extract.model.encoder.layers[idx]
@@ -232,12 +231,7 @@ class WavLMSpeakerSimilarity:
         checkpoint_path: str,
         device: str,
     ):
-        s3prl_repo_path = find_s3prl_repo_path(checkpoint_path)
-        ssl_model_path = find_ssl_model_path(checkpoint_path)
-        self.model = ECAPATDNNWavLM(
-            ssl_model_path=ssl_model_path,
-            s3prl_repo_path=s3prl_repo_path,
-        )
+        self.model = ECAPATDNNWavLM(feature_extract=load_wavlm(checkpoint_path))
         state_dict = torch.load(checkpoint_path, map_location="cpu")
         self.model.load_state_dict(state_dict["model"], strict=False)
         self.model.to(device)
@@ -264,12 +258,14 @@ def load_audio(audio_path: str) -> torch.Tensor:
     return torch.from_numpy(np.asarray(audio, dtype=np.float32))
 
 
-def load_wavlm(s3prl_repo_path: str | None, ssl_model_path: str | None):
-    if s3prl_repo_path and ssl_model_path:
+def load_wavlm(checkpoint_path: str):
+    s3prl_repo_path = find_s3prl_repo_path(checkpoint_path)
+    wavlm_path = find_wavlm_path(checkpoint_path)
+    if s3prl_repo_path and wavlm_path:
         if s3prl_repo_path not in sys.path:
             sys.path.insert(0, s3prl_repo_path)
         hubconf = importlib.import_module("s3prl.upstream.wavlm.hubconf")
-        return hubconf.wavlm_local(ckpt=ssl_model_path)
+        return hubconf.wavlm_local(ckpt=wavlm_path)
     return torch.hub.load("s3prl/s3prl", "wavlm_large")
 
 
@@ -283,7 +279,7 @@ def find_s3prl_repo_path(checkpoint_path: str) -> str | None:
     return None
 
 
-def find_ssl_model_path(checkpoint_path: str) -> str | None:
+def find_wavlm_path(checkpoint_path: str) -> str | None:
     for path in s3prl_candidates(checkpoint_path):
         ssl_path = os.path.join(path, "wavlm_large.pt")
         if os.path.isfile(ssl_path):
