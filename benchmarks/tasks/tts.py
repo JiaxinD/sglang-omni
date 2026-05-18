@@ -326,14 +326,13 @@ def run_seedtts_similarity(
         torch.cuda.set_device(device)
         logger.info(f"Set speaker-similarity CUDA device to {device}")
 
-    entries = [entry for entry in generated if entry.get("is_success", False)]
     scorer = WavLMSpeakerSimilarity(
         checkpoint_path=os.path.abspath(config.similarity_checkpoint),
         device=device,
     )
     rows = []
     scores = []
-    for entry in tqdm(entries, desc="Speaker similarity"):
+    for entry in tqdm(generated, desc="Speaker similarity"):
         sample_id = entry["sample_id"]
         ref_audio = os.path.abspath(ref_audio_by_id[sample_id])
         wav_path = os.path.abspath(entry["wav_path"])
@@ -350,7 +349,7 @@ def run_seedtts_similarity(
         if log_per_sample:
             logger.info(f"[{sample_id}] similarity={similarity:.3f}")
 
-    similarity_mean = sum(scores) / len(scores) if scores else 0.0
+    similarity_mean = sum(scores) / len(scores)
     metrics = {"speaker_similarity_mean": similarity_mean}
     print(
         "SeedTTS speaker similarity: "

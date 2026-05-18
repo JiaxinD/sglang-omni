@@ -166,11 +166,10 @@ class ECAPATDNNWavLM(nn.Module):
     ):
         super().__init__()
         self.feature_extract = feature_extract
-        if len(self.feature_extract.model.encoder.layers) == 24:
-            for idx in (23, 11):
-                layer = self.feature_extract.model.encoder.layers[idx]
-                if hasattr(layer.self_attn, "fp32_attention"):
-                    layer.self_attn.fp32_attention = False
+        for idx in (23, 11):
+            self.feature_extract.model.encoder.layers[idx].self_attn.fp32_attention = (
+                False
+            )
 
         for param in self.feature_extract.parameters():
             param.requires_grad = False
@@ -201,12 +200,12 @@ class ECAPATDNNWavLM(nn.Module):
         ]
         with torch.no_grad():
             features = self.feature_extract(wav)[self.feature_selection]
-        return len(features) if isinstance(features, (list, tuple)) else 1
+        return len(features)
 
     def get_feat(self, x: list[torch.Tensor]) -> torch.Tensor:
         with torch.no_grad():
             x = self.feature_extract(x)[self.feature_selection]
-        x = torch.stack(x, dim=0) if isinstance(x, (list, tuple)) else x.unsqueeze(0)
+        x = torch.stack(x, dim=0)
         weights = F.softmax(self.feature_weight, dim=-1)
         weights = weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
         x = (weights * x).sum(dim=0)
@@ -259,37 +258,8 @@ def load_audio(audio_path: str) -> torch.Tensor:
 
 
 def load_wavlm(checkpoint_path: str):
-    s3prl_repo_path = find_s3prl_repo_path(checkpoint_path)
-    wavlm_path = find_wavlm_path(checkpoint_path)
-    if s3prl_repo_path and wavlm_path:
-        if s3prl_repo_path not in sys.path:
-            sys.path.insert(0, s3prl_repo_path)
-        hubconf = importlib.import_module("s3prl.upstream.wavlm.hubconf")
-        return hubconf.wavlm_local(ckpt=wavlm_path)
-    return torch.hub.load("s3prl/s3prl", "wavlm_large")
-
-
-def find_s3prl_repo_path(checkpoint_path: str) -> str | None:
-    for path in s3prl_candidates(checkpoint_path):
-        if os.path.isfile(os.path.join(path, "hubconf.py")):
-            return path
-        nested = os.path.join(path, "s3prl_s3prl_main")
-        if os.path.isfile(os.path.join(nested, "hubconf.py")):
-            return nested
-    return None
-
-
-def find_wavlm_path(checkpoint_path: str) -> str | None:
-    for path in s3prl_candidates(checkpoint_path):
-        ssl_path = os.path.join(path, "wavlm_large.pt")
-        if os.path.isfile(ssl_path):
-            return ssl_path
-        parent_ssl_path = os.path.join(os.path.dirname(path), "wavlm_large.pt")
-        if os.path.isfile(parent_ssl_path):
-            return parent_ssl_path
-    return None
-
-
-def s3prl_candidates(checkpoint_path: str) -> list[str]:
     checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path))
-    return [os.path.join(checkpoint_dir, "s3prl"), checkpoint_dir]
+    s3prl_root = os.path.join(checkpoint_dir, "s3prl")
+    sys.path.insert(0, os.path.join(s3prl_root, "s3prl_s3prl_main"))
+    hubconf = importlib.import_module("s3prl.upstream.wavlm.hubconf")
+    return hubconf.wavlm_local(ckpt=os.path.join(s3prl_root, "wavlm_large.pt"))
