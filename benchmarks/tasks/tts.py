@@ -16,8 +16,6 @@ import json
 import logging
 import os
 import string
-import subprocess
-import sys
 import time
 import wave
 from dataclasses import dataclass
@@ -42,6 +40,7 @@ from benchmarks.benchmarker.utils import (
 )
 from benchmarks.dataset.seedtts import SampleInput, load_seedtts_samples
 from benchmarks.metrics.performance import build_speed_results
+from benchmarks.metrics.speaker_similarity import WavLMSpeakerSimilarity
 from benchmarks.metrics.wer import (
     calculate_asr_speed_metrics,
     calculate_wer_metrics,
@@ -52,14 +51,11 @@ from benchmarks.metrics.wer import (
 logger = logging.getLogger(__name__)
 
 TEXT_PREVIEW_LENGTH = 60
-DEFAULT_SPEAKER_SIMILARITY_SCRIPT = os.environ.get(
-    "SEEDTTS_SIM_SCRIPT",
-    "verification_pair_list_v2.py",
-)
 DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT = os.environ.get(
     "SEEDTTS_SIM_CHECKPOINT",
     "wavlm_large_finetune.pth",
 )
+DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH = os.environ.get("SEEDTTS_SIM_S3PRL_PATH")
 
 
 # ---------------------------------------------------------------------------
@@ -332,61 +328,29 @@ def run_seedtts_similarity(
         logger.info(f"Set speaker-similarity CUDA device to {device}")
 
     entries = [entry for entry in generated if entry.get("is_success", False)]
-    rows = []
-    pair_path = os.path.join(output_dir, "similarity_pairs.txt")
-    with open(pair_path, "w") as f:
-        for entry in entries:
-            sample_id = entry["sample_id"]
-            ref_audio = os.path.abspath(ref_audio_by_id[sample_id])
-            wav_path = os.path.abspath(entry["wav_path"])
-            f.write(f"{wav_path}|{ref_audio}\n")
-            rows.append(
-                {
-                    "id": sample_id,
-                    "ref_audio": ref_audio,
-                    "wav_path": wav_path,
-                }
-            )
-
-    score_path = os.path.join(output_dir, "similarity_scores.txt")
-    similarity_script = os.path.abspath(config.similarity_script)
-    similarity_checkpoint = os.path.abspath(config.similarity_checkpoint)
-    subprocess.run(
-        [
-            sys.executable,
-            similarity_script,
-            pair_path,
-            "--model_name",
-            "wavlm_large",
-            "--checkpoint",
-            similarity_checkpoint,
-            "--scores",
-            score_path,
-            "--wav1_start_sr",
-            "0",
-            "--wav2_start_sr",
-            "0",
-            "--wav1_end_sr",
-            "-1",
-            "--wav2_end_sr",
-            "-1",
-            "--device",
-            device,
-        ],
-        cwd=os.path.dirname(similarity_script),
-        check=True,
+    scorer = WavLMSpeakerSimilarity(
+        checkpoint_path=os.path.abspath(config.similarity_checkpoint),
+        s3prl_path=config.similarity_s3prl_path,
+        device=device,
     )
-
+    rows = []
     scores = []
-    with open(score_path) as f:
-        for line in f:
-            if "\t" in line:
-                scores.append(float(line.rsplit("\t", 1)[1]) * 100.0)
-
-    for row, similarity in zip(rows, scores):
-        row["speaker_similarity"] = similarity
+    for entry in tqdm(entries, desc="Speaker similarity"):
+        sample_id = entry["sample_id"]
+        ref_audio = os.path.abspath(ref_audio_by_id[sample_id])
+        wav_path = os.path.abspath(entry["wav_path"])
+        similarity = scorer.score(ref_audio, wav_path)
+        scores.append(similarity)
+        rows.append(
+            {
+                "id": sample_id,
+                "ref_audio": ref_audio,
+                "wav_path": wav_path,
+                "speaker_similarity": similarity,
+            }
+        )
         if log_per_sample:
-            logger.info(f"[{row['id']}] similarity={similarity:.3f}")
+            logger.info(f"[{sample_id}] similarity={similarity:.3f}")
 
     similarity_mean = sum(scores) / len(scores) if scores else 0.0
     metrics = {"speaker_similarity_mean": similarity_mean}
@@ -401,8 +365,8 @@ def run_seedtts_similarity(
                 "model": config.model,
                 "meta": config.meta,
                 "device": device,
-                "similarity_script": config.similarity_script,
                 "similarity_checkpoint": config.similarity_checkpoint,
+                "similarity_s3prl_path": config.similarity_s3prl_path,
             },
             "per_sample": rows,
         },

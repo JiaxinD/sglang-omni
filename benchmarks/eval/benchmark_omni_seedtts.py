@@ -156,7 +156,7 @@ from benchmarks.metrics.performance import (
 )
 from benchmarks.tasks.tts import (
     DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
-    DEFAULT_SPEAKER_SIMILARITY_SCRIPT,
+    DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
     VoiceCloneOmni,
     build_base_url,
     run_seedtts_similarity,
@@ -195,8 +195,8 @@ class OmniSeedttsBenchmarkConfig:
     disable_tqdm: bool = False
     # Transcribe phase
     device: str = "cuda:0"
-    similarity_script: str = DEFAULT_SPEAKER_SIMILARITY_SCRIPT
     similarity_checkpoint: str = DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
+    similarity_s3prl_path: str | None = DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH
 
 
 def _build_results_config(
@@ -387,8 +387,8 @@ def _config_from_args(args: argparse.Namespace) -> OmniSeedttsBenchmarkConfig:
         request_rate=args.request_rate,
         disable_tqdm=args.disable_tqdm,
         device=device,
-        similarity_script=args.similarity_script,
         similarity_checkpoint=args.similarity_checkpoint,
+        similarity_s3prl_path=args.similarity_s3prl_path,
     )
 
 
@@ -502,16 +502,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Legacy alias for --device (ASR transcription device).",
     )
     parser.add_argument(
-        "--similarity-script",
-        type=str,
-        default=DEFAULT_SPEAKER_SIMILARITY_SCRIPT,
-        help="Path to SeedTTS/UniSpeech verification_pair_list_v2.py.",
-    )
-    parser.add_argument(
         "--similarity-checkpoint",
         type=str,
         default=DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
         help="Path to wavlm_large_finetune.pth for SeedTTS speaker similarity.",
+    )
+    parser.add_argument(
+        "--similarity-s3prl-path",
+        type=str,
+        default=DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
+        help="Optional local s3prl path containing WavLM large weights.",
     )
     parser.add_argument(
         "--server-timeout",

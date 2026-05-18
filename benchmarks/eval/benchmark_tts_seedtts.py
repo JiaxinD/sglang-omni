@@ -134,7 +134,7 @@ from benchmarks.metrics.performance import (
 )
 from benchmarks.tasks.tts import (
     DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
-    DEFAULT_SPEAKER_SIMILARITY_SCRIPT,
+    DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
     build_base_url,
     make_tts_send_fn,
     run_seedtts_similarity,
@@ -181,8 +181,8 @@ class TtsSeedttsBenchmarkConfig:
     # Transcribe phase
     lang: str = "en"
     device: str = "cuda:0"
-    similarity_script: str = DEFAULT_SPEAKER_SIMILARITY_SCRIPT
     similarity_checkpoint: str = DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
+    similarity_s3prl_path: str | None = DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH
 
 
 def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
@@ -320,8 +320,8 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         disable_tqdm=args.disable_tqdm,
         lang=args.lang,
         device=args.device,
-        similarity_script=args.similarity_script,
         similarity_checkpoint=args.similarity_checkpoint,
+        similarity_s3prl_path=args.similarity_s3prl_path,
     )
 
 
@@ -424,16 +424,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Device for ASR model (transcribe phase).",
     )
     parser.add_argument(
-        "--similarity-script",
-        type=str,
-        default=DEFAULT_SPEAKER_SIMILARITY_SCRIPT,
-        help="Path to SeedTTS/UniSpeech verification_pair_list_v2.py.",
-    )
-    parser.add_argument(
         "--similarity-checkpoint",
         type=str,
         default=DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
         help="Path to wavlm_large_finetune.pth for SeedTTS speaker similarity.",
+    )
+    parser.add_argument(
+        "--similarity-s3prl-path",
+        type=str,
+        default=DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
+        help="Optional local s3prl path containing WavLM large weights.",
     )
     parser.add_argument(
         "--server-timeout",
