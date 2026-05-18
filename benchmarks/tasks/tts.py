@@ -55,7 +55,6 @@ DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT = os.environ.get(
     "SEEDTTS_SIM_CHECKPOINT",
     "wavlm_large_finetune.pth",
 )
-DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH = os.environ.get("SEEDTTS_SIM_S3PRL_PATH")
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +329,6 @@ def run_seedtts_similarity(
     entries = [entry for entry in generated if entry.get("is_success", False)]
     scorer = WavLMSpeakerSimilarity(
         checkpoint_path=os.path.abspath(config.similarity_checkpoint),
-        s3prl_path=config.similarity_s3prl_path,
         device=device,
     )
     rows = []
@@ -366,7 +364,6 @@ def run_seedtts_similarity(
                 "meta": config.meta,
                 "device": device,
                 "similarity_checkpoint": config.similarity_checkpoint,
-                "similarity_s3prl_path": config.similarity_s3prl_path,
             },
             "per_sample": rows,
         },

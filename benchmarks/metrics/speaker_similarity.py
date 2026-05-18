@@ -230,11 +230,10 @@ class WavLMSpeakerSimilarity:
         self,
         *,
         checkpoint_path: str,
-        s3prl_path: str | None,
         device: str,
     ):
-        s3prl_repo_path = find_s3prl_repo_path(s3prl_path, checkpoint_path)
-        ssl_model_path = find_ssl_model_path(s3prl_path, checkpoint_path)
+        s3prl_repo_path = find_s3prl_repo_path(checkpoint_path)
+        ssl_model_path = find_ssl_model_path(checkpoint_path)
         self.model = ECAPATDNNWavLM(
             ssl_model_path=ssl_model_path,
             s3prl_repo_path=s3prl_repo_path,
@@ -274,8 +273,8 @@ def load_wavlm(s3prl_repo_path: str | None, ssl_model_path: str | None):
     return torch.hub.load("s3prl/s3prl", "wavlm_large")
 
 
-def find_s3prl_repo_path(s3prl_path: str | None, checkpoint_path: str) -> str | None:
-    for path in s3prl_candidates(s3prl_path, checkpoint_path):
+def find_s3prl_repo_path(checkpoint_path: str) -> str | None:
+    for path in s3prl_candidates(checkpoint_path):
         if os.path.isfile(os.path.join(path, "hubconf.py")):
             return path
         nested = os.path.join(path, "s3prl_s3prl_main")
@@ -284,8 +283,8 @@ def find_s3prl_repo_path(s3prl_path: str | None, checkpoint_path: str) -> str | 
     return None
 
 
-def find_ssl_model_path(s3prl_path: str | None, checkpoint_path: str) -> str | None:
-    for path in s3prl_candidates(s3prl_path, checkpoint_path):
+def find_ssl_model_path(checkpoint_path: str) -> str | None:
+    for path in s3prl_candidates(checkpoint_path):
         ssl_path = os.path.join(path, "wavlm_large.pt")
         if os.path.isfile(ssl_path):
             return ssl_path
@@ -295,11 +294,6 @@ def find_ssl_model_path(s3prl_path: str | None, checkpoint_path: str) -> str | N
     return None
 
 
-def s3prl_candidates(s3prl_path: str | None, checkpoint_path: str) -> list[str]:
-    candidates = []
-    if s3prl_path:
-        candidates.append(s3prl_path)
+def s3prl_candidates(checkpoint_path: str) -> list[str]:
     checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path))
-    candidates.append(os.path.join(checkpoint_dir, "s3prl"))
-    candidates.append(checkpoint_dir)
-    return candidates
+    return [os.path.join(checkpoint_dir, "s3prl"), checkpoint_dir]

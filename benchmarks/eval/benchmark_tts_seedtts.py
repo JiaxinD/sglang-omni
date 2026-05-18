@@ -134,7 +134,6 @@ from benchmarks.metrics.performance import (
 )
 from benchmarks.tasks.tts import (
     DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
-    DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
     build_base_url,
     make_tts_send_fn,
     run_seedtts_similarity,
@@ -182,7 +181,6 @@ class TtsSeedttsBenchmarkConfig:
     lang: str = "en"
     device: str = "cuda:0"
     similarity_checkpoint: str = DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
-    similarity_s3prl_path: str | None = DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH
 
 
 def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
@@ -321,7 +319,6 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         lang=args.lang,
         device=args.device,
         similarity_checkpoint=args.similarity_checkpoint,
-        similarity_s3prl_path=args.similarity_s3prl_path,
     )
 
 
@@ -428,12 +425,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT,
         help="Path to wavlm_large_finetune.pth for SeedTTS speaker similarity.",
-    )
-    parser.add_argument(
-        "--similarity-s3prl-path",
-        type=str,
-        default=DEFAULT_SPEAKER_SIMILARITY_S3PRL_PATH,
-        help="Optional local s3prl path containing WavLM large weights.",
     )
     parser.add_argument(
         "--server-timeout",
