@@ -202,17 +202,39 @@ class ECAPATDNNWavLM(nn.Module):
             features = self.feature_extract(wav)[self.feature_selection]
         return len(features)
 
-    def get_feat(self, x: list[torch.Tensor]) -> torch.Tensor:
+    def get_feat(self, x: list[torch.Tensor]) -> list[torch.Tensor]:
+        wav_lengths = [wav.size(0) for wav in x]
         with torch.no_grad():
             x = self.feature_extract(x)[self.feature_selection]
         x = torch.stack(x, dim=0)
         weights = F.softmax(self.feature_weight, dim=-1)
         weights = weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
         x = (weights * x).sum(dim=0)
-        return self.instance_norm(torch.transpose(x, 1, 2) + 1e-6)
+        feat_lengths = self.get_feat_lengths(wav_lengths, x.device)
+        return [
+            self.instance_norm(torch.transpose(x[i : i + 1, :length], 1, 2) + 1e-6)
+            for i, length in enumerate(feat_lengths)
+        ]
 
-    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
-        x = self.get_feat(x)
+    def get_feat_lengths(
+        self,
+        wav_lengths: list[int],
+        device: torch.device,
+    ) -> list[int]:
+        lengths = torch.tensor(wav_lengths, device=device)
+        for layer in self.feature_extract.model.feature_extractor.conv_layers:
+            conv = layer[0]
+            lengths = (
+                torch.div(
+                    lengths - conv.kernel_size[0],
+                    conv.stride[0],
+                    rounding_mode="floor",
+                )
+                + 1
+            )
+        return lengths.tolist()
+
+    def encode_feat(self, x: torch.Tensor) -> torch.Tensor:
         out1 = self.layer1(x)
         out2 = self.layer2(out1)
         out3 = self.layer3(out2)
@@ -221,6 +243,9 @@ class ECAPATDNNWavLM(nn.Module):
         out = F.relu(self.conv(out))
         out = self.bn(self.pooling(out))
         return self.linear(out)
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([self.encode_feat(feat) for feat in self.get_feat(x)], dim=0)
 
 
 class WavLMSpeakerSimilarity:
@@ -237,14 +262,24 @@ class WavLMSpeakerSimilarity:
         self.model.eval()
         self.device = device
 
-    def embed(self, audio_path: str) -> torch.Tensor:
-        audio = load_audio(audio_path).to(self.device)
+    def embed(self, audio_paths: list[str]) -> torch.Tensor:
+        audio = [load_audio(audio_path).to(self.device) for audio_path in audio_paths]
         with torch.no_grad():
-            return self.model([audio])
+            return self.model(audio)
 
-    def score(self, ref_audio: str, wav_path: str) -> float:
-        score = F.cosine_similarity(self.embed(ref_audio), self.embed(wav_path), dim=-1)
-        return float(score.cpu().item() * 100.0)
+    def score_batch(
+        self,
+        ref_audio_paths: list[str],
+        wav_paths: list[str],
+    ) -> list[float]:
+        batch_size = len(ref_audio_paths)
+        embeddings = self.embed(ref_audio_paths + wav_paths)
+        scores = F.cosine_similarity(
+            embeddings[:batch_size],
+            embeddings[batch_size:],
+            dim=-1,
+        )
+        return (scores.cpu() * 100.0).tolist()
 
 
 def load_audio(audio_path: str) -> torch.Tensor:

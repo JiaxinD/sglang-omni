@@ -55,6 +55,7 @@ DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT = os.environ.get(
     "SEEDTTS_SIM_CHECKPOINT",
     "wavlm_large_finetune.pth",
 )
+SPEAKER_SIMILARITY_BATCH_SIZE = 8
 
 
 # ---------------------------------------------------------------------------
@@ -332,22 +333,35 @@ def run_seedtts_similarity(
     )
     rows = []
     scores = []
-    for entry in tqdm(generated, desc="Speaker similarity"):
-        sample_id = entry["sample_id"]
-        ref_audio = os.path.abspath(ref_audio_by_id[sample_id])
-        wav_path = os.path.abspath(entry["wav_path"])
-        similarity = scorer.score(ref_audio, wav_path)
-        scores.append(similarity)
-        rows.append(
-            {
-                "id": sample_id,
-                "ref_audio": ref_audio,
-                "wav_path": wav_path,
-                "speaker_similarity": similarity,
-            }
-        )
-        if log_per_sample:
-            logger.info(f"[{sample_id}] similarity={similarity:.3f}")
+    for start in tqdm(
+        range(0, len(generated), SPEAKER_SIMILARITY_BATCH_SIZE),
+        desc="Speaker similarity",
+    ):
+        batch = generated[start : start + SPEAKER_SIMILARITY_BATCH_SIZE]
+        sample_ids = [entry["sample_id"] for entry in batch]
+        ref_audio_paths = [
+            os.path.abspath(ref_audio_by_id[sample_id]) for sample_id in sample_ids
+        ]
+        wav_paths = [os.path.abspath(entry["wav_path"]) for entry in batch]
+        similarities = scorer.score_batch(ref_audio_paths, wav_paths)
+
+        for sample_id, ref_audio, wav_path, similarity in zip(
+            sample_ids,
+            ref_audio_paths,
+            wav_paths,
+            similarities,
+        ):
+            scores.append(similarity)
+            rows.append(
+                {
+                    "id": sample_id,
+                    "ref_audio": ref_audio,
+                    "wav_path": wav_path,
+                    "speaker_similarity": similarity,
+                }
+            )
+            if log_per_sample:
+                logger.info(f"[{sample_id}] similarity={similarity:.3f}")
 
     similarity_mean = sum(scores) / len(scores)
     metrics = {"speaker_similarity_mean": similarity_mean}
