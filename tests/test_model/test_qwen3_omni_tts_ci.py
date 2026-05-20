@@ -25,6 +25,7 @@ from benchmarks.eval.benchmark_omni_seedtts import (
 )
 from benchmarks.metrics.performance import print_speed_summary
 from benchmarks.metrics.wer import print_wer_summary
+from benchmarks.tasks.tts import DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT
 from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
@@ -46,13 +47,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONCURRENCY = 8
 MAX_SAMPLES = 50
 DATASET_CACHE_ENV = "SGLANG_SEEDTTS50_DIR"
+SIMILARITY_CHECKPOINT_ENV = "SEEDTTS_SIM_CHECKPOINT"
 
 STARTUP_TIMEOUT = 300
 WER_TIMEOUT = 600
+SIMILARITY_TIMEOUT = 600
 
 VC_WER_BELOW_50_CORPUS_MAX = 0.014184397163120567
 VC_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(VC_WER_BELOW_50_CORPUS_MAX)
 VC_N_ABOVE_50_MAX = 0
+# Mirrors VC_SIMILARITY_MEAN_MIN in test_s2pro_tts_ci.py (PR #469).
+# Placeholder pending Qwen3-Omni dry-run calibration.
+VC_SIMILARITY_MEAN_MIN = 60.0
 
 # Note (Chenyang): The thresholds for the throughput_qps of tests/test_model/test_qwen3_omni_tts_ci.py
 # are the most unstable metrics, so I drop it a lot.
@@ -172,6 +178,76 @@ def _run_wer_transcribe(
     return wer_results
 
 
+def _run_similarity(
+    meta_path: str,
+    output_dir: str,
+    checkpoint_path: str,
+    *,
+    device: str = "cuda:0",
+) -> dict:
+    """Compute SeedTTS speaker similarity in CI (mirrors WER subprocess pattern)."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "benchmarks.eval.benchmark_omni_seedtts",
+        "--similarity-only",
+        "--meta",
+        meta_path,
+        "--output-dir",
+        output_dir,
+        "--model",
+        "qwen3-omni",
+        "--device",
+        device,
+        "--similarity-checkpoint",
+        checkpoint_path,
+    ]
+
+    env = no_proxy_env()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{PROJECT_ROOT}{os.pathsep}{existing}" if existing else str(PROJECT_ROOT)
+    )
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=SIMILARITY_TIMEOUT,
+        env=env,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"Similarity eval failed (rc={result.returncode}).\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    results_path = Path(output_dir) / "similarity_results.json"
+    assert results_path.exists(), f"Similarity results file not found: {results_path}"
+
+    with open(results_path) as f:
+        similarity_results = json.load(f)
+    assert "summary" in similarity_results, (
+        "Missing 'summary' key in similarity results. "
+        f"Keys: {list(similarity_results.keys())}"
+    )
+    assert "per_sample" in similarity_results, (
+        "Missing 'per_sample' key in similarity results. "
+        f"Keys: {list(similarity_results.keys())}"
+    )
+    return similarity_results
+
+
+def _assert_similarity_results(results: dict, min_mean: float) -> None:
+    summary = results["summary"]
+    per_sample = results["per_sample"]
+    mean = summary["speaker_similarity_mean"]
+    assert per_sample, "Expected per-sample speaker similarity results"
+    assert mean >= min_mean, (
+        f"speaker_similarity_mean {mean:.4f} < threshold {min_mean:.4f}"
+    )
+
+
 @pytest.fixture(scope="module")
 def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     override_dir = os.environ.get(DATASET_CACHE_ENV)
@@ -181,6 +257,15 @@ def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
         root = tmp_path_factory.mktemp("seed_tts_eval") / "data"
     download_dataset(DATASETS["seedtts-50"], str(root), quiet=True)
     return root
+
+
+@pytest.fixture(scope="module")
+def similarity_checkpoint() -> str:
+    checkpoint = Path(
+        os.environ.get(SIMILARITY_CHECKPOINT_ENV, DEFAULT_SPEAKER_SIMILARITY_CHECKPOINT)
+    ).expanduser()
+    assert checkpoint.exists(), f"Similarity checkpoint not found: {checkpoint}"
+    return str(checkpoint)
 
 
 @pytest.fixture(scope="module")
@@ -288,6 +373,20 @@ def test_voice_cloning_wer(
         max_wer_below_50_corpus=VC_WER_BELOW_50_CORPUS_THRESHOLD,
         max_n_above_50=VC_N_ABOVE_50_MAX,
     )
+
+
+@pytest.mark.benchmark
+def test_voice_cloning_similarity(
+    wer_audio_dir: str,
+    dataset_dir: Path,
+    similarity_checkpoint: str,
+) -> None:
+    results = _run_similarity(
+        str(dataset_dir / "en" / "meta.lst"),
+        wer_audio_dir,
+        similarity_checkpoint,
+    )
+    _assert_similarity_results(results, VC_SIMILARITY_MEAN_MIN)
 
 
 if __name__ == "__main__":
