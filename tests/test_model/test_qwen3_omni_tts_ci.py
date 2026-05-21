@@ -244,9 +244,9 @@ def _assert_similarity_results(results: dict, min_mean: float) -> None:
     per_sample = results["per_sample"]
     mean = summary["speaker_similarity_mean"]
     assert per_sample, "Expected per-sample speaker similarity results"
-    assert mean >= min_mean, (
-        f"speaker_similarity_mean {mean:.4f} < threshold {min_mean:.4f}"
-    )
+    assert (
+        mean >= min_mean
+    ), f"speaker_similarity_mean {mean:.4f} < threshold {min_mean:.4f}"
 
 
 @pytest.fixture(scope="module")
@@ -267,7 +267,6 @@ def similarity_checkpoint() -> str:
     ).expanduser()
     assert checkpoint.exists(), f"Similarity checkpoint not found: {checkpoint}"
     return str(checkpoint)
-
 
 
 @dataclass
