@@ -124,12 +124,25 @@ jobs:
         with:
           venv-name: omni-qwen3
 
-      - name: Prepare speaker similarity assets
+      - name: Prepare speaker similarity assets (cached on self-hosted runner)
         shell: bash
         run: |
-          source omni-qwen3/bin/activate
+          # Persistent self-hosted-runner cache, same pattern as venv / dataset
+          # cache under /github/home/* used elsewhere in this workflow.
           SIM_ROOT=/github/home/seedtts-wavlm-sim
+          MARKER="${SIM_ROOT}/.complete"
+
+          if [ -f "${MARKER}" ]; then
+            echo "[sim-assets] cache HIT at ${SIM_ROOT}"
+            ls -lh "${SIM_ROOT}/wavlm_large_finetune.pth" \
+                   "${SIM_ROOT}/s3prl/wavlm_large.pt"
+            exit 0
+          fi
+
+          echo "[sim-assets] cache MISS — fetching (~2.5 GB, one-time)"
+          source omni-qwen3/bin/activate
           mkdir -p "${SIM_ROOT}/s3prl"
+
           if [ ! -f "${SIM_ROOT}/wavlm_large_finetune.pth" ]; then
             huggingface-cli download popsoda2002/seedtts-wavlm-sim wavlm_large_finetune.pth --local-dir "${SIM_ROOT}"
           fi
@@ -139,6 +152,11 @@ jobs:
           if [ ! -d "${SIM_ROOT}/s3prl/s3prl_s3prl_main" ]; then
             git clone --depth 1 https://github.com/s3prl/s3prl "${SIM_ROOT}/s3prl/s3prl_s3prl_main"
           fi
+
+          # Atomic completion marker — only set after all three assets land,
+          # so a partial / interrupted fetch is re-attempted on the next run.
+          touch "${MARKER}"
+          echo "[sim-assets] cached to ${SIM_ROOT}"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
