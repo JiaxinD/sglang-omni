@@ -110,15 +110,12 @@ classDiagram
 
 ```
 
-> **Note (Chenyang):** HTTP API → Client is currently lost from the original lifecycle diagram and should be added back to the system overview. @Huapeng
-
-> **Note (Chenyang):** Please add the WebSocket here. @huapeng
-
-> **Note (Yichi):** nit: ModelRunner hook can be illustrated more clearly in the overview (e.g. by splitting into prepare_prefill/decode and post_prefill/decode rather than generic prepare/post_forward). Since they have different behavior on thinker and talker, and it is important enough to demonstrate in the graph.
-
-> **Note (Yichi):** Also, "Client" section doesn't seem to be appear in the doc, should we add it as well?
-
-> **【TODO: Huapeng make up https design layer】**
+> **Pending — Huapeng**: Architecture overview needs three additions before this section is final.
+> 1. Restore the `HTTP API → Client` lifecycle edge to the system overview (currently missing). (raised by Chenyang)
+> 2. Add the WebSocket entrypoint to the overview. (raised by Chenyang)
+> 3. Add an HTTPS design layer subsection (entry point, request routing, WebSocket bridge). (existing TODO)
+>
+> Two diagram-level suggestions from Yichi are folded into the same revision: (a) illustrate the ModelRunner hook by splitting `prepare_prefill` / `decode` and `post_prefill` / `decode` rather than the generic `prepare` / `post_forward` (thinker and talker behave differently here); (b) decide whether a `Client` section belongs in this doc.
 
 ---
 
@@ -265,8 +262,6 @@ Previously the same OOM produced different externally-visible behaviors across m
 
 The short-term bridge fix (#302) landed without an `is_oom_error()` helper, since that helper would become dead code once the Scheduler-layer catch lands.
 
-> **【TODO: chenyang, I pinged my comment in#449】**
-
 ### SimpleScheduler
 
 For non-AR stages (preprocessing, encoders, aggregate, decode). No KV cache, no batching. Just `inbox.get()` → `fn(data)` → `outbox.put()`. Supports inbox/outbox and basic forward operation; batched processing supported where useful.
@@ -330,7 +325,7 @@ class ModelRunner:
 
 Shared: `ForwardBatch` construction, sampling, repetition penalty, codec suppression, output processing.
 
-> **Note (Chenyang):** The earlier `prepare_forward` / `if batch_result is None` block was misleading — `prepare_forward` was doing two unrelated things (mutating the batch and short-circuiting to a custom forward result). The version above splits those into `before_forward` (always mutates in place) and an explicit `custom_forward` branch, which makes the prefill-with-injection path (Fish TTS) honest instead of disguising it as "the hook returned a value." My suggestions are:
+> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current `prepare_forward` hook into `before_forward` (always mutates `forward_batch` in place) and an explicit `custom_forward` branch. The current "the hook returned a value, so short-circuit" pattern is misleading; the explicit split makes the prefill-with-injection path (Fish TTS) honest. Awaiting confirmation of whether this landed in the runner code. Proposed shape:
 
 ```python
 def execute(self, scheduler_output):
@@ -351,8 +346,6 @@ def execute(self, scheduler_output):
     self.post_forward(forward_output, ...)
     return ModelRunnerOutput(...)
 ```
-
-> **【TODO: Jingwen, have we done this part】**
 
 ### `ThinkerModelRunner`
 
@@ -421,8 +414,6 @@ class FishTTSStrategy:
 ```
 
 The bare-function form is what ships today; the Strategy form is the recommended evolution if a third self-contained model joins. The trade-off is mostly typing surface vs explicitness — neither blocks the other.
-
-> **【TODO: Jingwen, have we done this part】**
 
 ### Callback Pattern
 
@@ -504,7 +495,7 @@ Speech pipeline (8 stages): `preprocessing → image_encoder → audio_encoder �
 
 The "tower" terminology for image/audio encoders follows the official Qwen3-Omni names; we keep that vocabulary here rather than introducing a divergent local one.
 
-> **Note (Chenyang):** `PipelineState` and `OmniEvent` are ambiguous names — both sound like they belong to the framework, but they're model-specific. Rename later. **【TODO: Jingwen, have we done this part】**
+> **Pending — Jingwen**: `PipelineState` and `OmniEvent` are model-specific but read as framework-level types. Rename to disambiguate (suggested by Chenyang). Tracked until Jingwen confirms whether the rename landed.
 
 ### Fish Audio S2-Pro
 
@@ -644,15 +635,13 @@ graph TB
     Main -->|ZMQ| P3
 ```
 
-> **Note (Chenyang):** `stage_group.py` and `stage_process.py` are tightly coupled — `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass. None of the three justifies its own file. Merging into a single `stage_workers.py` keeps everything about "how a stage's processes get defined, spawned, and managed" in one place, and leaves `mp_runner.py` focused on cross-stage orchestration. Two files, cleaner ownership.
-
-> **【TODO: Jingwen, have we merged these files】**
+> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass — none of the three justifies its own file. Consolidating keeps "how a stage's processes get defined, spawned, and managed" in one place and leaves `mp_runner.py` focused on cross-stage orchestration. Awaiting confirmation of whether this landed.
 
 ### `StageProcessSpec`
 
 A fully-resolved, picklable dataclass built once in the main process. Subprocesses never re-compile the pipeline config — they just construct a `Stage` from the spec and run it.
 
-> **Note (Chenyang):** "Spec" is too vague a class name. Rename to `StageLaunchConfig`.
+A rename to `StageLaunchConfig` would carry the same meaning more clearly; this remains an open suggestion.[^q-spec-rename]
 
 The main process resolves all dotted strings, injects `model_path` / `gpu_id` into factory args, allocates ZMQ endpoints, and computes stream targets and relay config. The spec captures everything the child process needs.
 
@@ -770,6 +759,8 @@ These are surfaced for visibility — none block current work. Footnotes from ea
 [^q-realtime-streaming]: **Realtime streaming-input semantics.** PR #385 introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
 
 [^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
+
+[^q-spec-rename]: **`StageProcessSpec` → `StageLaunchConfig` rename.** "Spec" is vague; `StageLaunchConfig` reads as what it is — the picklable record of everything a subprocess needs to launch a stage. Cosmetic but worth doing the next time the class is touched. (raised by Chenyang)
 
 ---
 
