@@ -769,3 +769,158 @@ These are surfaced for visibility — none block current work. Footnotes from ea
 [PR #334](https://github.com/sgl-project/sglang-omni/pull/334) — V1 pipeline is still being debugged to pass all CIs.
 
 Following the suggestion in [#188 (comment)](https://github.com/sgl-project/sglang-omni/issues/188#issuecomment-4161198732), we should also track how many files need to be touched and the upper bound of the cost of integrating a new model. Boson's upcoming model will serve as the first concrete data point.
+
+---
+
+## Design Decision History
+
+This section consolidates the design rationale from RFC-style PRs that shaped the architecture, ordered by PR creation date. Each header links back to the PR for the full body and discussion. State and merge date appear in the italic line below the header. Each entry has the same shape: a one- or two-sentence summary, a few bullets expanding the scope, and a "Why it matters" note on the role the PR plays in the broader refactor.
+
+### [2026-04-15 — PR #294: Alternative pipeline added [RFC]](https://github.com/sgl-project/sglang-omni/pull/294)
+
+_State: CLOSED (kickoff; superseded by the per-phase RFCs below)._
+
+Opening RFC of the V1 refactor series, sketching a four-phase plan for replacing the V0 pipeline without a long-lived divergent branch.
+
+- **Phase 1:** add the alternative pipeline alongside the legacy one (feature-flagged)
+- **Phase 2:** port Fish Audio onto the new path, remove legacy Fish support
+- **Phase 3:** port Qwen-Omni onto the new path, remove legacy Qwen support
+- **Phase 4:** clear out the old pipeline once nothing depends on it
+
+**Why it matters:** This is the canonical statement of refactor intent. The PR closed without merging, but the side-by-side migration discipline it established — every intermediate state has a working server — is the rule every subsequent PR in this history followed.
+
+### [2026-04-23 — PR #334: V1 pipeline added [RFC]](https://github.com/sgl-project/sglang-omni/pull/334)
+
+_State: MERGED 2026-05-02. Run with `--version v1`._
+
+Introduced the V1 pipeline as an opt-in path via `--version v1`, and published the project trackboard that anchored the rest of the refactor.
+
+- **Code-quality cleanup:** AI-generated boilerplate, silent fallbacks, over-chatty comments
+- **Benchmark coverage:** validate Qwen-Omni and Fish on V1 for correctness and speed
+- **In-progress features:** Ming-Omni, flow-matching / diffusion, streaming realtime input, TP, same-GPU memory management, server-arg config plumbing
+- **Qwen-Omni optimizations:** piecewise CUDA Graph for talker, high-performance code-predictor backend
+
+**Why it matters:** The discoverability anchor for the V0 → V1 cutover. Names individual owners per work item so contributors can pick up threads independently; several follow-up issues and PRs in this history root back to this trackboard.
+
+### [2026-05-04 — PR #385: OpenAI Realtime WebSocket endpoint [V1, Feature]](https://github.com/sgl-project/sglang-omni/pull/385)
+
+_State: MERGED 2026-05-18. Disabled by default; opt in with `--enable-realtime`._
+
+Mounts `/v1/realtime`, an OpenAI-Realtime-compatible WebSocket API on top of V1, enabling streaming audio in and streaming transcript deltas out for low-latency voice agents and live transcription / translation.
+
+- **`events.py`** — Pydantic schemas for the OpenAI Realtime client/server event vocabulary
+- **`audio_buffer.py`** — append-only PCM16 rolling buffer
+- **`session.py`** — per-WebSocket state machine; dispatches client events, drives the engine via `Coordinator.stream()`, translates engine deltas back to Realtime server events
+- **`manager.py`** — in-memory `session_id → RealtimeSession` registry
+- **Scope:** OpenAI Realtime superset, broader than the transcription-only sglang upstream RFC
+
+**Why it matters:** Demonstrates that the V1 Coordinator entry point is general enough to host OpenAI-spec endpoints as thin adapters rather than parallel engine paths. Validates the bidirectional Coordinator stream API as the intended way to add future protocols.
+
+### [2026-05-05 — PR #397: V1 unit test rewrite top-down [RFC]](https://github.com/sgl-project/sglang-omni/pull/397)
+
+_State: MERGED 2026-05-12. No runtime changes; reorganization + contract tests._
+
+Reorganized the V1 unit tests into component-focused folders so each file maps directly to the behavior it protects.
+
+- **`tests/unit_test/pipeline/`** — framework contracts: compile-time schema validation, coordinator multi-terminal completion + abort, stage per-request aggregation + relay tensor round-trips, scheduler batch success / error emission
+- **`tests/unit_test/qwen3_omni/`** — Qwen3-Omni topology, request / result tensor shapes, scheduler behavior
+- **`tests/unit_test/fishaudio_s2_pro/`** — Fish topology, VQ prompt injection, vocoder batching
+- **Deliberate restraint:** "protect the most important protocols, leave deeper tests for follow-up"
+
+**Why it matters:** Establishes the test baseline that subsequent feature PRs extend rather than reinvent. The restraint prevents the historical drift where unit tests grow into a parallel re-implementation that decays in lockstep with the real code.
+
+### [2026-05-06 — PR #401: SGLang-Omni Router for V1 [Router]](https://github.com/sgl-project/sglang-omni/pull/401)
+
+_State: MERGED 2026-05-13. Part of #376._
+
+Adds the SGLang-Omni Router: a standalone process (`sgl-omni-router`) that fronts complete V1 server replicas behind one OpenAI-compatible endpoint. Selects one routable worker per request and forwards the original bytes.
+
+- **Worker sources:** homogeneous URL pool (`--worker-urls`), heterogeneous JSON manifest with per-worker capabilities (`--worker-config`), or managed local launcher from YAML (`--launcher-config`)
+- **Selection pipeline:** payload-size guard → bounded metadata extraction → routable / capability / model filters → safe-superset resolution → policy (`round_robin` / `least_request` / `random`)
+- **Health and admin:** per-worker failure tracking drives `/ready`; exposes admin and merged `/v1/models` endpoints
+- **Managed launcher:** spawns workers from YAML and waits for all to pass `/health` in parallel before accepting traffic
+
+**Why it matters:** Decouples horizontal scaling from the pipeline architecture. Each worker remains a full V1 replica with its own Coordinator — the router never splits a request across stages — which keeps the V1 boundary intact while letting deployments scale by replication.
+
+### [2026-05-07 — PR #406: Qwen3-Omni V1 real text and audio streaming [V1 Feature]](https://github.com/sgl-project/sglang-omni/pull/406)
+
+_State: MERGED 2026-05-15._
+
+Turns Qwen3-Omni V1 from "`stream=true` is a no-op" into real per-token text streaming on `thinker → decode` and real per-window audio streaming on `talker_ar → code2wav → Coordinator`.
+
+- **New first-class V1 concept:** terminal stage forwards `target=None` stream chunks to the Coordinator (SSE), backed by `Stage.is_terminal` and `_send_stream_to_coordinator`
+- **`StreamingDetokenizeScheduler`** — consumes per-token stream chunks, emits UTF-8-boundary-safe text deltas
+- **`Qwen3OmniCode2WavScheduler`** — latches the streaming flag per request, emits one audio frame per decoded window
+- **Slim final `result`** under `stream=true` (`{modality, sample_rate}` only) to avoid duplicate full-payload IPC
+- **Hard failure** if a non-terminal stage emits `target=None` — previously a silent drop
+
+**Why it matters:** Lifts streaming from a model-specific feature into a V1 framework primitive (terminal-stage forwarding + per-request streaming-flag latching). Future modal endpoints inherit this pattern rather than re-inventing it.
+
+### [2026-05-07 — PR #407: Unify V1 launcher on multiprocess runner [Bugfix, RFC]](https://github.com/sgl-project/sglang-omni/pull/407)
+
+_State: CLOSED (folded into #447 / launcher consolidation work)._
+
+Argued that the V1 single-process launcher is just the multi-process launcher with one stage — keeping both is redundant double maintenance for endpoint allocation, factory-arg resolution, and process spawning.
+
+- **Diagnosis:** the dual launcher path is historical baggage, not a meaningful deployment distinction
+- **Bugfix:** `mp_runner._build_stage_groups` was launching the endpoint process twice
+- **Proposal:** route every launch through the multi-process launcher
+- **Outcome:** closed without merging; consolidation absorbed into #447
+
+**Why it matters:** Captures the rationale that drove the launcher consolidation. The diagnosis and bugfix informed #447 and downstream cleanups even though no commits from this branch shipped — kept here to attribute both the design decision and the double-launch bugfix correctly.
+
+### [2026-05-12 — PR #430: Colocated Stage Execution [Colocation]](https://github.com/sgl-project/sglang-omni/pull/430)
+
+_State: MERGED 2026-05-16. Follows colocation RFC + #329 / #376._
+
+Implements the colocated-stage execution path for Omni V1, making Qwen3-Omni speech runnable as a single colocated v1 server while preserving the V1 architecture boundary.
+
+- **V1 boundary preserved:** `PipelineConfig → typed runtime config → placement plan → stage process launch → backend adapter → SGLang ModelRunner / KV pool sizing`
+- **Omni placement semantics, not SGLang global-free-memory:** per-stage `runtime.resources.total_gpu_memory_fraction` budget
+- **KV headroom for SGLang AR stages:** `available_kv_bytes = total_gpu_memory_bytes * fraction - accounted_stage_memory_bytes`
+- **Model-agnostic planner** (`config/placement.py`): sums per-GPU stage budgets, rejects over-budget colocated groups, computes same-GPU stream targets before processes start
+- **Qwen3-Omni placement policy:** rejects unsupported topologies (standalone `code_predictor`, unsupported thinker / talker TP); admits same-GPU thinker / talker only via `Qwen3OmniSpeechColocatedPipelineConfig`
+
+**Why it matters:** The biggest single deployment-shape win in the V1 refactor. Lets a thinker + talker speech model run as one process on one GPU rather than two separate stages, dramatically reducing the resource footprint for inference clusters that don't need horizontal stage parallelism.
+
+### [2026-05-15 — PR #447: Unify serving on multiprocess runner [RFC]](https://github.com/sgl-project/sglang-omni/pull/447)
+
+_State: CLOSED. Compiler delete + endpoint allocation move; ideas referenced inline above._
+
+Proposed unifying pipeline serving on `MultiProcessPipelineRunner` and removing the legacy direct compiler / runtime path that had grown ad-hoc helpers across the codebase.
+
+- **Delete** `sglang_omni.config.compiler` entirely
+- **Move endpoint allocation + IPC runtime-dir ownership** to `sglang_omni.pipeline.endpoints`
+- **Move factory-args, relay config, stream-target helpers** to `sglang_omni.pipeline.runtime_config`
+- **Always start** pipelines through `MultiProcessPipelineRunner`; CPU stages keep `gpu_id=None`, TP stages require explicit GPU placement
+- **Expose stage endpoints** from the MP runner so the profiler can attach
+- **Harden stage routing** so invalid downstream / stream targets fail explicitly rather than silently dropping
+
+**Why it matters:** The structural cleanup that finally retired the dual launcher architecture. Although the PR closed without merging through this branch, the compiler removal and `_resolve_factory_args` deduplication landed via this work — the PipelineConfig section above references that resolution.
+
+### [2026-05-17 — PR #461: Stage-GPU-process topology [RFC]](https://github.com/sgl-project/sglang-omni/pull/461)
+
+_State: MERGED 2026-05-17. Resolves issue #459._
+
+Locks in the stage → GPU → process topology mapping as the canonical V1 placement model.
+
+- **Stage** → placement entry → one or more OS processes, each pinned to specific GPU ids
+- **TP groups** within a stage spawn one process per rank
+- **Stage groups** remain the unit of lifecycle ownership (spawn, `wait_ready`, shutdown, health monitoring)
+- **Coordinator** only talks to rank 0 of each group, keeping it TP-unaware
+- **Co-location** on shared GPUs allowed; over-budget colocated groups rejected up front
+
+**Why it matters:** Crystallizes the placement rules that earlier RFCs introduced piecewise. After this PR there is one canonical way to express "where does a stage run" — every subsequent feature (router, realtime, colocation refinements) builds on this topology contract rather than inventing its own.
+
+### [2026-05-21 — PR #509: Remove TCP control-plane endpoints [RFC, Feat]](https://github.com/sgl-project/sglang-omni/pull/509)
+
+_State: OPEN as of this writing._
+
+Removes TCP endpoint support from the pipeline control plane and makes IPC the only supported transport.
+
+- **Scope:** control plane carries local coordination messages (completion, abort) between processes on a single node
+- **Why IPC-only:** IPC sockets are the natural fit; TCP doesn't unlock any useful deployment mode here
+- **TCP was fragile in practice:** endpoint reservation / allocation could diverge from the endpoint that later got bound — a known source of "works locally, fails in CI" bugs
+- **Cleanup:** deletes the TCP branch entirely and simplifies endpoint allocation around IPC
+
+**Why it matters:** Final cleanup of port-based control-plane configuration. Removes a known fragile transport and shrinks the surface area the rest of the framework has to support. The last open-RFC item in this history; expected to land soon.
