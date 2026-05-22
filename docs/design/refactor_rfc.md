@@ -587,7 +587,7 @@ The refactor should consolidate this into one canonical mechanism: a typed, stag
 
 #### Stage placement — same-GPU co-location
 
-Stages may share GPUs. Earlier topologies hard-rejected same-GPU speech-stage placement, which left Talker on H200 at <2% utilization long-term. Informed by Ratish's vLLM-Omni investigation (vLLM co-locates thinker + talker on a single device via per-stage memory budgeting + NVML accounting), the placement model now treats "any stage on any GPU" as first-class, with budgeting that accounts for co-tenants rather than rejecting the topology.
+Stages may share GPUs. Earlier topologies hard-rejected same-GPU speech-stage placement, which left Talker on H200 at <2% utilization long-term. Informed by Ratish's vLLM-Omni investigation (vLLM co-locates thinker + talker on a single device via per-stage memory budgeting + NVML accounting), the placement model now treats "any stage on any GPU" as first-class, with budgeting that accounts for co-tenants rather than rejecting the topology. See [Design Decision History § PR #430](#2026-05-12--pr-430-colocated-stage-execution-colocation) for the typed runtime config + placement planner that shipped this.
 
 Memory-fraction semantics have also been pinned down: vLLM's `gpu_memory_utilization` is a fraction of total VRAM, while SGLang's `mem_fraction_static` is a fraction of remaining VRAM after weights load — more principled for single-stage LLM, but ambiguous for omni where stages load sequentially and "remaining" depends on load order. The placement model now uses one explicit semantics rather than inheriting the ambiguity.
 
@@ -597,7 +597,7 @@ Whether `factory` and `factory_args` should collapse into a single field is stil
 
 Derived (computed from stages, not set manually): `terminal_stages`, `gpu_placement`.
 
-There is no compiler class. An earlier proposal threaded pipeline construction through a `compiler_pipeline()` entry point, but the multi-process path (`mp_runner._build_stage_groups`) re-implemented most of the same logic independently, with two near-duplicate `_resolve_factory_args` helpers. The compiler class was removed in #447 — pipeline construction now happens through a plain init function per model, which is sufficient given how few pipelines we maintain.
+There is no compiler class. An earlier proposal threaded pipeline construction through a `compiler_pipeline()` entry point, but the multi-process path (`mp_runner._build_stage_groups`) re-implemented most of the same logic independently, with two near-duplicate `_resolve_factory_args` helpers. The compiler class was removed in [#447](#2026-05-15--pr-447-unify-serving-on-multiprocess-runner-rfc) — pipeline construction now happens through a plain init function per model, which is sufficient given how few pipelines we maintain.
 
 The `Pipeline` vs `Stages` distinction in code still needs to be sharper: both names appear in different places without a crisp mental model. This should be pinned down before the field set grows further.
 
@@ -756,7 +756,7 @@ These are surfaced for visibility — none block current work. Footnotes from ea
 
 [^q-thinker-codepredictor-split]: **Thinker vs CodePredictor scheduler split.** `CodePredictor` is currently placed under Talker, but the KV cache shape diverges from `ThinkerScheduler` enough that a documented separation may be warranted. No proposal is on the table yet; tracking here so future scheduler refactors revisit it. (raised by Chenyang)
 
-[^q-realtime-streaming]: **Realtime streaming-input semantics.** PR #385 introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
 
 [^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
 
