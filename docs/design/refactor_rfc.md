@@ -4,6 +4,22 @@
 
 Follows from [sglang#16546](https://github.com/sgl-project/sglang/issues/16546). Addresses problems in [#188](https://github.com/sgl-project/sglang-omni/issues/188).
 
+## Table of contents
+
+1. [Architecture](#architecture)
+2. [Pipeline Layer](#pipeline-layer)
+3. [Scheduling Layer](#scheduling-layer)
+4. [Model Runner + Callbacks](#model-runner--callbacks)
+5. [Model Directory Convention](#model-directory-convention)
+6. [Declarative Config](#declarative-config)
+7. [Multi-Process Runner](#multi-process-runner)
+8. [Supported Pipelines](#supported-pipelines)
+9. [Adding a New Model](#adding-a-new-model)
+10. [tp_size](#tp_size)
+11. [Open design questions](#open-design-questions)
+12. [Progress Tracking](#progress-tracking)
+13. [Design Decision History](#design-decision-history)
+
 ## Architecture
 
 ### System Overview
@@ -111,6 +127,7 @@ classDiagram
 ```
 
 > **Pending — Huapeng**: Architecture overview needs three additions before this section is final.
+>
 > 1. Restore the `HTTP API → Client` lifecycle edge to the system overview (currently missing). (raised by Chenyang)
 > 2. Add the WebSocket entrypoint to the overview. (raised by Chenyang)
 > 3. Add an HTTPS design layer subsection (entry point, request routing, WebSocket bridge). (existing TODO)
@@ -464,7 +481,7 @@ models/<model_name>/
 └── components/            — Model-specific torch modules, preprocessors, encoders
 ```
 
-`routing.py` and `request_builders.py` are kept separate because they answer different questions: `routing.py` decides *which* stage runs next (topology, often deterministic), while `request_builders.py` formats data for models that need special input shapes — e.g. the Qwen3-Omni thinker → talker request transform. Localizing the model-specific format logic in `request_builders.py` keeps `routing.py` thin and framework-shaped.
+`routing.py` and `request_builders.py` are kept separate because they answer different questions: `routing.py` decides _which_ stage runs next (topology, often deterministic), while `request_builders.py` formats data for models that need special input shapes — e.g. the Qwen3-Omni thinker → talker request transform. Localizing the model-specific format logic in `request_builders.py` keeps `routing.py` thin and framework-shaped.
 
 ### Qwen3-Omni
 
