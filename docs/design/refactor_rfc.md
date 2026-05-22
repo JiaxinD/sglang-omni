@@ -252,7 +252,7 @@ Composing on top of SGLang's `Scheduler` is the right call, but only if we pin t
 2. **Minimize reuse surface.** Treat `PrefillManager` and `DecodeManager` as black boxes — public methods only, no reads or writes of internal attributes. The moment we touch internals, composition becomes a fork.
 3. **Upstream-first, when affordable.** If OmniScheduler needs something SGLang doesn't cleanly expose, the preferred fix is a hook or factored-out method in SGLang `main` rather than a downstream patch. Today the cost of upstream PRs is high enough that we don't routinely do this; it remains the long-term direction.
 
-> **Note (Chenyang):** Should we separately discuss `ThinkerScheduler` and `CodePredictorScheduler`? Their KV cache is quite different. `CodePredictor` is put under Talker.
+`CodePredictor` is placed under Talker, but whether `ThinkerScheduler` and `CodePredictorScheduler` need a separate documented split (their KV cache shapes are quite different) is still an open design question.[^q-thinker-codepredictor-split]
 
 ### Error handling
 
@@ -557,9 +557,7 @@ stages = [
 ]
 ```
 
-> **Note (Huapeng):** I feel realtime is needed supporting streaming in, an important feature for voice agent. https://vllm.ai/blog/streaming-realtime Do we need to consider more? We will do this in https://github.com/sgl-project/sglang-omni/pull/385
-
-> **Note(Huapeng):** /realtime feature, for low latency voice agent and realtime transcription and translation, if we accept streaming input, it can get better results and be useful in daily usecase. I think sglang omni might need to implement this and implement features in openai's realtime interface, https://developers.openai.com/api/docs/guides/realtime This will unlock voice model's potential for real use case, like https://x.com/OpenAIDevs/status/2048871260512473385?s=20. For implement this, we get a streaming audio in, at the same time, the inference engine can receive the chunk and send the SSE back via websocket. We can reference some implementation in https://vllm.ai/blog/streaming-realtime and https://github.com/sgl-project/sglang/issues/22474#issuecomment-4241744895. Detailed plan is TBD.
+Realtime streaming-input support is a separate workstream owned by #385 and is intentionally outside the scope of this config example.[^q-realtime-streaming]
 
 Routing rule: exactly one of `next`, `route_fn`, or `terminal=True`. There is no "one thinker, multiple talkers" fan-out — talker decode requires the thinker's hidden state as prefix, so driving two independent talkers from the same prefix carries no useful semantics. Derived from stages: `entry_stage` (first stage), `terminal_stages`, `gpu_placement`, relay device.
 
@@ -602,7 +600,7 @@ Stages may share GPUs. Earlier topologies hard-rejected same-GPU speech-stage pl
 
 Memory-fraction semantics have also been pinned down: vLLM's `gpu_memory_utilization` is a fraction of total VRAM, while SGLang's `mem_fraction_static` is a fraction of remaining VRAM after weights load — more principled for single-stage LLM, but ambiguous for omni where stages load sequentially and "remaining" depends on load order. The placement model now uses one explicit semantics rather than inheriting the ambiguity.
 
-> **Note (Chenyang):** Should we merge `factory_args` and `factory` into one field?
+Whether `factory` and `factory_args` should collapse into a single field is still open.[^q-factory-args-merge]
 
 ### `PipelineConfig` reference
 
@@ -758,6 +756,20 @@ Everything else (`Stage`, `Coordinator`, `OmniScheduler`, `ModelRunner`, relay, 
 ---
 
 ## tp_size
+
+> **Pending — Jingwen**: empty section in the original Lark export — likely intended as a TP-specific subsection but never filled. Resolve by either writing it out or dropping the heading. Tracked here until a decision lands.
+
+---
+
+## Open design questions
+
+These are surfaced for visibility — none block current work. Footnotes from earlier sections land here.
+
+[^q-thinker-codepredictor-split]: **Thinker vs CodePredictor scheduler split.** `CodePredictor` is currently placed under Talker, but the KV cache shape diverges from `ThinkerScheduler` enough that a documented separation may be warranted. No proposal is on the table yet; tracking here so future scheduler refactors revisit it. (raised by Chenyang)
+
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** PR #385 introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
+
+[^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
 
 ---
 
