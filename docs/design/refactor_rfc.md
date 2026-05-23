@@ -15,10 +15,9 @@ Follows from [sglang#16546](https://github.com/sgl-project/sglang/issues/16546).
 7. [Multi-Process Runner](#multi-process-runner)
 8. [Supported Pipelines](#supported-pipelines)
 9. [Adding a New Model](#adding-a-new-model)
-10. [tp_size](#tp_size)
-11. [Open design questions](#open-design-questions)
-12. [Progress Tracking](#progress-tracking)
-13. [Design Decision History](#design-decision-history)
+10. [Open design questions](#open-design-questions)
+11. [Progress Tracking](#progress-tracking)
+12. [Design Decision History](#design-decision-history)
 
 ## Architecture
 
@@ -342,7 +341,9 @@ class ModelRunner:
 
 Shared: `ForwardBatch` construction, sampling, repetition penalty, codec suppression, output processing.
 
-> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current `prepare_forward` hook into `before_forward` (always mutates `forward_batch` in place) and an explicit `custom_forward` branch. The current "the hook returned a value, so short-circuit" pattern is misleading; the explicit split makes the prefill-with-injection path (Fish TTS) honest. Awaiting confirmation of whether this landed in the runner code. Proposed shape:
+> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current hook into `before_forward` (always mutates `forward_batch` in place) and an explicit `custom_forward` branch. The current "the hook returned a value, so short-circuit" pattern is misleading; the explicit split makes the prefill-with-injection path (Fish TTS) honest.
+>
+> **Verified status (2026-05-23):** not yet implemented. `sglang_omni/model_runner/base.py:33` `execute()` still uses the short-circuit pattern. Note: the actual code further splits the hook into `prepare_prefill` / `prepare_decode` (the doc body above shows the older single-hook form for clarity) — but the underlying `if batch_result is None → standard forward` short-circuit Chenyang flagged is unchanged. Proposed shape:
 
 ```python
 def execute(self, scheduler_output):
@@ -512,7 +513,9 @@ Speech pipeline (8 stages): `preprocessing → image_encoder → audio_encoder �
 
 The "tower" terminology for image/audio encoders follows the official Qwen3-Omni names; we keep that vocabulary here rather than introducing a divergent local one.
 
-> **Pending — Jingwen**: `PipelineState` and `OmniEvent` are model-specific but read as framework-level types. Rename to disambiguate (suggested by Chenyang). Tracked until Jingwen confirms whether the rename landed.
+> **Pending — Jingwen**: `PipelineState` and `OmniEvent` are model-specific but read as framework-level types. Rename to disambiguate (suggested by Chenyang).
+>
+> **Verified status (2026-05-23):** not yet renamed. Both names still live in `sglang_omni/models/qwen3_omni/payload_types.py` and are referenced by `components/preprocessor.py`, `components/streaming_detokenizer.py`, and `components/talker_prefill.py`. Same names also appear in `sglang_omni/models/ming_omni/io.py` — any rename should consider both models.
 
 ### Fish Audio S2-Pro
 
@@ -652,7 +655,9 @@ graph TB
     Main -->|ZMQ| P3
 ```
 
-> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass — none of the three justifies its own file. Consolidating keeps "how a stage's processes get defined, spawned, and managed" in one place and leaves `mp_runner.py` focused on cross-stage orchestration. Awaiting confirmation of whether this landed.
+> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass — none of the three justifies its own file. Consolidating keeps "how a stage's processes get defined, spawned, and managed" in one place and leaves `mp_runner.py` focused on cross-stage orchestration.
+>
+> **Verified status (2026-05-23):** not yet merged. `sglang_omni/pipeline/stage_group.py` and `sglang_omni/pipeline/stage_process.py` both still present; no `stage_workers.py` exists.
 
 ### `StageProcessSpec`
 
@@ -761,19 +766,13 @@ Everything else (`Stage`, `Coordinator`, `OmniScheduler`, `ModelRunner`, relay, 
 
 ---
 
-## tp_size
-
-> **Pending — Jingwen**: empty section in the original Lark export — likely intended as a TP-specific subsection but never filled. Resolve by either writing it out or dropping the heading. Tracked here until a decision lands.
-
----
-
 ## Open design questions
 
 These are surfaced for visibility — none block current work. Footnotes from earlier sections land here.
 
 [^q-thinker-codepredictor-split]: **Thinker vs CodePredictor scheduler split.** `CodePredictor` is currently placed under Talker, but the KV cache shape diverges from `ThinkerScheduler` enough that a documented separation may be warranted. No proposal is on the table yet; tracking here so future scheduler refactors revisit it. (raised by Chenyang)
 
-[^q-realtime-streaming]: **Realtime streaming-input semantics.** PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** The `/realtime` endpoint shipped in PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) (merged 2026-05-18) — WebSocket-backed streaming-in audio with SSE-style server events, aligned with OpenAI's realtime interface. Detailed protocol — chunk framing, partial-result emission, cancellation semantics — is documented in #385's session-state-machine implementation rather than mirrored here. Footnote retained as a forward reference. (raised by Huapeng)
 
 [^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
 
