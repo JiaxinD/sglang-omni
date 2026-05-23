@@ -110,15 +110,12 @@ classDiagram
 
 ```
 
-> **Note (Chenyang):** HTTP API → Client is currently lost from the original lifecycle diagram and should be added back to the system overview. @Huapeng
-
-> **Note (Chenyang):** Please add the WebSocket here. @huapeng
-
-> **Note (Yichi):** nit: ModelRunner hook can be illustrated more clearly in the overview (e.g. by splitting into prepare_prefill/decode and post_prefill/decode rather than generic prepare/post_forward). Since they have different behavior on thinker and talker, and it is important enough to demonstrate in the graph.
-
-> **Note (Yichi):** Also, "Client" section doesn't seem to be appear in the doc, should we add it as well?
-
-> **【TODO: Huapeng make up https design layer】**
+> **Pending — Huapeng**: Architecture overview needs three additions before this section is final.
+> 1. Restore the `HTTP API → Client` lifecycle edge to the system overview (currently missing). (raised by Chenyang)
+> 2. Add the WebSocket entrypoint to the overview. (raised by Chenyang)
+> 3. Add an HTTPS design layer subsection (entry point, request routing, WebSocket bridge). (existing TODO)
+>
+> Two diagram-level suggestions from Yichi are folded into the same revision: (a) illustrate the ModelRunner hook by splitting `prepare_prefill` / `decode` and `post_prefill` / `decode` rather than the generic `prepare` / `post_forward` (thinker and talker behave differently here); (b) decide whether a `Client` section belongs in this doc.
 
 ---
 
@@ -203,9 +200,13 @@ sequenceDiagram
 - **Data plane (Relay):** large tensors. Pluggable backends: SHM (single machine), NCCL (multi-GPU), NixL (RDMA multi-node), Mooncake. Same-GPU stages use CUDA IPC zero-copy automatically.
 - **Streaming:** hidden states / codec codes flow via `DataReadyMessage` with `chunk_id` and `is_done` fields, parallel to normal result routing.
 
-> **Note (Chenyang):** The split between control and data planes is core: ZMQ carries small coordination messages (`SubmitMessage`, `DataReadyMessage`, `AbortMessage`), while the relay (SHM/NCCL/NIXL/Mooncake) carries the actual tensors.
+The split between control and data planes is the core architectural decision: ZMQ stays out of the tensor path, the relay stays out of the coordination path, and either can be swapped independently.
 
-> The thinker→talker relationship is fundamentally producer-consumer — thinker produces hidden states / text tokens, talker consumes them and produces audio codes. This is structurally the same pattern as RL training (e.g., actor produces trajectories, learner consumes them), where Ray is the dominant orchestration layer. So a first-principles question: should we consider Ray for the inter-stage scheduling layer instead of hand-rolling ZMQ + relay? (Jingwen) As discussed, not adding it for now due to heaviness of Ray.
+#### Why not Ray?
+
+The thinker→talker relationship is fundamentally producer–consumer: thinker produces hidden states / text tokens, talker consumes them and emits audio codes. Structurally this is the same pattern as RL training (actor produces trajectories, learner consumes them), where Ray is the dominant orchestration layer. So it is a fair first-principles question whether we should use Ray for inter-stage scheduling instead of hand-rolling ZMQ + relay.
+
+We chose not to. Ray's overhead — extra runtime, object-store semantics, and operational footprint — is significant for our shape: a small fixed number of stages on a small fixed number of GPUs, with no autoscaling. ZMQ + relay covers the topology with much less moving infrastructure. The decision is revisitable; nothing in the pipeline layer hard-bakes "no Ray" beyond the relay backend list.
 
 ### `relay_io` Utility Module
 
@@ -214,14 +215,13 @@ Utility module providing:
 - **User-facing API**
   - `write_payload` / `read_payload` — full `StagePayload` serialization via relay
   - `send_stream_chunk` — handles same-GPU IPC vs cross-GPU relay, NIXL credit deadlock avoidance
-- **Internal facing-API**
+- **Internal-facing API**
   - `write_blob` / `read_blob` — raw tensor transfer for streaming chunks
   - `extract_tensors` / `restore_tensors` — recursive tensor extraction from nested dicts
 
-> **Note (Chenyang):** (Solved)
->
-> 1. API layering. `write_payload` / `read_payload` and `send_stream_chunk` are the user-facing APIs that stages actually call. `write_blob` / `read_blob` and `extract_tensors` / `restore_tensors` are internal building blocks — the former gets wrapped by `send_stream_chunk` for cross-GPU transfer, the latter gets used inside `write_payload` / `read_payload` to pull tensors out of nested dicts.
-> 2. Asymmetric stream API. There is no `recv_stream_chunk`. Only `send_stream_chunk` exists because the sender has real decisions to make (same-GPU IPC vs cross-GPU relay, NIXL credit management), while the receiver just calls `read_blob` from the stage's main message loop — wrapping a one-liner into `recv_stream_chunk` would add a layer without adding any value.
+**API layering.** Stages only call the user-facing API. `write_blob` / `read_blob` get wrapped by `send_stream_chunk` for cross-GPU transfer; `extract_tensors` / `restore_tensors` get used inside `write_payload` / `read_payload` to pull tensors out of nested dicts. The internal layer exists so the user-facing surface stays small.
+
+**Asymmetric stream API — no `recv_stream_chunk`.** Only `send_stream_chunk` exists because the sender has real decisions to make (same-GPU IPC vs cross-GPU relay, NIXL credit management), while the receiver just calls `read_blob` from the stage's main message loop. Wrapping a one-liner into `recv_stream_chunk` would add a layer without adding any value.
 
 ---
 
@@ -241,29 +241,26 @@ For AR stages. Subset of SGLang Scheduler — reuses `get_next_batch_to_run()`, 
 
 Runs in a dedicated thread. Stage communicates via thread-safe queues.
 
-> **Note (Chenyang):** Should we separately discuss `ThinkerScheduler` and `CodePredictorScheduler`? Their KV cache is quite different. `CodePredictor` is put under Talker.
->
-> Composition with SGLang's Scheduler is reasonable, but we should pin down the boundary now to avoid the kind of upgrade pain SGLang RL forks have hit repeatedly.
->
-> Four points:
->
-> 1. **Pin or track?** Tracking SGLang main fits the same-umbrella relationship, but only if CI runs against the real Scheduler, not mocks. Otherwise pin. (now it's a pin. It's too expensive currently to track)
-> 2. **Minimize reuse surface.** Use PrefillManager and DecodeManager as black boxes — public methods only, no reads or writes of internal attributes. The moment we touch internals, composition becomes a de facto fork.
-> 3. **Upstream-first.** When OmniScheduler needs something SGLang doesn't cleanly expose, push a hook or factored-out method into SGLang main rather than patching downstream. The RFC already notes SGLang needs a clean-based Scheduler — contributing to that is directly in our interest. (too expensive for now, will try to do in the future)
+#### Composition boundary with SGLang
 
-> **Note (Chenyang):**
-> The same OOM behaves differently across models today: S2-Pro and Voxtral return HTTP 500 (correct), Ming-Omni returns HTTP 200 with `waveform=None` (silent failure), Qwen3-Omni returns HTTP 200 with a zero tensor (worst — looks like a valid waveform downstream). The first two work correctly only because they did nothing; the latter two fail because a broad `except Exception` in the executor swallowed the error. Under the current architecture, writing less code is writing more correct code — that's not a healthy signal, and every new model integration has to rediscover error handling from scratch.
->
-> This refactor should fix it at the Scheduler layer: (Jingwen: pr #449)
->
-> 1. **Unified catch in `run_batch()`** — Scheduler wraps forward, catches exceptions, marks request failed, propagates via outbox → Coordinator → HTTP 500 for non-streaming. For streaming responses, HTTP headers are already flushed before the first chunk, so HTTP 500 cannot fire mid-stream — instead, successful streams must terminate with an explicit completion sentinel frame, and failed streams abort the connection before emitting it. Absent sentinel + premature close is the client-side failure signal.
-> 2. **Model executors forbidden from writing `except Exception`** — model-side code is pure functional, doesn't own lifecycle, exceptions propagate naturally. Specific expected exceptions must catch specific types, never base `Exception`. Must be enforced via lint rule, not review discipline: rule 1's catch is path-local to `run_batch()`, so a broad catch in `add_request` or embed-load paths (e.g. `_load_thinker_embedding_rows`' per-shard catch) slips past it. Lint is the only mechanism that closes that gap.
-> 3. **Fallbacks architecturally disallowed** — executor either succeeds or hands off to Scheduler. No third path returning a "fake success" indistinguishable from a real result. Concrete violations to clean up at enforcement time include `_generate_speech` returning `(None, 44100, 0.0)`.
-> 4. **CI fault injection** — inject OOM and verify the correct failure signal per model: HTTP 500 for non-streaming, sentinel-absent + premature close for streaming. Detection-only by nature, so it complements but does not substitute for rule 2's lint enforcement.
->
-> Short-term bridge fix (#302) should land as-is without an `is_oom_error()` helper, since that helper becomes dead code once the Scheduler-layer catch lands.
+Composing on top of SGLang's `Scheduler` is the right call, but only if we pin the boundary deliberately — RL forks of SGLang have hit upgrade pain by letting composition drift into a de facto fork. Three rules govern the boundary:
 
-> **【TODO: chenyang, I pinged my comment in#449】**
+1. **Pin, don't track.** Tracking SGLang `main` fits the same-umbrella relationship, but only if CI runs against the real Scheduler rather than mocks. Running that CI is currently too expensive, so we pin.
+2. **Minimize reuse surface.** Treat `PrefillManager` and `DecodeManager` as black boxes — public methods only, no reads or writes of internal attributes. The moment we touch internals, composition becomes a fork.
+3. **Upstream-first, when affordable.** If OmniScheduler needs something SGLang doesn't cleanly expose, the preferred fix is a hook or factored-out method in SGLang `main` rather than a downstream patch. Today the cost of upstream PRs is high enough that we don't routinely do this; it remains the long-term direction.
+
+`CodePredictor` is placed under Talker, but whether `ThinkerScheduler` and `CodePredictorScheduler` need a separate documented split (their KV cache shapes are quite different) is still an open design question.[^q-thinker-codepredictor-split]
+
+### Error handling
+
+Previously the same OOM produced different externally-visible behaviors across models: S2-Pro and Voxtral returned HTTP 500 (correct), Ming-Omni returned HTTP 200 with `waveform=None` (silent failure), Qwen3-Omni returned HTTP 200 with a zero tensor (looks like a valid waveform downstream). The first two were correct only because they did nothing; the latter two failed because broad `except Exception` blocks in the executor swallowed the error. The fix lives at the Scheduler layer (#449):
+
+1. **Unified catch in `run_batch()`** — Scheduler wraps forward, catches exceptions, marks the request failed, propagates via outbox → Coordinator → HTTP 500 for non-streaming. For streaming responses HTTP headers are already flushed before the first chunk, so HTTP 500 cannot fire mid-stream — successful streams terminate with an explicit completion sentinel frame, and failed streams abort the connection before emitting it. Absent sentinel + premature close is the client-side failure signal.
+2. **Model executors forbidden from writing `except Exception`** — model-side code is pure functional and exceptions propagate naturally. Specific expected exceptions must catch specific types, never base `Exception`. Enforced via lint rule, not review discipline: rule 1's catch is path-local to `run_batch()`, so a broad catch in `add_request` or embed-load paths slips past it.
+3. **Fallbacks architecturally disallowed** — executor either succeeds or hands off to Scheduler. No third path returning a "fake success" indistinguishable from a real result.
+4. **CI fault injection** — inject OOM and verify the correct failure signal per model: HTTP 500 for non-streaming, sentinel-absent + premature close for streaming. Detection complements but does not substitute for rule 2's lint enforcement.
+
+The short-term bridge fix (#302) landed without an `is_oom_error()` helper, since that helper would become dead code once the Scheduler-layer catch lands.
 
 ### SimpleScheduler
 
@@ -306,9 +303,9 @@ ForwardBatch → prepare_forward() → forward() → post_forward() → sample()
 | **ThinkerModelRunner**    | Qwen3 / Ming thinker   | prepare_forward: inject multimodal embeddings                        |
 | **FeedbackARModelRunner** | Qwen3 talker, Fish TTS | 3 callbacks: write_buffers_fn, extract_output_fn, prefill_forward_fn |
 
-> **Note (Chenyang):** Open question — with the current design, can we treat CUDA Graph and `torch.compile` as class-sharable rather than configured model by model? (Jingwen) Yes, currently it's intentionally designed to be so (that's why such modelrunner abstraction exists, but special model has special cases).
+CUDA Graph and `torch.compile` are class-shareable rather than configured model by model — the ModelRunner abstraction exists in part to make this the default; special models can still override.
 
-> DiffusionModelRunner is no longer speculative — Ming-Omni (#236) requires it, and image-gen diffusion is functionally working. Should be added as a first-class runner type alongside `ThinkerModelRunner` and `FeedbackARModelRunner` later.
+DiffusionModelRunner is no longer speculative — Ming-Omni (#236) requires it, and image-gen diffusion is functionally working. It should be added as a first-class runner type alongside `ThinkerModelRunner` and `FeedbackARModelRunner` later.
 
 ### `ModelRunner` (Base)
 
@@ -328,7 +325,7 @@ class ModelRunner:
 
 Shared: `ForwardBatch` construction, sampling, repetition penalty, codec suppression, output processing.
 
-> **Note (Chenyang):** The earlier `prepare_forward` / `if batch_result is None` block was misleading — `prepare_forward` was doing two unrelated things (mutating the batch and short-circuiting to a custom forward result). The version above splits those into `before_forward` (always mutates in place) and an explicit `custom_forward` branch, which makes the prefill-with-injection path (Fish TTS) honest instead of disguising it as "the hook returned a value." My suggestions are:
+> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current `prepare_forward` hook into `before_forward` (always mutates `forward_batch` in place) and an explicit `custom_forward` branch. The current "the hook returned a value, so short-circuit" pattern is misleading; the explicit split makes the prefill-with-injection path (Fish TTS) honest. Awaiting confirmation of whether this landed in the runner code. Proposed shape:
 
 ```python
 def execute(self, scheduler_output):
@@ -350,8 +347,6 @@ def execute(self, scheduler_output):
     return ModelRunnerOutput(...)
 ```
 
-> **【TODO: Jingwen, have we done this part】**
-
 ### `ThinkerModelRunner`
 
 Injects multimodal embeddings (image / video / audio) + deepstack before forward.
@@ -365,7 +360,9 @@ class ThinkerModelRunner(ModelRunner):
 
 ### `FeedbackARModelRunner`
 
-Shared model runner for all AR + codebook models (Qwen3 talker, Fish TTS, future models). The model's `forward()` handles backbone + secondary head internally. This runner writes / reads model buffers around forward.
+Shared model runner for all AR + codebook models (Qwen3 talker, Fish TTS, future models) whose feedback loop is **self-contained within a single ModelRunner instance** — both the feedback producer and the receiver live inside one decode step. Cross-stage feedback (producer and receiver in separate schedulers, communicating via relay) is out of scope for this abstraction and would need a different design; today nothing requires it, but stating the boundary up front prevents future contributors from bending the abstraction to cover topologies it was not designed for.
+
+The model's `forward()` handles backbone + secondary head internally. This runner writes / reads model buffers around forward.
 
 ```python
 class FeedbackARModelRunner(ModelRunner):
@@ -390,11 +387,11 @@ Model-specific behavior via three callbacks:
 - `extract_output_fn`: read codes / feedback from model after forward
 - `prefill_forward_fn`: custom forward for prefill (optional)
 
-> **Note (Chenyang):**
->
-> One design point on the callback pattern in `FeedbackARModelRunner` — currently each model provides three bare functions (`write_buffers_fn`, `extract_output_fn`, `prefill_forward_fn`) that get passed in individually. This works, but the three functions are semantically coupled (they all operate on the same model's buffers) and there's nothing at the type level enforcing that coupling.
->
-> A lightweight improvement: collect them into a Strategy object.
+#### Callback pattern: bare functions vs Strategy object
+
+Each model currently provides three bare functions that get passed in individually. This works, but the three are semantically coupled — they all operate on the same model's buffers — and nothing at the type level enforces that coupling.
+
+A lightweight improvement is to collect them into a Strategy object:
 
 ```python
 class FeedbackStrategy(Protocol):
@@ -416,11 +413,7 @@ class FishTTSStrategy:
     def prefill_forward(self, ...): ...
 ```
 
-> Also, the current design groups S2 Pro (Slow AR + Fast AR) and Qwen3-Omni (Talker + MTP) under the same `FeedbackARModelRunner`. This works because in both cases, the feedback producer and receiver live inside the same ModelRunner — the loop is self-contained within one decode step.
->
-> Worth making this assumption explicit in the RFC: `FeedbackARModelRunner` covers AR models whose feedback loop is self-contained within a single ModelRunner instance. Cross-stage feedback (producer and receiver in separate schedulers, communicating via relay) is out of scope for this abstraction and would need a different design. This isn't a problem today — both models fit the self-contained shape — but documenting the boundary now prevents future contributors from trying to bend the abstraction to cover topologies it wasn't designed for.
-
-> **【TODO: Jingwen, have we done this part】**
+The bare-function form is what ships today; the Strategy form is the recommended evolution if a third self-contained model joins. The trade-off is mostly typing surface vs explicitness — neither blocks the other.
 
 ### Callback Pattern
 
@@ -471,7 +464,7 @@ models/<model_name>/
 └── components/            — Model-specific torch modules, preprocessors, encoders
 ```
 
-> **Note (Chenyang):** Tend not to over-abstract. `routing.py` and `request_builders.py` could plausibly be merged into one file — both describe the data-shape contract between consecutive stages, and splitting them across two files just adds navigation cost. (Jingwen) Request builder is a model-specific component for model requiring special format of input, such as qwen3-omni thinker-talker.
+`routing.py` and `request_builders.py` are kept separate because they answer different questions: `routing.py` decides *which* stage runs next (topology, often deterministic), while `request_builders.py` formats data for models that need special input shapes — e.g. the Qwen3-Omni thinker → talker request transform. Localizing the model-specific format logic in `request_builders.py` keeps `routing.py` thin and framework-shaped.
 
 ### Qwen3-Omni
 
@@ -498,13 +491,11 @@ models/qwen3_omni/
 │   └── common.py          — Shared helpers
 ```
 
-Speech pipeline (8 stages): `preprocessing → image_encoder → audio_encoder → aggregate → thinker → decode → talker → code2wav`
+Speech pipeline (8 stages): `preprocessing → image_encoder → audio_encoder → aggregate → thinker → decode → talker → code2wav`. The `image_encoder` and `audio_encoder` stages run in parallel — the arrow above is for layout, not sequencing — and the design leaves room for offloading either tower to CPU.
 
-> **Note (Chenyang):**
->
-> 1. `PipelineState` and `OmniEvent` are ambiguous names — both sound like they belong to the framework, but they're model-specific. Rename later. **【TODO: Jingwen, have we done this part】**
-> 2. "Image tower" / "Audio tower" — why "tower"? Inherited terminology from VLM literature. Worth aligning on either "encoder" or "tower" consistently rather than mixing. Jingwen: this is followed the name from official qwen3-omni.
-> 3. `image_encoder` → `audio_encoder` should run in parallel, not sequentially as the arrow chain might suggest. There should also be design space for offloading them to CPU. Jingwen: Changed.
+The "tower" terminology for image/audio encoders follows the official Qwen3-Omni names; we keep that vocabulary here rather than introducing a divergent local one.
+
+> **Pending — Jingwen**: `PipelineState` and `OmniEvent` are model-specific but read as framework-level types. Rename to disambiguate (suggested by Chenyang). Tracked until Jingwen confirms whether the rename landed.
 
 ### Fish Audio S2-Pro
 
@@ -557,17 +548,9 @@ stages = [
 ]
 ```
 
-> **Note (Huapeng):** I feel realtime is needed supporting streaming in, an important feature for voice agent. https://vllm.ai/blog/streaming-realtime Do we need to consider more? We will do this in https://github.com/sgl-project/sglang-omni/pull/385
+Realtime streaming-input support is a separate workstream owned by #385 and is intentionally outside the scope of this config example.[^q-realtime-streaming]
 
-> **Note(Huapeng):** /realtime feature, for low latency voice agent and realtime transcription and translation, if we accept streaming input, it can get better results and be useful in daily usecase. I think sglang omni might need to implement this and implement features in openai's realtime interface, https://developers.openai.com/api/docs/guides/realtime This will unlock voice model's potential for real use case, like https://x.com/OpenAIDevs/status/2048871260512473385?s=20. For implement this, we get a streaming audio in, at the same time, the inference engine can receive the chunk and send the SSE back via websocket. We can reference some implementation in https://vllm.ai/blog/streaming-realtime and https://github.com/sgl-project/sglang/issues/22474#issuecomment-4241744895. Detailed plan is TBD.
-
-> **Note (Chenyang):**
-> **Runtime parameter plumbing.** Critical params (`mem_fraction_static`, `thinker_max_seq_len`, soon `video_fps`) are either hardcoded deep in the stack or routed through ad-hoc overrides nobody fully understands. CLI / config-file / override paths don't compose, and every new param reinvents its own precedence resolution. The refactor needs one canonical mechanism: a typed, stage-addressable override primitive at the `PipelineConfig` layer, with CLI / config / env as thin adapters on top. All runtime params go through it. As a related symmetry gap, length validation today only guards the thinker input side; talker also needs an output-length cap, otherwise an unbounded decode loop (missed stop token, hallucination loop) hits OOM or tail latency the same way. Both should route through the same plumbing once it exists.
->
-> **Stage placement — co-location as first-class.** Two issues here, both informed by Ratish's vLLM-Omni investigation:
->
-> 1. Stages must be allowed to share GPUs. vLLM co-locates thinker + talker on one device via per-stage memory budgeting + NVML accounting. We currently hard-reject same-GPU speech-stage placement, which leaves Talker on H200 at <2% utilization long-term. The placement model must treat "any stage on any GPU" as first-class, with budgeting that accounts for co-tenants rather than rejecting the topology. (Done)
-> 2. Pick one memory-fraction semantics deliberately. vLLM's `gpu_memory_utilization` is fraction of total VRAM. SGLang's `mem_fraction_static` is fraction of remaining VRAM after weights load — more principled for single-stage LLM, but ambiguous for omni where stages load sequentially and "remaining" depends on load order. Either keep SGLang semantics with a careful sequential-allocation model, or switch to vLLM's total-VRAM semantics. Don't inherit the current ambiguity. (Done)
+Routing rule: exactly one of `next`, `route_fn`, or `terminal=True`. There is no "one thinker, multiple talkers" fan-out — talker decode requires the thinker's hidden state as prefix, so driving two independent talkers from the same prefix carries no useful semantics. Derived from stages: `entry_stage` (first stage), `terminal_stages`, `gpu_placement`, relay device.
 
 ### `StageConfig` reference
 
@@ -586,25 +569,37 @@ stages = [
 | stream_to    | list[str]        | []         | Stream hidden states / codes to these stages (parallel to normal routing)          |
 | relay        | RelayConfig      | None       | Override relay settings. Auto-inferred from gpu if not set                         |
 
-**Routing rule:** exactly one of `next`, `route_fn`, or `terminal=True`.
+#### `route_fn` contract
 
-Derived from stages: `entry_stage` (first stage), `terminal_stages`, `gpu_placement`, relay device.
+`route_fn` has narrow utility: Qwen3-Omni and Fish S2 Pro are fully covered by `next` + `stream_to`. It is only needed when the hidden state itself carries a modality tag and the downstream branch must be decided from the data (e.g. Ming, where the output if/else's into a video or audio head). The contract is therefore narrow on purpose:
 
-> **Note (Chenyang):**
->
-> 1. There is no "one thinker, multiple talkers" case. Talker decode requires the thinker's hidden state as prefix, and driving two independent talkers from the same prefix has no business meaning.
-> 2. More broadly, `route_fn` has limited utility: Qwen3-Omni and Fish S2 Pro are fully covered by `next` + `stream_to`, and it's only needed when the hidden state itself carries a modality tag and the downstream branch must be decided from the data (e.g. Ming, where the output if/else's into a video or audio head). Given the narrow use case, the contract should stay narrow — return value must be a stage already declared in `next` (so topology stays statically derivable), `None` return should be disallowed (drops belong in an explicit terminal sink, not hidden in routing), and the docstring should restrict use to data-driven modality dispatch. One field, narrow contract, easy to widen later when a real consumer shows up.
-> 3. Should we merge `factory_args` and `factory` into one field?
+- Return value must be a stage already declared in `next`, so the topology stays statically derivable.
+- Returning `None` is disallowed — drops belong in an explicit terminal sink, not hidden inside routing.
+- The docstring restricts use to data-driven modality dispatch.
+
+One field, narrow contract, easy to widen later when a real consumer shows up.
+
+#### Runtime parameter plumbing
+
+Critical runtime params (`mem_fraction_static`, `thinker_max_seq_len`, and soon `video_fps`) are today either hardcoded deep in the stack or routed through ad-hoc overrides that nobody fully understands. CLI, config-file, and override paths do not compose, and every new param reinvents its own precedence resolution.
+
+The refactor should consolidate this into one canonical mechanism: a typed, stage-addressable override primitive at the `PipelineConfig` layer, with CLI / config / env as thin adapters on top. Every runtime param then flows through the same primitive. A related symmetry gap to fix at the same time: length validation guards only the thinker input side. Talker also needs an output-length cap so an unbounded decode loop (missed stop token, hallucination loop) cannot drive OOM or tail latency the same way. Both belong on the same plumbing once it exists.
+
+#### Stage placement — same-GPU co-location
+
+Stages may share GPUs. Earlier topologies hard-rejected same-GPU speech-stage placement, which left Talker on H200 at <2% utilization long-term. Informed by Ratish's vLLM-Omni investigation (vLLM co-locates thinker + talker on a single device via per-stage memory budgeting + NVML accounting), the placement model now treats "any stage on any GPU" as first-class, with budgeting that accounts for co-tenants rather than rejecting the topology.
+
+Memory-fraction semantics have also been pinned down: vLLM's `gpu_memory_utilization` is a fraction of total VRAM, while SGLang's `mem_fraction_static` is a fraction of remaining VRAM after weights load — more principled for single-stage LLM, but ambiguous for omni where stages load sequentially and "remaining" depends on load order. The placement model now uses one explicit semantics rather than inheriting the ambiguity.
+
+Whether `factory` and `factory_args` should collapse into a single field is still open.[^q-factory-args-merge]
 
 ### `PipelineConfig` reference
 
 Derived (computed from stages, not set manually): `terminal_stages`, `gpu_placement`.
 
-> **Note (Chenyang):** The `Pipeline` vs `Stages` distinction in code needs to be sharper. Right now both names show up in different places without a crisp mental model — pin this down before the field set grows.
+There is no compiler class. An earlier proposal threaded pipeline construction through a `compiler_pipeline()` entry point, but the multi-process path (`mp_runner._build_stage_groups`) re-implemented most of the same logic independently, with two near-duplicate `_resolve_factory_args` helpers. The compiler class was removed in #447 — pipeline construction now happens through a plain init function per model, which is sufficient given how few pipelines we maintain.
 
-> **Note (Chenyang):** Open question — do we need a compiler class, or is an `init` function per model's pipeline enough? The current proposal leans toward "compiler" as a concept; I think a plain init function per pipeline is likely sufficient given how few pipelines we maintain. (compile-pipeline deleted #447)
-
-> **Note (Yichi):** `compiler_pipeline()` is described as the compilation entry point, but the multi-process path (`mp_runner._build_stage_groups`) re-implements most of the same logic independently. And two paths share some private helpers but each has its own `_resolve_factory_args` with nearly identical code. --> would suggest at least set clear boundary on responsibility of each class, either let compiler class be single compilation entry point, or discard compiler class. Jingwen: (fixed, #447)
+The `Pipeline` vs `Stages` distinction in code still needs to be sharper: both names appear in different places without a crisp mental model. This should be pinned down before the field set grows further.
 
 ---
 
@@ -640,21 +635,23 @@ graph TB
     Main -->|ZMQ| P3
 ```
 
-> **Note (Chenyang):** `stage_group.py` and `stage_process.py` are tightly coupled — `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass. None of the three justifies its own file. Merging into a single `stage_workers.py` keeps everything about "how a stage's processes get defined, spawned, and managed" in one place, and leaves `mp_runner.py` focused on cross-stage orchestration. Two files, cleaner ownership.
-
-> **【TODO: Jingwen, have we merged these files】**
+> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass — none of the three justifies its own file. Consolidating keeps "how a stage's processes get defined, spawned, and managed" in one place and leaves `mp_runner.py` focused on cross-stage orchestration. Awaiting confirmation of whether this landed.
 
 ### `StageProcessSpec`
 
 A fully-resolved, picklable dataclass built once in the main process. Subprocesses never re-compile the pipeline config — they just construct a `Stage` from the spec and run it.
 
-> **Note (Chenyang):** "Spec" is too vague a class name. Rename to `StageLaunchConfig`.
+A rename to `StageLaunchConfig` would carry the same meaning more clearly; this remains an open suggestion.[^q-spec-rename]
 
 The main process resolves all dotted strings, injects `model_path` / `gpu_id` into factory args, allocates ZMQ endpoints, and computes stream targets and relay config. The spec captures everything the child process needs.
 
 The subprocess entrypoint (`stage_process_main`) is ~40 lines: import factory, call it, build routing callable from `route_fn` or `next_stages`, build input handler from `wait_for` / `merge_fn`, construct `Stage`, run.
 
-> **Note (Chenyang):** Promoting `tp_size` to a top-level field treats TP as special, but it's just one parallelism axis. Qwen3-Omni's Thinker is MoE and could want EP; throughput-oriented stages might want DP across replicas. If we add those later, we'll end up with `tp_size` / `ep_size` / `dp_size` proliferating at the top level. Cleaner to group them under a single `parallelism: ParallelismConfig` field now — `ParallelismConfig(tp=N)` reads as clearly as `tp_size=N` and leaves room to add `ep`, `dp` without further schema churn. If the intent is TP-only for the foreseeable future, at least document that explicitly so readers don't assume other strategies were deliberately excluded. (maybe we should add this as we get more parallelism and not now, or the class will only have tp attribute, increasing visual burden)
+#### Parallelism axes — TP today, extension path
+
+`StageProcessSpec` exposes `tp_size` as a top-level field. This treats TP as a special axis, but it is only one of several plausible parallelism strategies — Qwen3-Omni's Thinker is MoE and could want EP, and throughput-oriented stages might want DP across replicas. If we add either later, we will accumulate `tp_size` / `ep_size` / `dp_size` at the top level.
+
+The cleaner long-term shape is to group them under a single `parallelism: ParallelismConfig` field — `ParallelismConfig(tp=N)` reads as clearly as `tp_size=N` and leaves room to add `ep` and `dp` without further schema churn. We are intentionally not making that change now: with only TP in use, a `ParallelismConfig` would have exactly one attribute and add visual weight without adding capability. The intended migration is to introduce the group field at the same time as the second parallelism axis lands.
 
 ### `StageGroup`
 
@@ -748,6 +745,22 @@ Everything else (`Stage`, `Coordinator`, `OmniScheduler`, `ModelRunner`, relay, 
 ---
 
 ## tp_size
+
+> **Pending — Jingwen**: empty section in the original Lark export — likely intended as a TP-specific subsection but never filled. Resolve by either writing it out or dropping the heading. Tracked here until a decision lands.
+
+---
+
+## Open design questions
+
+These are surfaced for visibility — none block current work. Footnotes from earlier sections land here.
+
+[^q-thinker-codepredictor-split]: **Thinker vs CodePredictor scheduler split.** `CodePredictor` is currently placed under Talker, but the KV cache shape diverges from `ThinkerScheduler` enough that a documented separation may be warranted. No proposal is on the table yet; tracking here so future scheduler refactors revisit it. (raised by Chenyang)
+
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** PR #385 introduces a `/realtime` endpoint for streaming-in audio with WebSocket-backed SSE response, aligned with the OpenAI realtime interface. The detailed protocol — chunk framing, partial-result emission, cancellation semantics — is still being worked out in #385 and is intentionally not specified here. (raised by Huapeng)
+
+[^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
+
+[^q-spec-rename]: **`StageProcessSpec` → `StageLaunchConfig` rename.** "Spec" is vague; `StageLaunchConfig` reads as what it is — the picklable record of everything a subprocess needs to launch a stage. Cosmetic but worth doing the next time the class is touched. (raised by Chenyang)
 
 ---
 
