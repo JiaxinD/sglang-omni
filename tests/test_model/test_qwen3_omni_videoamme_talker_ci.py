@@ -25,31 +25,35 @@ from benchmarks.eval.benchmark_omni_videomme import VideoEvalConfig
 from benchmarks.metrics.performance import print_speed_summary
 from benchmarks.metrics.video import print_videomme_accuracy_summary
 from benchmarks.metrics.wer import print_wer_summary
+from tests.test_model.omni_router_utils import (
+    ManagedRouterHandle,
+    router_worker_traffic_guard,
+)
 from tests.utils import (
-    ServerHandle,
+    MetricCheckCollector,
     apply_slack,
     apply_wer_slack,
     assert_speed_thresholds,
     assert_wer_partitioned,
 )
 
-CONCURRENCY = 8
-MAX_SAMPLES = 10
+CONCURRENCY = 16
+MAX_SAMPLES = 20
 MAX_TOKENS = 256
 
-VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY = 0.4
-VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX = 0.0133
+VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY = 0.65
+VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX = 0.010596026490066225
 VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(
     VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX
 )
 VIDEOAMME_TALKER_N_ABOVE_50_MAX = 1
 
 _VIDEOAMME_TALKER_AUDIO_P95 = {
-    8: {
-        "throughput_qps": 0.231,
-        "tok_per_s_agg": 1.5,
-        "latency_mean_s": 30.169,
-        "rtf_mean": 4.9824,
+    16: {
+        "throughput_qps": 0.624,
+        "tok_per_s_agg": 2.2,
+        "latency_mean_s": 20.656,
+        "rtf_mean": 3.7926,
     },
 }
 VIDEOAMME_TALKER_THRESHOLDS = apply_slack(_VIDEOAMME_TALKER_AUDIO_P95)
@@ -57,7 +61,7 @@ VIDEOAMME_TALKER_THRESHOLDS = apply_slack(_VIDEOAMME_TALKER_AUDIO_P95)
 
 @pytest.mark.benchmark
 def test_videoamme_talker_accuracy_wer_and_speed(
-    qwen3_omni_talker_server: ServerHandle,
+    qwen3_omni_talker_server: ManagedRouterHandle,
     tmp_path: Path,
 ) -> None:
     """Run Video-AMME with Talker enabled and report text/audio metrics."""
@@ -77,7 +81,11 @@ def test_videoamme_talker_accuracy_wer_and_speed(
         disable_tqdm=False,
         timeout_s=500,
     )
-    results = asyncio.run(run_videoamme_eval(config))
+    with router_worker_traffic_guard(
+        qwen3_omni_talker_server,
+        label="Qwen3-Omni Video-AMME Talker",
+    ) as router_guard:
+        results = asyncio.run(run_videoamme_eval(config))
 
     summary = results["summary"]
     print_videomme_accuracy_summary(
@@ -91,27 +99,46 @@ def test_videoamme_talker_accuracy_wer_and_speed(
         CONCURRENCY,
         title="Video-AMME Talker Speed",
     )
-    print_wer_summary(results["wer"]["summary"], config.model)
+    if "wer" in results:
+        print_wer_summary(results["wer"]["summary"], config.model)
     failed = summary.get("failed", 0)
     total = summary.get("total_samples", 0)
-    assert failed == 0, (
+    checks = MetricCheckCollector("Video-AMME Talker accuracy, WER, and speed")
+    checks.check_assertion(
+        "router traffic",
+        router_guard.assert_served,
+        min_total_requests=total,
+    )
+    checks.check(
+        failed == 0,
         f"Video-AMME Talker had {failed}/{total} failed requests "
-        f"(timeouts or empty responses); any failure fails the test"
+        f"(timeouts or empty responses); any failure fails the test",
     )
-    assert summary["accuracy"] >= VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY, (
-        f"Video-AMME Talker thinker-text accuracy {summary['accuracy']:.4f} "
-        f"({summary['accuracy'] * 100:.1f}%) < "
-        f"threshold {VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY} "
-        f"({VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY * 100:.0f}%)"
-    )
+    accuracy = summary.get("accuracy")
+    if accuracy is None:
+        checks.fail("Video-AMME Talker thinker-text accuracy missing from summary")
+    else:
+        checks.check(
+            accuracy >= VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY,
+            f"Video-AMME Talker thinker-text accuracy {accuracy:.4f} "
+            f"({accuracy * 100:.1f}%) < "
+            f"threshold {VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY} "
+            f"({VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY * 100:.0f}%)",
+        )
 
-    assert "wer" in results, "Audio WER results missing from Video-AMME Talker output"
-    assert_wer_partitioned(
-        results["wer"],
-        max_wer_below_50_corpus=VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_THRESHOLD,
-        max_n_above_50=VIDEOAMME_TALKER_N_ABOVE_50_MAX,
+    if "wer" not in results:
+        checks.fail("Audio WER results missing from Video-AMME Talker output")
+    else:
+        assert_wer_partitioned(
+            results["wer"],
+            max_wer_below_50_corpus=VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_THRESHOLD,
+            max_n_above_50=VIDEOAMME_TALKER_N_ABOVE_50_MAX,
+            collector=checks,
+        )
+    assert_speed_thresholds(
+        results["speed"], VIDEOAMME_TALKER_THRESHOLDS, CONCURRENCY, collector=checks
     )
-    assert_speed_thresholds(results["speed"], VIDEOAMME_TALKER_THRESHOLDS, CONCURRENCY)
+    checks.assert_all()
 
 
 if __name__ == "__main__":

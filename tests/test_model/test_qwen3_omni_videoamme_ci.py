@@ -21,18 +21,22 @@ from benchmarks.eval.benchmark_omni_videoamme import run_videoamme_eval
 from benchmarks.eval.benchmark_omni_videomme import VideoEvalConfig
 from benchmarks.metrics.performance import print_speed_summary
 from benchmarks.metrics.video import print_videomme_accuracy_summary
-from tests.utils import ServerHandle, apply_slack, assert_speed_thresholds
+from tests.test_model.omni_router_utils import (
+    ManagedRouterHandle,
+    router_worker_traffic_guard,
+)
+from tests.utils import MetricCheckCollector, apply_slack, assert_speed_thresholds
 
 CONCURRENCY = 16
-MAX_SAMPLES = 30
+MAX_SAMPLES = 50
 
-VIDEOAMME_MIN_ACCURACY = 0.6667
+VIDEOAMME_MIN_ACCURACY = 0.66
 
 _VIDEOAMME_P95 = {
     16: {
-        "throughput_qps": 0.237,
-        "tok_per_s_agg": 0.9,
-        "latency_mean_s": 51.414,
+        "throughput_qps": 1.046,
+        "tok_per_s_agg": 3.1,
+        "latency_mean_s": 13.662,
     },
 }
 VIDEOAMME_THRESHOLDS = apply_slack(_VIDEOAMME_P95)
@@ -40,10 +44,10 @@ VIDEOAMME_THRESHOLDS = apply_slack(_VIDEOAMME_P95)
 
 @pytest.mark.benchmark
 def test_videoamme_accuracy_and_speed(
-    qwen3_omni_thinker_server: ServerHandle,
+    qwen3_omni_thinker_server: ManagedRouterHandle,
     tmp_path: Path,
 ) -> None:
-    """Run first 30 of videoamme-ci-50 at concurrency=16 and report accuracy + speed."""
+    """Run videoamme-ci-50 at concurrency=16 and report accuracy + speed."""
     config = VideoEvalConfig(
         model="qwen3-omni",
         port=qwen3_omni_thinker_server.port,
@@ -57,7 +61,11 @@ def test_videoamme_accuracy_and_speed(
         disable_tqdm=False,
         timeout_s=500,
     )
-    results = asyncio.run(run_videoamme_eval(config))
+    with router_worker_traffic_guard(
+        qwen3_omni_thinker_server,
+        label="Qwen3-Omni Video-AMME",
+    ) as router_guard:
+        results = asyncio.run(run_videoamme_eval(config))
 
     summary = results["summary"]
     print_videomme_accuracy_summary(
@@ -73,16 +81,31 @@ def test_videoamme_accuracy_and_speed(
     )
     failed = summary.get("failed", 0)
     total = summary.get("total_samples", 0)
-    assert failed == 0, (
+    checks = MetricCheckCollector("Video-AMME accuracy and speed")
+    checks.check_assertion(
+        "router traffic",
+        router_guard.assert_served,
+        min_total_requests=total,
+    )
+    checks.check(
+        failed == 0,
         f"Video-AMME had {failed}/{total} failed requests "
-        f"(timeouts or empty responses); any failure fails the test"
+        f"(timeouts or empty responses); any failure fails the test",
     )
-    assert summary["accuracy"] >= VIDEOAMME_MIN_ACCURACY, (
-        f"Video-AMME accuracy {summary['accuracy']:.4f} "
-        f"({summary['accuracy'] * 100:.1f}%) < "
-        f"threshold {VIDEOAMME_MIN_ACCURACY} ({VIDEOAMME_MIN_ACCURACY * 100:.0f}%)"
+    accuracy = summary.get("accuracy")
+    if accuracy is None:
+        checks.fail("Video-AMME accuracy missing from summary")
+    else:
+        checks.check(
+            accuracy >= VIDEOAMME_MIN_ACCURACY,
+            f"Video-AMME accuracy {accuracy:.4f} "
+            f"({accuracy * 100:.1f}%) < "
+            f"threshold {VIDEOAMME_MIN_ACCURACY} ({VIDEOAMME_MIN_ACCURACY * 100:.0f}%)",
+        )
+    assert_speed_thresholds(
+        results["speed"], VIDEOAMME_THRESHOLDS, CONCURRENCY, collector=checks
     )
-    assert_speed_thresholds(results["speed"], VIDEOAMME_THRESHOLDS, CONCURRENCY)
+    checks.assert_all()
 
 
 if __name__ == "__main__":

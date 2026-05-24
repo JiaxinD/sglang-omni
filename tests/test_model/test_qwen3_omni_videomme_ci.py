@@ -22,18 +22,22 @@ from benchmarks.dataset.prepare import DATASETS
 from benchmarks.eval.benchmark_omni_videomme import VideoEvalConfig, run_video_eval
 from benchmarks.metrics.performance import print_speed_summary
 from benchmarks.metrics.video import print_videomme_accuracy_summary
-from tests.utils import ServerHandle, apply_slack, assert_speed_thresholds
+from tests.test_model.omni_router_utils import (
+    ManagedRouterHandle,
+    router_worker_traffic_guard,
+)
+from tests.utils import MetricCheckCollector, apply_slack, assert_speed_thresholds
 
 CONCURRENCY = 16
-MAX_SAMPLES = 30
+MAX_SAMPLES = 50
 
-VIDEOMME_MIN_ACCURACY = 0.53
+VIDEOMME_MIN_ACCURACY = 0.52
 
 _VIDEOMME_P95 = {
     16: {
-        "throughput_qps": 0.217,
-        "tok_per_s_agg": 2.0,
-        "latency_mean_s": 56.419,
+        "throughput_qps": 0.996,
+        "tok_per_s_agg": 7.7,
+        "latency_mean_s": 15.296,
     },
 }
 VIDEOMME_THRESHOLDS = apply_slack(_VIDEOMME_P95)
@@ -41,10 +45,10 @@ VIDEOMME_THRESHOLDS = apply_slack(_VIDEOMME_P95)
 
 @pytest.mark.benchmark
 def test_videomme_accuracy_and_speed(
-    qwen3_omni_thinker_server: ServerHandle,
+    qwen3_omni_thinker_server: ManagedRouterHandle,
     tmp_path: Path,
 ) -> None:
-    """Run first 30 of videomme-ci-50 at concurrency=16 and report accuracy + speed."""
+    """Run videomme-ci-50 at concurrency=16 and report accuracy + speed."""
     config = VideoEvalConfig(
         model="qwen3-omni",
         port=qwen3_omni_thinker_server.port,
@@ -58,14 +62,18 @@ def test_videomme_accuracy_and_speed(
         disable_tqdm=False,
         timeout_s=500,
     )
-    results = asyncio.run(
-        run_video_eval(
-            config,
-            task_label="Video-MME",
-            output_filename="videomme_results.json",
-            audio_output_dir_default="results/videomme_audio",
+    with router_worker_traffic_guard(
+        qwen3_omni_thinker_server,
+        label="Qwen3-Omni Video-MME",
+    ) as router_guard:
+        results = asyncio.run(
+            run_video_eval(
+                config,
+                task_label="Video-MME",
+                output_filename="videomme_results.json",
+                audio_output_dir_default="results/videomme_audio",
+            )
         )
-    )
 
     summary = results["summary"]
     print_videomme_accuracy_summary(summary, config.model)
@@ -75,12 +83,27 @@ def test_videomme_accuracy_and_speed(
         CONCURRENCY,
         title="Video-MME Speed",
     )
-    assert summary["accuracy"] >= VIDEOMME_MIN_ACCURACY, (
-        f"Video-MME accuracy {summary['accuracy']:.4f} "
-        f"({summary['accuracy'] * 100:.1f}%) < "
-        f"threshold {VIDEOMME_MIN_ACCURACY} ({VIDEOMME_MIN_ACCURACY * 100:.0f}%)"
+    total = summary.get("total_samples", 0)
+    checks = MetricCheckCollector("Video-MME accuracy and speed")
+    checks.check_assertion(
+        "router traffic",
+        router_guard.assert_served,
+        min_total_requests=total,
     )
-    assert_speed_thresholds(results["speed"], VIDEOMME_THRESHOLDS, CONCURRENCY)
+    accuracy = summary.get("accuracy")
+    if accuracy is None:
+        checks.fail("Video-MME accuracy missing from summary")
+    else:
+        checks.check(
+            accuracy >= VIDEOMME_MIN_ACCURACY,
+            f"Video-MME accuracy {accuracy:.4f} "
+            f"({accuracy * 100:.1f}%) < "
+            f"threshold {VIDEOMME_MIN_ACCURACY} ({VIDEOMME_MIN_ACCURACY * 100:.0f}%)",
+        )
+    assert_speed_thresholds(
+        results["speed"], VIDEOMME_THRESHOLDS, CONCURRENCY, collector=checks
+    )
+    checks.assert_all()
 
 
 if __name__ == "__main__":

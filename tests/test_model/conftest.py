@@ -3,9 +3,16 @@
 
 from __future__ import annotations
 
-import sys
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from typing import Generator
+
+    from tests.utils import ServerHandle
 
 S2PRO_TTS_ALLOWED_CONCURRENCIES = (1, 2, 4, 8, 16)
 S2PRO_STAGE_NONSTREAM = "s2pro-stage-1-nonstream"
@@ -23,46 +30,120 @@ SELECTED_S2PRO_TTS_CONCURRENCIES = pytest.StashKey[tuple[int, ...]]()
 S2PRO_STAGE_OPTION = "--s2pro-stage"
 SELECTED_S2PRO_CI_STAGE = pytest.StashKey[str]()
 QWEN3_OMNI_MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-QWEN3_OMNI_STARTUP_TIMEOUT = 300
+# Single source of truth for the model path used by Qwen3-Omni vision-encoder
+# benchmarks and the SGLang state they bring up. Honors
+# ``SGLANG_OMNI_TEST_QWEN3_MODEL=/local/path`` so an offline runner does not
+# fall back to the HF hub name in ``ServerArgs.model_path``.
+QWEN3_OMNI_TEST_MODEL_PATH = os.environ.get(
+    "SGLANG_OMNI_TEST_QWEN3_MODEL", QWEN3_OMNI_MODEL_PATH
+)
+QWEN3_OMNI_MODEL_NAME = "qwen3-omni"
+QWEN3_OMNI_ROUTER_WAIT_TIMEOUT = 180
+QWEN3_OMNI_COLOCATED_WORKER_ARGS = (
+    "--config examples/configs/qwen3_omni_colocated_h20.yaml --colocate"
+)
+QWEN3_OMNI_MMSU_WORKER_ARGS = (
+    "--config examples/configs/qwen3_omni_mmsu.yaml --text-only"
+)
+QWEN3_OMNI_VIDEO_WORKER_ARGS = (
+    f"{QWEN3_OMNI_COLOCATED_WORKER_ARGS} "
+    "--stages.0.factory-args.thinker-max-seq-len 32768 "
+    "--stages.4.factory-args.thinker-max-seq-len 32768"
+)
+
+
+@pytest.fixture(scope="module")
+def qwen3_omni_router_server(tmp_path_factory: pytest.TempPathFactory):
+    """Start two colocated Qwen3-Omni workers behind the router."""
+    with _launch_qwen3_omni_router(
+        tmp_path_factory,
+        worker_extra_args=QWEN3_OMNI_COLOCATED_WORKER_ARGS,
+    ) as router:
+        yield router
+
+
+@pytest.fixture(scope="module")
+def qwen3_omni_mmsu_server(tmp_path_factory: pytest.TempPathFactory):
+    """Router-backed Qwen3-Omni endpoint tuned for MMSU text-output CI."""
+    with _launch_qwen3_omni_router(
+        tmp_path_factory,
+        worker_extra_args=QWEN3_OMNI_MMSU_WORKER_ARGS,
+    ) as router:
+        yield router
 
 
 @pytest.fixture(scope="module")
 def qwen3_omni_thinker_server(tmp_path_factory: pytest.TempPathFactory):
-    """Start the text-only Qwen3-Omni server and wait until healthy."""
-    from sglang_omni.utils import find_available_port
-    from tests.utils import (
-        ServerHandle,
-        server_log_file,
-        start_server_from_cmd,
-        stop_server,
-    )
-
-    port = find_available_port()
-    log_file = server_log_file(tmp_path_factory)
-    cmd = [
-        sys.executable,
-        "examples/run_qwen3_omni_server.py",
-        "--model-path",
-        QWEN3_OMNI_MODEL_PATH,
-        "--port",
-        str(port),
-        "--model-name",
-        "qwen3-omni",
-        "--thinker-max-seq-len",
-        "32768",
-        "--mem-fraction-static",
-        "0.78",
-    ]
-    proc = start_server_from_cmd(
-        cmd, log_file, port, timeout=QWEN3_OMNI_STARTUP_TIMEOUT
-    )
-    yield ServerHandle(proc=proc, port=port)
-    stop_server(proc)
+    """Router-backed Qwen3-Omni endpoint used by text-output benchmarks."""
+    with _launch_qwen3_omni_router(
+        tmp_path_factory,
+        worker_extra_args=QWEN3_OMNI_VIDEO_WORKER_ARGS,
+    ) as router:
+        yield router
 
 
 @pytest.fixture(scope="module")
 def qwen3_omni_talker_server(tmp_path_factory: pytest.TempPathFactory):
-    """Start the Qwen3-Omni speech server and wait until healthy."""
+    """Router-backed Qwen3-Omni endpoint used by audio-output benchmarks."""
+    with _launch_qwen3_omni_router(
+        tmp_path_factory,
+        worker_extra_args=QWEN3_OMNI_VIDEO_WORKER_ARGS,
+    ) as router:
+        yield router
+
+
+@pytest.fixture(scope="module")
+def qwen3_omni_talker_server_tp2(tmp_path_factory: pytest.TempPathFactory):
+    """Start Qwen3-Omni TP=2 thinker + disaggregated talker on the same two-card host."""
+    yield from _start_qwen3_omni_speech_server(
+        tmp_path_factory,
+        extra_args=[
+            "--thinker-tp-size",
+            "2",
+            "--gpu-thinker-tp",
+            "0,1",
+            "--gpu-talker",
+            "1",
+            "--gpu-code2wav",
+            "1",
+            "--thinker-mem-fraction-static",
+            "0.55",
+            "--talker-mem-fraction-static",
+            "0.20",
+        ],
+        timeout=450,
+        log_prefix="server_logs_tp2",
+        force_log=True,
+    )
+
+
+def _launch_qwen3_omni_router(
+    tmp_path_factory: pytest.TempPathFactory,
+    *,
+    worker_extra_args: str,
+):
+    from tests.test_model.omni_router_utils import launch_managed_router
+
+    return launch_managed_router(
+        tmp_path_factory=tmp_path_factory,
+        model_path=QWEN3_OMNI_TEST_MODEL_PATH,
+        model_name=QWEN3_OMNI_MODEL_NAME,
+        worker_extra_args=worker_extra_args,
+        wait_timeout=QWEN3_OMNI_ROUTER_WAIT_TIMEOUT,
+    )
+
+
+def _start_qwen3_omni_speech_server(
+    tmp_path_factory: pytest.TempPathFactory,
+    *,
+    extra_args: list[str],
+    timeout: int,
+    log_prefix: str,
+    force_log: bool,
+) -> Generator[ServerHandle, None, None]:
+    """Shared bring-up for run_qwen3_omni_speech_server.py-based fixtures."""
+    import sys
+
     from sglang_omni.utils import find_available_port
     from tests.utils import (
         ServerHandle,
@@ -72,32 +153,142 @@ def qwen3_omni_talker_server(tmp_path_factory: pytest.TempPathFactory):
     )
 
     port = find_available_port()
-    log_file = server_log_file(tmp_path_factory)
+    log_file = (
+        tmp_path_factory.mktemp(log_prefix) / "server.log"
+        if force_log
+        else server_log_file(tmp_path_factory, prefix=log_prefix)
+    )
     cmd = [
         sys.executable,
         "examples/run_qwen3_omni_speech_server.py",
         "--model-path",
-        QWEN3_OMNI_MODEL_PATH,
-        "--gpu-thinker",
-        "0",
-        "--gpu-talker",
-        "1",
-        "--gpu-code2wav",
-        "1",
+        QWEN3_OMNI_TEST_MODEL_PATH,
         "--port",
         str(port),
         "--model-name",
         "qwen3-omni",
         "--thinker-max-seq-len",
         "32768",
-        "--thinker-mem-fraction-static",
-        "0.78",
+        *extra_args,
     ]
-    proc = start_server_from_cmd(
-        cmd, log_file, port, timeout=QWEN3_OMNI_STARTUP_TIMEOUT
+    proc = start_server_from_cmd(cmd, log_file, port, timeout=timeout, tee=force_log)
+    try:
+        yield ServerHandle(proc=proc, port=port, log_file=log_file)
+    finally:
+        stop_server(proc)
+
+
+def _model_cache_present(model_path: str) -> bool:
+    """Return True iff *model_path* is either a local directory or an
+    already-resolvable HF snapshot. Avoids triggering a multi-GB download
+    on a CI runner that did not opt in.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return False
+    if Path(model_path).exists():
+        return True
+    try:
+        snapshot_download(model_path, local_files_only=True)
+    except Exception:
+        return False
+    return True
+
+
+def resolve_qwen3_omni_model_dir(model_path: str) -> Path:
+    """Return the model directory without triggering a download. Caller is
+    responsible for confirming the cache is populated (see
+    :func:`_model_cache_present`).
+    """
+    if Path(model_path).exists():
+        return Path(model_path)
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(model_path, local_files_only=True))
+
+
+@pytest.fixture(scope="module")
+def cuda_device():
+    """CUDA device for Qwen3-Omni benchmarks. Skips when CUDA is unavailable
+    or the Qwen3-Omni checkpoint is not in the local HF cache."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    if not _model_cache_present(QWEN3_OMNI_TEST_MODEL_PATH):
+        pytest.skip(
+            f"{QWEN3_OMNI_TEST_MODEL_PATH} is not in the local HF cache; this "
+            f"benchmark test refuses to auto-download a multi-GB checkpoint. "
+            f"Pre-populate the cache or set SGLANG_OMNI_TEST_QWEN3_MODEL to a "
+            f"local path."
+        )
+    torch.cuda.set_device(0)
+    return torch.device("cuda:0")
+
+
+@pytest.fixture(scope="session")
+def qwen3_omni_vision_sglang_env():
+    """Process-global SGLang dist + DP-attention bring-up shared by every
+    Qwen3-Omni vision-encoder benchmark module in ``tests/test_model``.
+
+    SGLang's TP group, DP-attention group, and global server-args slot are
+    all process-global. Two benchmark modules that each owned an unguarded
+    ``initialize_model_parallel`` call would trip an already-initialized
+    assertion when the combined command ``pytest -m benchmark tests/test_model``
+    runs them in the same process. Hoisting the bring-up to a session
+    fixture means it executes at most once per session; the explicit
+    ``model_parallel_is_initialized`` / ``torch.distributed.is_initialized``
+    guards are belt-and-suspenders against an external initializer.
+    """
+    import torch
+    import torch.distributed as torch_dist
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.cuda.set_device(0)
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29550")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "lo")
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
+    os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+
+    from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.distributed.parallel_state import (
+        init_distributed_environment,
+        initialize_model_parallel,
+        model_parallel_is_initialized,
     )
-    yield ServerHandle(proc=proc, port=port)
-    stop_server(proc)
+    from sglang.srt.layers.dp_attention import initialize_dp_attention
+    from sglang.srt.models.qwen3_omni_moe import (  # noqa: F401 -- lazy-import order
+        Qwen3OmniMoeVisionEncoder,
+    )
+    from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
+
+    if not torch_dist.is_initialized():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"tcp://127.0.0.1:{os.environ['MASTER_PORT']}",
+            local_rank=0,
+            backend="nccl",
+        )
+    if not model_parallel_is_initialized():
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
+    sa = ServerArgs(
+        model_path=QWEN3_OMNI_TEST_MODEL_PATH,
+        trust_remote_code=True,
+        tp_size=1,
+        dtype="bfloat16",
+        disable_cuda_graph=True,
+        random_seed=123,
+    )
+    set_global_server_args_for_scheduler(sa)
+    initialize_dp_attention(sa, ModelConfig.from_server_args(sa))
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

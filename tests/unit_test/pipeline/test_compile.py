@@ -4,17 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from sglang_omni.config.compiler import compile_pipeline, prepare_pipeline_runtime
 from sglang_omni.config.schema import EndpointsConfig, PipelineConfig
 from sglang_omni.pipeline.mp_runner import _build_stage_groups
-from sglang_omni.pipeline.stage.input import AggregatedInput
-from sglang_omni.pipeline.stage.stream_queue import StreamQueue
+from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
 from sglang_omni.pipeline.stage_process import get_stage_process_env
-from tests.unit_test.fixtures.pipeline_fakes import (
-    FakeMpContext,
-    FakeRelay,
-    fake_factory_path,
-)
+from tests.unit_test.fixtures.pipeline_fakes import FakeMpContext, fake_factory_path
 from tests.unit_test.pipeline.helpers import stage
 
 
@@ -48,23 +42,48 @@ def test_pipeline_schema_keeps_topology_and_validation_contracts() -> None:
             model_path="model",
             stages=[stage("tp", gpu=[0], tp_size=2, terminal=True)],
         )
+    with pytest.raises(ValueError, match="route_fn on a terminal stage"):
+        PipelineConfig(
+            model_path="model",
+            stages=[
+                stage(
+                    "decode",
+                    terminal=True,
+                    route_fn=fake_factory_path("identity_route"),
+                )
+            ],
+        )
+    with pytest.raises(ValueError, match="stream_done_to_fn without stream_to"):
+        PipelineConfig(
+            model_path="model",
+            stages=[
+                stage(
+                    "thinker",
+                    next="decode",
+                    stream_done_to_fn=fake_factory_path("identity_stream_targets"),
+                ),
+                stage("decode", terminal=True),
+            ],
+        )
+    with pytest.raises(ValueError, match="wait_for_fn but no wait_for"):
+        PipelineConfig(
+            model_path="model",
+            stages=[
+                stage(
+                    "aggregate",
+                    terminal=True,
+                    wait_for_fn=fake_factory_path("identity_wait_sources"),
+                )
+            ],
+        )
 
 
-def test_compile_pipeline_wires_routes_overrides_aggregation_and_streams(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_runner_specs_wire_routes_overrides_aggregation_and_streams(tmp_path) -> None:
     """Preserves config-to-runtime wiring for routes, overrides, fan-in, and streams."""
-    import sglang_omni.pipeline.stage.runtime as runtime
-
-    monkeypatch.setattr(
-        runtime,
-        "create_relay",
-        lambda relay_type, **kwargs: FakeRelay(device=kwargs.get("device", "cpu")),
-    )
     config = PipelineConfig(
         model_path="global-model",
         name="contract",
-        endpoints=EndpointsConfig(scheme="tcp"),
+        endpoints=EndpointsConfig(base_path=str(tmp_path)),
         runtime_overrides={"thinker": {"model_path": "runtime-model", "extra": "rt"}},
         stages=[
             stage("preprocess", next=["thinker", "aggregate"]),
@@ -74,11 +93,14 @@ def test_compile_pipeline_wires_routes_overrides_aggregation_and_streams(
                 factory_args={"extra": "factory"},
                 gpu=0,
                 next="aggregate",
+                route_fn=fake_factory_path("identity_route"),
                 stream_to=["talker"],
+                stream_done_to_fn=fake_factory_path("identity_stream_targets"),
             ),
             stage(
                 "aggregate",
                 wait_for=["preprocess", "thinker"],
+                wait_for_fn=fake_factory_path("identity_wait_sources"),
                 merge_fn=fake_factory_path("merge_payloads"),
                 terminal=True,
             ),
@@ -86,24 +108,43 @@ def test_compile_pipeline_wires_routes_overrides_aggregation_and_streams(
         ],
     )
 
-    coordinator, stages = compile_pipeline(config)
-    stage_map = {compiled.name: compiled for compiled in stages}
+    prep = prepare_pipeline_runtime(config)
+    try:
+        group = _build_stage_groups(
+            config,
+            ctx=FakeMpContext(),
+            stages_cfg=prep.stages_cfg,
+            name_map=prep.name_map,
+            endpoints=prep.endpoints,
+            placement_plan=prep.placement_plan,
+            process_plan=prep.process_plan,
+        )[0]
+    finally:
+        assert prep.runtime_dir is not None
+        prep.runtime_dir.close()
+    specs = {spec.stage_name: spec for spec in group.specs}
 
-    assert coordinator.entry_stage == "preprocess"
-    assert stage_map["preprocess"].get_next("req", None) == ["thinker", "aggregate"]
-    assert isinstance(stage_map["aggregate"].input_handler, AggregatedInput)
-    assert isinstance(stage_map["talker"]._stream_queue, StreamQueue)
-    assert stage_map["thinker"]._same_gpu_targets == {"talker"}
-    assert stage_map["thinker"].scheduler.model_path == "runtime-model"
-    assert stage_map["thinker"].scheduler.factory_kwargs["extra"] == "rt"
+    assert prep.entry_stage == "preprocess"
+    assert specs["preprocess"].next_stages == ["thinker", "aggregate"]
+    assert specs["thinker"].route_fn == fake_factory_path("identity_route")
+    assert specs["thinker"].stream_done_to_fn == fake_factory_path(
+        "identity_stream_targets"
+    )
+    assert specs["aggregate"].wait_for == ["preprocess", "thinker"]
+    assert specs["aggregate"].wait_for_fn == fake_factory_path("identity_wait_sources")
+    assert specs["aggregate"].merge_fn == fake_factory_path("merge_payloads")
+    assert specs["talker"].is_stream_receiver
+    assert specs["thinker"].same_gpu_targets == {"talker"}
+    assert specs["thinker"].factory_args["model_path"] == "runtime-model"
+    assert specs["thinker"].factory_args["extra"] == "rt"
 
 
-def test_mp_runner_preserves_tp_rank_and_visible_device_contracts() -> None:
+def test_mp_runner_preserves_tp_rank_and_visible_device_contracts(tmp_path) -> None:
     """Preserves TP process specs and one-visible-device env mapping."""
     config = PipelineConfig(
         model_path="model",
         name="mp",
-        endpoints=EndpointsConfig(scheme="tcp"),
+        endpoints=EndpointsConfig(base_path=str(tmp_path)),
         relay_backend="nccl",
         stages=[
             stage(
@@ -116,14 +157,19 @@ def test_mp_runner_preserves_tp_rank_and_visible_device_contracts() -> None:
         ],
     )
     prep = prepare_pipeline_runtime(config)
-
-    group = _build_stage_groups(
-        config,
-        ctx=FakeMpContext(),
-        stages_cfg=prep.stages_cfg,
-        name_map=prep.name_map,
-        endpoints=prep.endpoints,
-    )[0]
+    try:
+        group = _build_stage_groups(
+            config,
+            ctx=FakeMpContext(),
+            stages_cfg=prep.stages_cfg,
+            name_map=prep.name_map,
+            endpoints=prep.endpoints,
+            placement_plan=prep.placement_plan,
+            process_plan=prep.process_plan,
+        )[0]
+    finally:
+        assert prep.runtime_dir is not None
+        prep.runtime_dir.close()
     leader, follower = group.specs
     env = get_stage_process_env(follower, env={"CUDA_VISIBLE_DEVICES": "4,5,6,7"})
 
@@ -133,3 +179,29 @@ def test_mp_runner_preserves_tp_rank_and_visible_device_contracts() -> None:
     assert follower.factory_args["tp_rank"] == 1
     assert leader.factory_args["nccl_port"] == follower.factory_args["nccl_port"]
     assert env["CUDA_VISIBLE_DEVICES"] == "7"
+
+
+def test_mp_runner_keeps_cpu_stage_without_gpu_identity(tmp_path) -> None:
+    config = PipelineConfig(
+        model_path="model",
+        name="mp",
+        endpoints=EndpointsConfig(base_path=str(tmp_path)),
+        stages=[stage("preprocess", next="decode"), stage("decode", terminal=True)],
+    )
+    prep = prepare_pipeline_runtime(config)
+    try:
+        group = _build_stage_groups(
+            config,
+            ctx=FakeMpContext(),
+            stages_cfg=prep.stages_cfg,
+            name_map=prep.name_map,
+            endpoints=prep.endpoints,
+            placement_plan=prep.placement_plan,
+            process_plan=prep.process_plan,
+        )[0]
+    finally:
+        assert prep.runtime_dir is not None
+        prep.runtime_dir.close()
+
+    assert group.specs[0].gpu_id is None
+    assert group.specs[0].relay_config["gpu_id"] is None

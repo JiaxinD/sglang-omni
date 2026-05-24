@@ -8,6 +8,7 @@ Provides the following endpoints:
 - GET  /v1/fs/list           — Browse filesystem directories
 - GET  /v1/fs/file           — Download a file
 - GET  /health               — Health check
+- WS   /v1/realtime          — OpenAI-compatible Realtime API (when enabled)
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -68,15 +69,15 @@ def create_app(
     client: Client,
     *,
     model_name: str | None = None,
+    enable_realtime: bool = False,
 ) -> FastAPI:
     """Create a FastAPI application with OpenAI-compatible endpoints.
 
     Args:
         client: Client instance connected to the pipeline coordinator.
         model_name: Default model name to report in responses and /v1/models.
-        serve_playground: Path to the playground directory to serve as static
-            files.  When set, the filesystem browser API and static file
-            serving are enabled so the entire playground runs on a single port.
+        enable_realtime: If True, mount the WebSocket ``/v1/realtime``
+            endpoint (OpenAI Realtime API).
 
     Returns:
         Configured FastAPI application.
@@ -94,12 +95,15 @@ def create_app(
     # Store references in app state for access from route handlers
     app.state.client = client
     app.state.model_name = model_name or "sglang-omni"
+    app.state.realtime_enabled = enable_realtime
 
     # Register all routes
     _register_health(app)
     _register_models(app)
     _register_chat_completions(app)
     _register_speech(app)
+    if enable_realtime:
+        _register_realtime(app)
 
     return app
 
@@ -276,6 +280,8 @@ async def _chat_stream(
         audio_format=audio_format,
     ):
         # Capture finish info for the dedicated finish chunk after the loop.
+        # Some pipelines only emit a final aggregate chunk; do not drop its
+        # text/audio just because it already carries a finish reason.
         if chunk.finish_reason is not None:
             finish_reason = chunk.finish_reason
             if chunk.usage is not None:
@@ -284,7 +290,17 @@ async def _chat_stream(
                     completion_tokens=chunk.usage.completion_tokens or 0,
                     total_tokens=chunk.usage.total_tokens or 0,
                 )
-            continue
+            has_payload = (
+                chunk.modality == "text"
+                and bool(chunk.text)
+                and "text" in requested_modalities
+            ) or (
+                chunk.modality == "audio"
+                and chunk.audio_b64 is not None
+                and "audio" in requested_modalities
+            )
+            if not has_payload:
+                continue
 
         delta = ChatCompletionStreamDelta()
         emit = False
@@ -382,7 +398,7 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     messages = [Message(role=m.role, content=m.content) for m in req.messages]
 
     # Determine output modalities
-    output_modalities = req.modalities  # e.g. ["text", "audio"]
+    output_modalities = req.modalities or ["text"]  # e.g. ["text", "audio"]
 
     # Build per-stage sampling overrides
     stage_sampling: dict[str, SamplingParams] | None = None
@@ -450,6 +466,25 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     )
 
 
+def _register_realtime(app: FastAPI) -> None:
+    """Mount the OpenAI-compatible WebSocket Realtime endpoint."""
+    from sglang_omni.serve.realtime import RealtimeSessionManager
+
+    client: Client = app.state.client
+    model_name: str = app.state.model_name
+    manager = RealtimeSessionManager(client=client, model_name=model_name)
+    app.state.realtime_manager = manager
+
+    @app.websocket("/v1/realtime")
+    async def realtime(websocket: WebSocket) -> None:
+        await websocket.accept()
+        session = manager.open(websocket)
+        try:
+            await session.run()
+        finally:
+            await manager.close(session.session_id)
+
+
 def _register_speech(app: FastAPI) -> None:
     @app.post("/v1/audio/speech")
     async def create_speech(req: CreateSpeechRequest) -> Response:
@@ -458,7 +493,7 @@ def _register_speech(app: FastAPI) -> None:
 
         request_id = f"speech-{uuid.uuid4()}"
 
-        gen_req = _build_speech_generate_request(req, default_model)
+        gen_req = build_speech_generate_request(req, default_model)
         if req.stream:
             return StreamingResponse(
                 _speech_stream(
@@ -556,10 +591,16 @@ async def _speech_stream(
             yield f"data: {json.dumps(payload)}\n\n"
             chunk_index += 1
     except ClientError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload = _speech_stream_error_payload(request_id, chunk_index, exc)
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as exc:
         logger.exception("Error streaming speech for request %s", request_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload = _speech_stream_error_payload(request_id, chunk_index, exc)
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     final_payload = {
         "id": f"speech-{request_id}",
@@ -571,6 +612,24 @@ async def _speech_stream(
     }
     yield f"data: {json.dumps(final_payload)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def _speech_stream_error_payload(
+    request_id: str,
+    chunk_index: int,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "id": f"speech-{request_id}",
+        "object": "audio.speech.chunk",
+        "index": chunk_index,
+        "audio": None,
+        "finish_reason": "error",
+        "error": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+    }
 
 
 def _select_speech_audio_delta(
@@ -596,11 +655,23 @@ def _select_speech_audio_delta(
     return audio[emitted_samples:], total_samples
 
 
-def _build_speech_generate_request(
+def build_speech_generate_request(
     req: CreateSpeechRequest,
     default_model: str,
 ) -> GenerateRequest:
     """Convert a CreateSpeechRequest into a client GenerateRequest."""
+
+    generation_fields = (
+        "max_new_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "repetition_penalty",
+        "seed",
+    )
+    explicit_generation_params = sorted(
+        field for field in generation_fields if field in req.model_fields_set
+    )
 
     # Build TTS-specific parameters to pass through the pipeline
     tts_params: dict[str, Any] = {
@@ -608,6 +679,8 @@ def _build_speech_generate_request(
         "response_format": req.response_format,
         "speed": req.speed,
     }
+    if explicit_generation_params:
+        tts_params["explicit_generation_params"] = explicit_generation_params
     if req.task_type is not None:
         tts_params["task_type"] = req.task_type
     if req.language is not None:
@@ -635,6 +708,8 @@ def _build_speech_generate_request(
         sampling.top_k = req.top_k
     if req.repetition_penalty is not None:
         sampling.repetition_penalty = req.repetition_penalty
+    if req.seed is not None:
+        sampling.seed = req.seed
 
     # Build prompt: plain string if no references, dict otherwise
     prompt: Any = req.input
@@ -666,3 +741,6 @@ def _build_speech_generate_request(
             "tts_params": tts_params,
         },
     )
+
+
+_build_speech_generate_request = build_speech_generate_request

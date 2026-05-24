@@ -5,11 +5,11 @@ Note (Chenyang):
 To run locally, first run stage 1 and stage 2:
 
 S2PRO_STAGE_OUTPUT_ROOT=$PWD/stage-results/nonstream \
-pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 \
+pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 16 \
   --s2pro-stage s2pro-stage-1-nonstream
 
 S2PRO_STAGE_OUTPUT_ROOT=$PWD/stage-results/stream \
-pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 \
+pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 16 \
   --s2pro-stage s2pro-stage-2-stream
 
 Then run this JSON-only stage 3 check:
@@ -36,13 +36,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils import assert_streaming_consistency
+from tests.utils import MetricCheckCollector, assert_streaming_consistency
 
 S2PRO_STAGE1_SPEED_RESULTS_DIR_ENV = "S2PRO_STAGE1_SPEED_RESULTS_DIR"
 S2PRO_STAGE2_SPEED_RESULTS_DIR_ENV = "S2PRO_STAGE2_SPEED_RESULTS_DIR"
 S2PRO_CONSISTENCY_CONCURRENCY_ENV = "S2PRO_CONSISTENCY_CONCURRENCY"
-DEFAULT_CONSISTENCY_CONCURRENCY = 8
-STREAMING_BENCHMARK_MAX_SAMPLES = 16
+DEFAULT_CONSISTENCY_CONCURRENCY = 16
+STREAMING_BENCHMARK_MAX_SAMPLES = 32
 
 
 def _load_speed_results(results_root_env: str, output_dir_name: str) -> dict:
@@ -86,8 +86,11 @@ def test_s2pro_streaming_consistency_from_artifacts() -> None:
         f"vc_stream_c{concurrency}",
     )
 
+    checks = MetricCheckCollector("S2-Pro artifact streaming consistency")
     assert_streaming_consistency(
         non_stream_results["per_request"],
         stream_results["per_request"],
         expected_stream_count=STREAMING_BENCHMARK_MAX_SAMPLES,
+        collector=checks,
     )
+    checks.assert_all()

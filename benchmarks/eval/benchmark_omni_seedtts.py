@@ -58,32 +58,37 @@ Accuracy (accuracy.wer)
 
 | Model      | Config            | wer_corpus | wer_per_sample_mean | wer_per_sample_median | wer_per_sample_std | evaluated | skipped | Source                         |
 | ---------- | ----------------- | ---------- | ------------------- | --------------------- | ------------------ | --------- | ------- | ------------------------------ |
-| Qwen3-Omni | EN, voice_clone=T | 2.18%      | 2.28%               | 0.00%                 | 7.8%               | 1088/1088 | 0       | PR #393 [H200, V1-pipeline, full-set, c=16, n=3 mean] |
-| Qwen3-Omni | EN, voice_clone=F | 2.06%      | 2.19%               | 0.00%                 | 6.8%               | 1088/1088 | 0       | PR #393 [H200, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=T | 1.88%      | 1.80%               | 0.00%                 | 12.0%              | 2020/2020 | 0       | PR #393 [H200, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=F | 1.80%      | 1.70%               | 0.00%                 | 8.0%               | 2020/2020 | 0       | PR #393 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=T | 2.44%      | 2.68%               | 0.00%                 | 21.5%              | 1088/1088 | 0       | PR #411 [H200, V1-pipeline, full-set, c=16, n=3 mean] |
+| Qwen3-Omni | EN, voice_clone=F | 2.60%      | 2.85%               | 0.00%                 | 12.0%              | 1088/1088 | 0       | PR #411 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=T | 1.77%      | 1.79%               | 0.00%                 | 17.1%              | 2020/2020 | 0       | PR #411 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=F | 1.92%      | 1.81%               | 0.00%                 | 8.5%               | 2020/2020 | 0       | PR #411 [H200, V1-pipeline, full-set, c=16] |
 | Qwen3-Omni | EN, voice_clone=T | 1.86%      | 1.94%               | 0.00%                 | 5.9%               | 1088/1088 | 0       | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | EN, voice_clone=F | 2.40%      | 2.44%               | 0.00%                 | 7.3%               | 1088/1088 | 0       | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | ZH, voice_clone=T | 1.49%      | 1.45%               | 0.00%                 | 3.7%               | 2020/2020 | 0       | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | ZH, voice_clone=F | 1.76%      | 1.62%               | 0.00%                 | 8.6%               | 2018/2020 | 2       | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | EN, voice_clone=T | 2.53%      | 2.79%               | 0.00%                 | 22.2%              | 1088/1088 | 0       | PR #426 [H100, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=T | 1.59%      | 1.61%               | 0.00%                 | 10.7%              | 2020/2020 | 0       | PR #426 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=T | 1.77%      | 1.82%               | 0.00%                 | 19.0%              | 2020/2020 | 0       | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=T | 2.40%      | 2.62%               | 0.00%                 | 21.3%              | 1088/1088 | 0       | PR #411 [H100, V1-pipeline, full-set, c=16, n=3 mean] |
+| Qwen3-Omni | EN, voice_clone=F | 2.57%      | 2.80%               | 0.00%                 | 11.7%              | 1088/1088 | 0       | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=F | 2.38%      | 2.11%               | 0.00%                 | 20.5%              | 2020/2020 | 0       | PR #411 [H100, V1-pipeline, full-set, c=16] |
 
 
 Generation speed (generation.speed)
 
 | Model      | Config            | latency_mean_s | latency_p95_s | rtf_mean | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                         |
 | ---------- | ----------------- | -------------- | ------------- | -------- | -------------- | -------------- | ------------- | ------------------------------ |
-| Qwen3-Omni | EN, voice_clone=T | 6.84           | 11.22         | 1.91     | 2.327          | 2.2            | 2.1           | PR #393 [H200, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | EN, voice_clone=F | 5.60           | 8.25          | 1.56     | 2.847          | 2.6            | 2.5           | PR #393 [H200, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=T | 6.94           | 9.36          | 1.67     | 2.301          | 2.5            | 2.4           | PR #393 [H200, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=F | 6.51           | 8.77          | 1.57     | 2.450          | 2.6            | 2.6           | PR #393 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=T | 3.06           | 4.32          | 0.87     | 5.224          | 4.8            | 4.7           | PR #411 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=F | 2.60           | 3.70          | 0.73     | 6.151          | 5.6            | 5.5           | PR #411 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=T | 3.31           | 4.31          | 0.80     | 4.826          | 5.2            | 5.1           | PR #411 [H200, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=F | 2.92           | 3.85          | 0.70     | 5.474          | 5.8            | 5.8           | PR #411 [H200, V1-pipeline, full-set, c=16] |
 | Qwen3-Omni | EN, voice_clone=T | 44.94          | 67.44         | 12.43    | 0.355          | 0.3            | 0.3           | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | EN, voice_clone=F | 45.73          | 68.10         | 12.69    | 0.349          | 0.3            | 0.3           | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | ZH, voice_clone=T | 55.88          | 74.93         | 13.44    | 0.286          | 0.3            | 0.3           | PR #351 [H100, full-set, c=16] |
 | Qwen3-Omni | ZH, voice_clone=F | 55.09          | 73.68         | 13.19    | 0.288          | 0.3            | 0.3           | PR #351 [H100, full-set, c=16] |
-| Qwen3-Omni | EN, voice_clone=T | 2.725          | 4.324         | 0.7781   | 5.857          | 5.5            | 5.2           | PR #426 [H100, V1-pipeline, full-set, c=16] |
-| Qwen3-Omni | ZH, voice_clone=T | 2.848          | 3.812         | 0.6868   | 5.609          | 6.0            | 6.0           | PR #426 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=T | 2.56           | 3.70          | 0.73     | 6.225          | 5.7            | 5.6           | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=T | 2.79           | 3.68          | 0.67     | 5.737          | 6.1            | 6.1           | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | EN, voice_clone=F | 2.30           | 3.32          | 0.64     | 6.948          | 6.4            | 6.2           | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| Qwen3-Omni | ZH, voice_clone=F | 2.52           | 3.31          | 0.61     | 6.350          | 6.8            | 6.8           | PR #411 [H100, V1-pipeline, full-set, c=16] |
 
 Note (Chenyang): tok_per_s_{mean,agg} here counts Qwen3-Omni's discrete talker LM
 tokens (code tokens driving code2wav) and therefore runs at audio frame rate, thus
@@ -152,6 +157,7 @@ from benchmarks.metrics.performance import (
 from benchmarks.tasks.tts import (
     VoiceCloneOmni,
     build_base_url,
+    run_seedtts_similarity,
     run_seedtts_transcribe,
     save_generated_audio_metadata,
     save_speed_results,
@@ -187,6 +193,13 @@ class OmniSeedttsBenchmarkConfig:
     disable_tqdm: bool = False
     # Transcribe phase
     device: str = "cuda:0"
+    similarity_checkpoint: str | None = None
+    # Optional system prompt prepended to chat messages. Default ``None``
+    # preserves the legacy Qwen3-Omni behavior (no system role). Pass a
+    # strict TTS-only prompt to suppress chat-mode leakage on models that
+    # were not fine-tuned to robustly interpret "please read aloud" as a
+    # verbatim-TTS command (e.g. Ming-Omni).
+    system_prompt: str | None = None
 
 
 def _build_results_config(
@@ -221,6 +234,7 @@ def make_send_fn(
     temperature: float,
     stream: bool,
     save_audio_dir: str,
+    system_prompt: str | None = None,
 ) -> SendFn:
     """Return a SendFn that calls Qwen3-Omni via VoiceCloneOmni and saves WAV."""
     task = VoiceCloneOmni()
@@ -245,6 +259,7 @@ def make_send_fn(
                 temperature=temperature,
                 voice_clone=voice_clone,
                 stream=stream,
+                system_prompt=system_prompt,
             )
             result.audio_duration_s = get_wav_duration(wav_bytes)
             elapsed = time.perf_counter() - start_time
@@ -310,6 +325,7 @@ async def run_omni_seedtts_benchmark(
         temperature=config.temperature,
         stream=config.stream,
         save_audio_dir=save_audio_dir,
+        system_prompt=config.system_prompt,
     )
 
     runner = BenchmarkRunner(
@@ -377,6 +393,8 @@ def _config_from_args(args: argparse.Namespace) -> OmniSeedttsBenchmarkConfig:
         request_rate=args.request_rate,
         disable_tqdm=args.disable_tqdm,
         device=device,
+        similarity_checkpoint=args.similarity_checkpoint,
+        system_prompt=args.system_prompt,
     )
 
 
@@ -490,10 +508,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Legacy alias for --device (ASR transcription device).",
     )
     parser.add_argument(
+        "--similarity-checkpoint",
+        type=str,
+        default=None,
+        help="Optional path to a custom fine-tuned WavLM checkpoint. "
+        "If omitted, the official weights are downloaded into a local cache "
+        "directory (override the cache root with SEEDTTS_SIM_CACHE_DIR).",
+    )
+    parser.add_argument(
         "--server-timeout",
         type=int,
         default=1200,
         help="Timeout in seconds to wait for server readiness.",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="Optional system role content prepended to every chat request. "
+        "Default omits the system message (Qwen3-Omni-tuned legacy behavior). "
+        "Pass a strict TTS-only prompt for models that leak chat-style "
+        "preambles or refusals (e.g. Ming-Omni).",
     )
 
     mode = parser.add_mutually_exclusive_group()
@@ -507,6 +542,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only run ASR transcription and WER on existing output-dir.",
     )
+    mode.add_argument(
+        "--similarity-only",
+        action="store_true",
+        help="Only run speaker similarity on existing output-dir.",
+    )
     return parser
 
 
@@ -517,6 +557,10 @@ def main() -> None:
 
     if args.save_audio:
         logger.info("--save-audio is a no-op: the unified benchmark always saves WAVs.")
+
+    if args.similarity_only:
+        run_seedtts_similarity(config, log_per_sample=True)
+        return
 
     if args.transcribe_only:
         evaluate_generated_audio(config)

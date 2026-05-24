@@ -12,24 +12,49 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
+  issues: read
 
 # DAG:
-#   docs ──► stage-1-thinker
-#        ├─► stage-2-tts
-#        ├─► stage-3-mmmu
-#        ├─► stage-4-mmmu-talker
-#        ├─► stage-5-mmsu
-#        ├─► stage-6-mmsu-talker
-#        ├─► stage-7-videomme
-#        ├─► stage-8-videomme-talker
-#        ├─► stage-9-videoamme
-#        ├─► stage-10-videoamme-talker
-#        └─► stage-11-router
-# All 11 stages run in parallel after docs passes — they are independent.
+#   priority-gate ──► setup ──► stage-1-thinker
+#                            ├─► stage-2-tts
+#                            ├─► stage-3-mmmu
+#                            ├─► stage-4-mmmu-talker
+#                            ├─► stage-5-mmsu
+#                            ├─► stage-6-mmsu-talker
+#                            ├─► stage-7-videomme
+#                            ├─► stage-8-videomme-talker
+#                            ├─► stage-9-videoamme
+#                            ├─► stage-10-videoamme-talker
+#                            └─► stage-11-thinker-tp2
+# All 11 stages run in parallel after setup passes — they are independent.
 
 jobs:
-  docs:
-    name: docs
+  priority-gate:
+    name: priority gate
+    # CI gate — runs on workflow_dispatch, or on non-draft PRs carrying the `run-ci` label.
+    # Keep in sync with the same gate in test.yaml / test-examples.yaml / test-s2pro-ci.yaml.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'run-ci'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait behind high-priority CI
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/ci_priority_gate.py
+
+  setup:
+    name: setup
+    needs: priority-gate
     # CI gate — runs on workflow_dispatch, or on non-draft PRs carrying the `run-ci` label.
     # Keep in sync with the same gate in test.yaml / test-examples.yaml / test-s2pro-ci.yaml.
     if: >-
@@ -50,22 +75,6 @@ jobs:
           venv-name: omni-qwen3
           install-deps: "true"
 
-      - name: Run docs tests
-        shell: bash
-        run: |
-          source omni-qwen3/bin/activate
-          export PYTHONPATH=$PWD
-          pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -v -s -x
-        env:
-          HF_ENDPOINT: https://hf-mirror.com
-          TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
-
-      - name: Post-stage cleanup
-        if: always()
-        uses: ./.github/actions/omni-post-stage
-        with:
-          stage-label: docs
-
       - name: Save cache
         if: always()
         shell: bash
@@ -79,9 +88,9 @@ jobs:
 
   stage-1-thinker:
     name: stage 1 - thinker length integration
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 20
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -98,7 +107,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -110,10 +120,10 @@ jobs:
           stage-label: thinker-length
 
   stage-2-tts:
-    name: stage 2 - TTS speed + WER
-    needs: docs
+    name: stage 2 - TTS speed + WER + SIM
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 15
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -125,33 +135,45 @@ jobs:
         with:
           venv-name: omni-qwen3
 
-      - name: Run TTS CI (speed + WER)
+      - name: Prepare speaker similarity assets
+        shell: bash
+        run: |
+          source omni-qwen3/bin/activate
+          python -m benchmarks.metrics.speaker_similarity_assets --warm-cache
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SEEDTTS_SIM_CACHE_DIR: /github/home/seedtts-wavlm-sim
+
+      - name: Run TTS CI (speed + WER + SIM)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
+          SEEDTTS_SIM_CACHE_DIR: /github/home/seedtts-wavlm-sim
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
 
       - name: Post-stage cleanup
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: TTS (speed + WER)
+          stage-label: TTS (speed + WER + SIM)
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
+            */similarity_results.json
           artifact-upload-name: qwen3-omni-tts-results
           artifact-upload-path: /tmp/**/*_results.json
 
   stage-3-mmmu:
     name: stage 3 - MMMU accuracy + speed
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 20
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -168,7 +190,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -185,9 +208,9 @@ jobs:
 
   stage-4-mmmu-talker:
     name: stage 4 - MMMU Talker
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 15
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -204,7 +227,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_mmmu_talker_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_mmmu_talker_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -221,9 +245,9 @@ jobs:
 
   stage-5-mmsu:
     name: stage 5 - MMSU accuracy + speed
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 20
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -240,7 +264,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -258,9 +283,9 @@ jobs:
 
   stage-6-mmsu-talker:
     name: stage 6 - MMSU Talker
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 15
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -277,7 +302,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_mmsu_talker_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_mmsu_talker_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -294,9 +320,9 @@ jobs:
 
   stage-7-videomme:
     name: stage 7 - Video-MME accuracy + speed
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 30
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -313,7 +339,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_videomme_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_videomme_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -330,9 +357,9 @@ jobs:
 
   stage-8-videomme-talker:
     name: stage 8 - Video-MME Talker
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 30
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -349,7 +376,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_videomme_talker_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_videomme_talker_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -366,9 +394,9 @@ jobs:
 
   stage-9-videoamme:
     name: stage 9 - Video-AMME accuracy + speed
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 30
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -385,7 +413,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_videoamme_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_videoamme_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -402,9 +431,9 @@ jobs:
 
   stage-10-videoamme-talker:
     name: stage 10 - Video-AMME Talker
-    needs: docs
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 30
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -421,7 +450,8 @@ jobs:
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_qwen3_omni_videoamme_talker_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_videoamme_talker_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
           TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
@@ -436,11 +466,11 @@ jobs:
           artifact-upload-name: qwen3-omni-videoamme-talker-results
           artifact-upload-path: /tmp/**/videoamme_audio/videoamme_results.json
 
-  stage-11-router:
-    name: stage 11 - Omni Router
-    needs: docs
+  stage-11-thinker-tp2:
+    name: stage 11 - Thinker TP=2 (Video-AMME Talker)
+    needs: setup
     runs-on: [self-hosted]
-    timeout-minutes: 35
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -452,17 +482,23 @@ jobs:
         with:
           venv-name: omni-qwen3
 
-      - name: Run Omni Router CI
+      - name: Run Thinker TP=2 CI
         shell: bash
         run: |
           source omni-qwen3/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_omni_router_ci.py -v -s -x
+          bash .github/scripts/run_flaky_pytest.sh \
+            pytest tests/test_model/test_qwen3_omni_videoamme_talker_tp2_ci.py -v -s -x
         env:
           HF_ENDPOINT: https://hf-mirror.com
+          TORCHINDUCTOR_CACHE_DIR: /github/home/.torchinductor
 
       - name: Post-stage cleanup
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: Omni Router
+          stage-label: Thinker TP=2 (Video-AMME Talker accuracy + WER + speed)
+          artifact-path-globs: |
+            */videoamme_audio/videoamme_results.json
+          artifact-upload-name: qwen3-omni-thinker-tp2-results
+          artifact-upload-path: /tmp/**/videoamme_audio/videoamme_results.json

@@ -13,6 +13,7 @@ def create_thinker_scheduler(
     speech_enabled: bool = False,
     tp_rank: int = 0,
     nccl_port: int | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ):
     """Create the Qwen thinker scheduler."""
     from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -21,6 +22,7 @@ def create_thinker_scheduler(
     from sglang_omni.models.qwen3_omni.request_builders import (
         make_thinker_scheduler_adapters,
         make_thinker_stream_output_builder,
+        should_generate_audio_output,
     )
     from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
@@ -48,19 +50,28 @@ def create_thinker_scheduler(
         nccl_port=nccl_port,
         model_arch_override="Qwen3OmniThinkerForCausalLM",
         capture_hidden_layers=capture_hidden_layers,
+        total_gpu_memory_fraction=total_gpu_memory_fraction,
     )
 
     if want_cuda_graph:
         server_args.disable_cuda_graph = False
         model_worker.model_runner.init_device_graphs()
 
+    def _should_generate_qwen_audio_output(request: Any) -> bool:
+        return should_generate_audio_output(request.data.stage_payload)
+
     output_proc = SGLangOutputProcessor(
         capture_hidden=capture_hidden,
         capture_hidden_layers=capture_hidden_layers,
         model=model_worker.model_runner.model if capture_hidden_layers else None,
+        should_emit_hidden=_should_generate_qwen_audio_output,
     )
 
-    model_runner = ThinkerModelRunner(model_worker, output_proc)
+    model_runner = ThinkerModelRunner(
+        model_worker,
+        output_proc,
+        should_capture_hidden=_should_generate_qwen_audio_output,
+    )
 
     tokenizer = get_tokenizer(
         model_config.model_path,
@@ -99,6 +110,7 @@ def create_talker_scheduler(
     feedback_enabled: bool = True,
     tp_rank: int = 0,
     nccl_port: int | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -135,6 +147,7 @@ def create_talker_scheduler(
         nccl_port=nccl_port,
         model_arch_override="Qwen3OmniTalker",
         weight_prefix=weight_prefix,
+        total_gpu_memory_fraction=total_gpu_memory_fraction,
     )
     if hasattr(model_worker.model_runner, "sampler"):
         model_worker.model_runner.model._sampler = model_worker.model_runner.sampler

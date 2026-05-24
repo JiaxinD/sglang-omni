@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,9 +16,19 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
 from sglang_omni.models.qwen3_omni.components.streaming_detokenizer import (
     StreamingDetokenizeScheduler,
 )
+from sglang_omni.models.qwen3_omni.request_builders import (
+    make_thinker_stream_output_builder,
+    resolve_terminal_stages,
+    resolve_thinker_next_stages,
+    resolve_thinker_stream_done_targets,
+    should_generate_audio_output,
+)
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
+from sglang_omni.scheduling.sglang_backend import SGLangOutputProcessor
+from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
+from sglang_omni.scheduling.types import SchedulerOutput, SchedulerRequest
 
 
 class _ByteTokenizer:
@@ -77,6 +88,248 @@ def _drain_outbox(scheduler: StreamingDetokenizeScheduler) -> list[OutgoingMessa
     while not scheduler.outbox.empty():
         out.append(scheduler.outbox.get_nowait())
     return out
+
+
+def _thinker_stage_payload(output_modalities: list[str] | None) -> StagePayload:
+    metadata = {}
+    if output_modalities is not None:
+        metadata["output_modalities"] = output_modalities
+    return StagePayload(
+        request_id="req-1",
+        request=OmniRequest(inputs=[], params={"stream": True}, metadata=metadata),
+        data={},
+    )
+
+
+def test_qwen_text_output_uses_text_only_active_subgraph():
+    payload = _thinker_stage_payload(["text"])
+
+    assert resolve_thinker_next_stages("req-1", payload) == "decode"
+    assert resolve_thinker_stream_done_targets("req-1", payload) == ["decode"]
+    assert resolve_terminal_stages(payload.request) == ["decode"]
+
+
+def test_qwen_audio_output_uses_speech_active_subgraph():
+    payload = _thinker_stage_payload(["text", "audio"])
+
+    assert resolve_thinker_next_stages("req-1", payload) == [
+        "decode",
+        "talker_ar",
+    ]
+    assert resolve_thinker_stream_done_targets("req-1", payload) == [
+        "talker_ar",
+        "decode",
+    ]
+    assert resolve_terminal_stages(payload.request) == ["decode", "code2wav"]
+
+
+def test_qwen_missing_output_modalities_uses_speech_active_subgraph():
+    payload = _thinker_stage_payload(None)
+
+    assert resolve_thinker_next_stages("req-1", payload) == [
+        "decode",
+        "talker_ar",
+    ]
+    assert resolve_thinker_stream_done_targets("req-1", payload) == [
+        "talker_ar",
+        "decode",
+    ]
+    assert resolve_terminal_stages(payload.request) == ["decode", "code2wav"]
+
+
+def test_qwen_thinker_stream_builder_suppresses_talker_for_text_output():
+    builder = make_thinker_stream_output_builder()
+    req_data = SimpleNamespace(
+        req=SimpleNamespace(is_chunked=0),
+        stage_payload=_thinker_stage_payload(["text"]),
+    )
+    req_output = SimpleNamespace(
+        data=11,
+        extra={"hidden_states": torch.tensor([[1.0, 2.0]])},
+    )
+
+    messages = builder("req-1", req_data, req_output)
+
+    assert [msg.target for msg in messages] == ["decode"]
+
+
+def test_qwen_thinker_stream_builder_keeps_talker_for_audio_output():
+    builder = make_thinker_stream_output_builder()
+    req_data = SimpleNamespace(
+        req=SimpleNamespace(is_chunked=0),
+        stage_payload=_thinker_stage_payload(["audio"]),
+    )
+    req_output = SimpleNamespace(
+        data=11,
+        extra={"hidden_states": torch.tensor([[1.0, 2.0]])},
+    )
+
+    messages = builder("req-1", req_data, req_output)
+
+    assert [msg.target for msg in messages] == ["decode", "talker_ar"]
+
+
+def test_qwen_thinker_stream_builder_keeps_talker_when_modalities_missing():
+    builder = make_thinker_stream_output_builder()
+    req_data = SimpleNamespace(
+        req=SimpleNamespace(is_chunked=0),
+        stage_payload=_thinker_stage_payload(None),
+    )
+    req_output = SimpleNamespace(
+        data=11,
+        extra={"hidden_states": torch.tensor([[1.0, 2.0]])},
+    )
+
+    messages = builder("req-1", req_data, req_output)
+
+    assert [msg.target for msg in messages] == ["decode", "talker_ar"]
+
+
+def test_qwen_hidden_states_skip_only_explicit_text_output_requests():
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        should_emit_hidden=lambda request: should_generate_audio_output(
+            request.data.stage_payload
+        ),
+    )
+    text_request = SchedulerRequest(
+        request_id="text",
+        data=SGLangARRequestData(stage_payload=_thinker_stage_payload(["text"])),
+    )
+    audio_request = SchedulerRequest(
+        request_id="audio",
+        data=SGLangARRequestData(stage_payload=_thinker_stage_payload(["audio"])),
+    )
+    default_request = SchedulerRequest(
+        request_id="default",
+        data=SGLangARRequestData(stage_payload=_thinker_stage_payload(None)),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22, 33]),
+        logits_output=SimpleNamespace(
+            hidden_states=torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        ),
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[text_request, audio_request, default_request],
+        batch_data=SimpleNamespace(
+            reqs=[
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+            ]
+        ),
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    assert outputs["text"].extra is None
+    assert torch.equal(
+        outputs["audio"].extra["hidden_states"],
+        torch.tensor([3.0, 4.0]),
+    )
+    assert torch.equal(
+        outputs["default"].extra["hidden_states"],
+        torch.tensor([5.0, 6.0]),
+    )
+
+
+def test_qwen_aux_hidden_states_clone_only_audio_request_slice():
+    model = SimpleNamespace(
+        _captured_aux_hidden_states=[
+            torch.arange(6, dtype=torch.float32).reshape(3, 2),
+            torch.arange(30, 36, dtype=torch.float32).reshape(3, 2),
+        ]
+    )
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        capture_hidden_layers=[0, 24],
+        model=model,
+        should_emit_hidden=lambda request: request.request_id == "audio",
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[
+            SchedulerRequest(request_id="text-1"),
+            SchedulerRequest(request_id="audio"),
+            SchedulerRequest(request_id="text-2"),
+        ],
+        batch_data=SimpleNamespace(
+            reqs=[
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+            ]
+        ),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22, 33]),
+        logits_output=SimpleNamespace(
+            hidden_states=torch.arange(100, 106, dtype=torch.float32).reshape(3, 2)
+        ),
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    assert outputs["text-1"].extra is None
+    assert outputs["text-2"].extra is None
+    assert model._captured_aux_hidden_states is None
+
+    audio_hidden = outputs["audio"].extra["hidden_states"]
+    assert torch.equal(audio_hidden["embed"], torch.tensor([2.0, 3.0]))
+    assert torch.equal(audio_hidden[24], torch.tensor([32.0, 33.0]))
+    assert torch.equal(
+        outputs["audio"].extra["stream_hidden_states"],
+        torch.tensor([102.0, 103.0]),
+    )
+    stream_hidden = outputs["audio"].extra["stream_hidden_states"]
+    assert (
+        audio_hidden["embed"].untyped_storage().nbytes()
+        == audio_hidden["embed"].numel() * audio_hidden["embed"].element_size()
+    )
+    assert (
+        stream_hidden.untyped_storage().nbytes()
+        == stream_hidden.numel() * stream_hidden.element_size()
+    )
+
+
+def test_qwen_aux_hidden_states_clear_when_no_request_emits_hidden():
+    model = SimpleNamespace(
+        _captured_aux_hidden_states=[
+            torch.arange(6, dtype=torch.float32).reshape(3, 2),
+            torch.arange(30, 36, dtype=torch.float32).reshape(3, 2),
+        ]
+    )
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        capture_hidden_layers=[0, 24],
+        model=model,
+        should_emit_hidden=lambda request: False,
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[
+            SchedulerRequest(request_id="text-1"),
+            SchedulerRequest(request_id="text-2"),
+            SchedulerRequest(request_id="text-3"),
+        ],
+        batch_data=SimpleNamespace(
+            reqs=[
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+                SimpleNamespace(extend_input_len=1),
+            ]
+        ),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22, 33]),
+        logits_output=SimpleNamespace(
+            hidden_states=torch.arange(100, 106, dtype=torch.float32).reshape(3, 2)
+        ),
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    assert all(output.extra is None for output in outputs.values())
+    assert model._captured_aux_hidden_states is None
 
 
 def test_utf8_multibyte_hold_then_emit():
@@ -351,7 +604,17 @@ def _bare_stage(*, is_terminal: bool, owns_io: bool = True) -> Stage:
     s._is_terminal = is_terminal
     s._owns_external_io = owns_io
     s._aborted = set()
-    s.control_plane = None  # only touched on the success path
+    s._active_requests = set()
+    s._stream_queue = None
+    s._stream_chunk_counters = {}
+    s.input_handler = SimpleNamespace(cancel=lambda request_id: None)
+    s.scheduler = SimpleNamespace(abort=lambda request_id: None)
+    s.control_plane = SimpleNamespace(completions=[])
+
+    async def _send_complete(msg):
+        s.control_plane.completions.append(msg)
+
+    s.control_plane.send_complete = _send_complete
     return s
 
 
@@ -383,54 +646,36 @@ def test_queue_stream_error_fast_fails_when_no_queue():
     """When _stream_queue is None, _queue_stream_error must surface a
     coordinator failure rather than silently dropping the error."""
     s = _bare_stage(is_terminal=True)
-    s._stream_queue = None
-    s._send_failure_calls: list[tuple[str, str]] = []
-
-    async def _fake_send_failure(rid, err):
-        s._send_failure_calls.append((rid, err))
-
-    s._send_failure = _fake_send_failure
     asyncio.run(
         s._queue_stream_error("req-1", from_stage="thinker", error=RuntimeError("boom"))
     )
-    assert s._send_failure_calls == [("req-1", "boom")]
+    assert len(s.control_plane.completions) == 1
+    assert s.control_plane.completions[0].request_id == "req-1"
+    assert s.control_plane.completions[0].error == "boom"
+    assert "req-1" in s._aborted
 
 
 def test_queue_stream_error_aborted_request_no_op():
     """An aborted request must not surface another failure to the coordinator."""
     s = _bare_stage(is_terminal=True)
-    s._stream_queue = None
     s._aborted.add("req-1")
-    s._send_failure_calls: list[tuple[str, str]] = []
-
-    async def _fake_send_failure(rid, err):
-        s._send_failure_calls.append((rid, err))
-
-    s._send_failure = _fake_send_failure
     asyncio.run(
         s._queue_stream_error("req-1", from_stage="thinker", error=RuntimeError("late"))
     )
-    assert s._send_failure_calls == []
+    assert s.control_plane.completions == []
 
 
 def test_queue_stream_error_repeated_calls_are_idempotent_at_handler():
-    """Each call invokes _send_failure; dedup happens at the coordinator."""
+    """The first failure marks the request aborted; repeated errors are local no-ops."""
     s = _bare_stage(is_terminal=True)
-    s._stream_queue = None
-    s._send_failure_calls: list[tuple[str, str]] = []
-
-    async def _fake_send_failure(rid, err):
-        s._send_failure_calls.append((rid, err))
-
-    s._send_failure = _fake_send_failure
 
     async def _drive():
         await s._queue_stream_error("req-1", "thinker", RuntimeError("first"))
         await s._queue_stream_error("req-1", "thinker", RuntimeError("second"))
 
     asyncio.run(_drive())
-    assert len(s._send_failure_calls) == 2
-    assert all(rid == "req-1" for rid, _ in s._send_failure_calls)
+    assert len(s.control_plane.completions) == 1
+    assert s.control_plane.completions[0].error == "first"
 
 
 def test_late_stream_done_after_finalize_does_not_re_create_state():
@@ -609,13 +854,20 @@ def test_code2wav_abort_clears_all_per_request_state():
 class _FakeCoordinatorForClient:
     """Async-iterates a pre-seeded message list as a Coordinator.stream() stand-in."""
 
-    def __init__(self, messages):
+    def __init__(self, messages, *, submit_result=None):
         self._messages = list(messages)
+        self._submit_result = submit_result
+        self.submitted_params: list[dict] = []
 
     async def stream(self, request_id, omni_request):
         del request_id, omni_request
         for m in self._messages:
             yield m
+
+    async def submit(self, request_id, omni_request):
+        del request_id
+        self.submitted_params.append(dict(omni_request.params))
+        return self._submit_result
 
 
 def test_client_completion_stream_does_not_duplicate_full_text():
@@ -736,3 +988,50 @@ def test_client_completion_stream_non_streaming_keeps_full_text():
     assert len(chunks) == 1
     assert chunks[0].text == "hi there"
     assert chunks[0].finish_reason == "stop"
+
+
+def test_client_speech_forces_non_streaming_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.client import client as client_module
+    from sglang_omni.client.client import Client
+    from sglang_omni.client.types import GenerateRequest
+
+    monkeypatch.setattr(
+        client_module,
+        "encode_audio",
+        lambda audio_data, **kwargs: (b"encoded-audio", "audio/wav"),
+    )
+    coordinator = _FakeCoordinatorForClient(
+        [],
+        submit_result={
+            "audio_data": [0.0, 0.1],
+            "sample_rate": 16000,
+            "modality": "audio",
+        },
+    )
+    client = Client(coordinator=coordinator)
+
+    result = asyncio.run(
+        client.speech(
+            GenerateRequest(
+                prompt="ignored", stream=True, extra_params={"stream": True}
+            ),
+            request_id="req-1",
+        )
+    )
+
+    assert result.audio_bytes == b"encoded-audio"
+    assert coordinator.submitted_params == [
+        {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "stop": [],
+            "stop_token_ids": [],
+            "seed": None,
+            "stream": False,
+        }
+    ]

@@ -71,28 +71,36 @@ Accuracy (accuracy.wer)
 
 | Model  | Config           | wer_corpus | wer_per_sample_mean | wer_per_sample_median | wer_per_sample_std | evaluated | skipped | Source                         |
 | ------ | ---------------- | ---------- | ------------------- | --------------------- | ------------------ | --------- | ------- | ------------------------------ |
-| S2-Pro | EN, stream=False | 1.16%      | 1.11%               | 0.00%                 | 3.7%               | 1088/1088 | 0       | PR #393 [H200, full-set, c=16] |
-| S2-Pro | EN, stream=True  | 1.06%      | 1.00%               | 0.00%                 | 3.4%               | 1088/1088 | 0       | PR #393 [H200, full-set, c=16] |
-| S2-Pro | ZH, stream=False | 0.93%      | 0.89%               | 0.00%                 | 2.2%               | 2020/2020 | 0       | PR #393 [H200, full-set, c=16] |
-| S2-Pro | ZH, stream=True  | 0.94%      | 0.89%               | 0.00%                 | 2.2%               | 2020/2020 | 0       | PR #393 [H200, full-set, c=16] |
+| S2-Pro | EN, stream=False | 1.07%      | 1.03%               | 0.00%                 | 3.6%               | 1088/1088 | 0       | PR #411 [H200, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 1.05%      | 1.00%               | 0.00%                 | 3.5%               | 1088/1088 | 0       | PR #411 [H200, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 1.02%      | 0.98%               | 0.00%                 | 3.3%               | 2020/2020 | 0       | PR #411 [H200, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 0.93%      | 0.89%               | 0.00%                 | 2.2%               | 2020/2020 | 0       | PR #411 [H200, full-set, c=16] |
 | S2-Pro | EN, stream=False | 1.03%      | 0.98%               | 0.00%                 | 3.4%               | 1088/1088 | 0       | PR #351 [H100, full-set, c=16] |
 | S2-Pro | EN, stream=True  | 0.98%      | 0.94%               | 0.00%                 | 3.3%               | 1088/1088 | 0       | PR #351 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=False | 0.93%      | 0.89%               | 0.00%                 | 2.2%               | 2020/2020 | 0       | PR #351 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=True  | 0.98%      | 0.94%               | 0.00%                 | 2.4%               | 2020/2020 | 0       | PR #351 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=False | 1.16%      | 1.12%               | 0.00%                 | 3.7%               | 1088/1088 | 0       | PR #411 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 1.06%      | 1.02%               | 0.00%                 | 3.5%               | 1088/1088 | 0       | PR #411 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 0.92%      | 0.87%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #411 [H100, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 0.90%      | 0.86%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #411 [H100, full-set, c=16] |
 
 
 Generation speed (generation.speed)
 
 | Model  | Config           | latency_mean_s | latency_p95_s | rtf_mean | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                         |
 | ------ | ---------------- | -------------- | ------------- | -------- | -------------- | -------------- | ------------- | ------------------------------ |
-| S2-Pro | EN, stream=False | 17.016         | 28.582        | 4.501    | 0.937          | 45.3           | 42.7          | PR #393 [H200, full-set, c=16] |
-| S2-Pro | EN, stream=True  | 16.189         | 27.789        | 4.297    | 0.984          | 46.7           | 44.8          | PR #393 [H200, full-set, c=16] |
-| S2-Pro | ZH, stream=False | 12.428         | 21.057        | 2.318    | 1.282          | 51.7           | 50.4          | PR #393 [H200, full-set, c=16] |
-| S2-Pro | ZH, stream=True  | 9.384          | 13.631        | 1.762    | 1.700          | 57.0           | 56.4          | PR #393 [H200, full-set, c=16] |
+| S2-Pro | EN, stream=False | 15.836         | 21.509        | 4.269    | 1.005          | 75.3           | 75.0          | PR #411 [H200, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 16.135         | 21.733        | 4.357    | 0.985          | 74.5           | 74.1          | PR #411 [H200, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 16.114         | 20.092        | 3.018    | 0.990          | 73.6           | 73.1          | PR #411 [H200, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 17.070         | 22.120        | 3.203    | 0.935          | 72.1           | 71.5          | PR #411 [H200, full-set, c=16] |
 | S2-Pro | EN, stream=False | 9.38           | 14.65         | 2.48     | 1.700          | 56.6           | 56.0          | PR #351 [H100, full-set, c=16] |
 | S2-Pro | EN, stream=True  | 9.92           | 15.49         | 2.62     | 1.607          | 53.9           | 53.2          | PR #351 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=False | 9.64           | 13.61         | 1.80     | 1.655          | 55.7           | 55.2          | PR #351 [H100, full-set, c=16] |
 | S2-Pro | ZH, stream=True  | 9.27           | 13.11         | 1.74     | 1.722          | 51.7           | 51.1          | PR #351 [H100, full-set, c=16] |
+| S2-Pro | EN, stream=False | 12.247         | 16.703        | 3.289    | 1.299          | 67.9           | 67.8          | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| S2-Pro | EN, stream=True  | 12.164         | 16.717        | 3.265    | 1.308          | 67.1           | 67.0          | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| S2-Pro | ZH, stream=False | 12.028         | 15.526        | 2.256    | 1.327          | 65.9           | 65.7          | PR #411 [H100, V1-pipeline, full-set, c=16] |
+| S2-Pro | ZH, stream=True  | 11.417         | 15.020        | 2.141    | 1.398          | 65.7           | 65.5          | PR #411 [H100, V1-pipeline, full-set, c=16] |
 
 Note (Chenyang): tok_per_s_{mean,agg} here counts S2-Pro's codec tokens.  It is NOT
 comparable to the tok_per_s column reported for Qwen3-Omni in benchmark_omni_seedtts.py,
@@ -127,6 +135,7 @@ from benchmarks.metrics.performance import (
 from benchmarks.tasks.tts import (
     build_base_url,
     make_tts_send_fn,
+    run_seedtts_similarity,
     run_seedtts_transcribe,
     save_generated_audio_metadata,
     save_speed_results,
@@ -170,6 +179,7 @@ class TtsSeedttsBenchmarkConfig:
     # Transcribe phase
     lang: str = "en"
     device: str = "cuda:0"
+    similarity_checkpoint: str | None = None
 
 
 def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
@@ -307,6 +317,7 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         disable_tqdm=args.disable_tqdm,
         lang=args.lang,
         device=args.device,
+        similarity_checkpoint=args.similarity_checkpoint,
     )
 
 
@@ -409,6 +420,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Device for ASR model (transcribe phase).",
     )
     parser.add_argument(
+        "--similarity-checkpoint",
+        type=str,
+        default=None,
+        help="Optional path to a custom fine-tuned WavLM checkpoint. "
+        "If omitted, the official weights are downloaded into a local cache "
+        "directory (override the cache root with SEEDTTS_SIM_CACHE_DIR).",
+    )
+    parser.add_argument(
         "--server-timeout",
         type=int,
         default=1200,
@@ -426,6 +445,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only run ASR transcription and WER on existing output-dir.",
     )
+    mode.add_argument(
+        "--similarity-only",
+        action="store_true",
+        help="Only run speaker similarity on existing output-dir.",
+    )
     return parser
 
 
@@ -436,6 +460,10 @@ def main() -> None:
 
     if args.save_audio:
         logger.info("--save-audio is a no-op: the unified benchmark always saves WAVs.")
+
+    if args.similarity_only:
+        run_seedtts_similarity(config)
+        return
 
     if args.transcribe_only:
         run_tts_seedtts_transcribe(config)

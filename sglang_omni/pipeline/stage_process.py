@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
@@ -17,7 +18,8 @@ from sglang_omni.pipeline.stage.input import AggregatedInput, DirectInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
 from sglang_omni.pipeline.tp_control import TPFollowerControlPlane, TPLeaderFanout
-from sglang_omni.utils import import_string
+from sglang_omni.utils.gpu_memory import gpu_startup_lock
+from sglang_omni.utils.imports import import_string
 
 
 @dataclass
@@ -33,7 +35,7 @@ class StageProcessSpec:
     role: Literal["single", "leader", "follower"] = "single"
     tp_rank: int = 0
     tp_size: int = 1
-    gpu_id: int = 0
+    gpu_id: int | None = None
     nccl_port: int | None = None
 
     # Factory
@@ -42,10 +44,12 @@ class StageProcessSpec:
 
     # Routing: static next stage(s)
     next_stages: str | list[str] | None = None
+    route_fn: str | None = None
     is_terminal: bool = False
 
     # Fan-in
     wait_for: list[str] | None = None
+    wait_for_fn: str | None = None
     merge_fn: str | None = None
     project_payload: dict[str, str] = field(default_factory=dict)
 
@@ -60,8 +64,10 @@ class StageProcessSpec:
 
     # Stream wiring
     stream_targets: list[str] = field(default_factory=list)
+    stream_done_to_fn: str | None = None
     same_gpu_targets: set[str] = field(default_factory=set)
     is_stream_receiver: bool = False
+    can_accept_stream_before_payload: bool = False
 
     # Fusion name map
     name_map: dict[str, str] = field(default_factory=dict)
@@ -85,31 +91,89 @@ class StageProcessSpec:
         return self.role == "follower"
 
 
+@dataclass
+class StageWorkerProcessSpec:
+    """Everything one OS process needs to run one or more stages."""
+
+    process_name: str
+    stage_specs: list[StageProcessSpec]
+    gpu_id: int | None = None
+
+
 def stage_process_main(
-    spec: StageProcessSpec,
+    spec: StageWorkerProcessSpec,
     ready_event: multiprocessing.Event,
+    startup_error_channel: Any | None = None,
 ) -> None:
-    """Subprocess entrypoint: construct a Stage from *spec* and run it."""
+    """Subprocess entrypoint: construct stage(s) from *spec* and run them."""
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    tp_suffix = f"-tp{spec.tp_rank}" if spec.tp_size > 1 else ""
-    log = logging.getLogger(f"stage.{spec.stage_name}{tp_suffix}")
+    if not spec.stage_specs:
+        raise ValueError(f"Process {spec.process_name!r} requires at least one stage")
+    log = logging.getLogger(f"stage_process.{spec.process_name}")
 
     try:
-        _prepare_cuda_environment(spec, log)
-        _run_stage(spec, ready_event, log)
+        for stage_spec in spec.stage_specs:
+            _prepare_cuda_environment(stage_spec, log)
+        _run_process(spec, ready_event, log)
     except Exception:
         import traceback
 
-        log.error("Stage process failed:\n%s", traceback.format_exc())
+        log.exception("Stage process %s failed", spec.process_name)
+        if startup_error_channel is not None:
+            startup_error_channel.put(traceback.format_exc())
         sys.exit(1)
 
 
-def _run_stage(
-    spec: StageProcessSpec,
+def _run_process(
+    spec: StageWorkerProcessSpec,
     ready_event: multiprocessing.Event,
     log: logging.Logger,
 ) -> None:
+    """Construct and drive all stages owned by one OS process.
 
+    Multi-stage semantics (since the topology PR):
+    - All stages in ``spec.stage_specs`` share this OS process and one asyncio
+      event loop. ``asyncio.gather`` runs them concurrently; **if any stage
+      raises, the whole process exits** and ``MultiProcessPipelineRunner``'s
+      ``_monitor_children`` will fail-all in-flight requests on the
+      coordinator. There is no per-stage failure isolation inside one process
+      group.
+    - Scheduler construction is serialized by :func:`gpu_startup_lock` per GPU
+      inside :func:`_construct_scheduler` — so when N stages on the same GPU
+      live in this process, cold-start time degrades from ``max`` to ``sum``
+      across them.
+    """
+    stages = [_construct_stage(stage_spec, log) for stage_spec in spec.stage_specs]
+
+    async def _start_and_run():
+        tasks: list[asyncio.Task] = []
+        try:
+            for stage in stages:
+                await stage.start()
+            log.info(
+                "Process %s ready with stages=%s",
+                spec.process_name,
+                [stage.name for stage in stages],
+            )
+            ready_event.set()
+            tasks = [asyncio.create_task(stage.run()) for stage in stages]
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for stage in stages:
+                if getattr(stage, "_running", False):
+                    await stage.stop()
+
+    asyncio.run(_start_and_run())
+
+
+def _construct_stage(
+    spec: StageProcessSpec,
+    log: logging.Logger,
+) -> Stage:
     gpu_id = spec.relay_config.get("gpu_id")
     if gpu_id is None:
         gpu_id = spec.factory_args.get("gpu_id")
@@ -129,12 +193,77 @@ def _run_stage(
         spec.tp_size,
     )
 
-    factory = import_string(spec.factory)
-    scheduler = factory(**spec.factory_args)
+    scheduler = _construct_scheduler(spec, gpu_id, log)
+
+    def _target_list(targets: str | list[str] | None) -> list[str]:
+        if targets is None:
+            return []
+        if isinstance(targets, str):
+            return [targets]
+        if isinstance(targets, list):
+            return list(targets)
+        raise ValueError(
+            f"Dynamic route function for stage {spec.stage_name!r} returned "
+            f"unsupported target value {targets!r}"
+        )
+
+    def _map_target_list(targets: str | list[str] | None) -> list[str]:
+        return [spec.name_map.get(t, t) for t in _target_list(targets)]
+
+    def _map_wait_source_list(sources: str | Iterable[str] | None) -> list[Any] | None:
+        if sources is None:
+            return None
+        if isinstance(sources, str):
+            return [spec.name_map.get(sources, sources)]
+        if isinstance(sources, Iterable):
+            return [
+                spec.name_map.get(source, source) if isinstance(source, str) else source
+                for source in sources
+            ]
+        raise ValueError(
+            f"wait_for_fn for stage {spec.stage_name!r} returned unsupported "
+            f"source value {sources!r}"
+        )
+
+    def _target_result(
+        targets: str | list[str] | None,
+        *,
+        allowed_targets: set[str],
+        allow_empty: bool,
+        hook_name: str,
+    ) -> str | list[str] | None:
+        mapped_targets = _map_target_list(targets)
+        if not mapped_targets:
+            if allow_empty:
+                return None
+            raise ValueError(
+                f"{hook_name} for stage {spec.stage_name!r} returned no targets; "
+                "dynamic route functions must return downstream stage(s)"
+            )
+        unknown = set(mapped_targets) - allowed_targets
+        if unknown:
+            raise ValueError(
+                f"{hook_name} for stage {spec.stage_name!r} returned targets "
+                f"outside the static topology: {sorted(unknown)}. "
+                f"Allowed targets: {sorted(allowed_targets)}"
+            )
+        return mapped_targets[0] if isinstance(targets, str) else mapped_targets
 
     # --- Build routing ---
     if spec.is_terminal:
         get_next = lambda request_id, output: None
+    elif spec.route_fn:
+        route_fn = import_string(spec.route_fn)
+        allowed_route_targets = set(_map_target_list(spec.next_stages))
+
+        def get_next(request_id, output, _fn=route_fn):
+            return _target_result(
+                _fn(request_id, output),
+                allowed_targets=allowed_route_targets,
+                allow_empty=False,
+                hook_name="route_fn",
+            )
+
     else:
         target = spec.next_stages
         if isinstance(target, str):
@@ -146,11 +275,37 @@ def _run_stage(
         else:
             get_next = lambda request_id, output: None
 
+    if spec.stream_done_to_fn:
+        stream_done_to_fn = import_string(spec.stream_done_to_fn)
+        allowed_stream_targets = set(_map_target_list(spec.stream_targets))
+        get_stream_done_targets = (
+            lambda request_id, output, _fn=stream_done_to_fn: _target_result(
+                _fn(request_id, output),
+                allowed_targets=allowed_stream_targets,
+                allow_empty=True,
+                hook_name="stream_done_to_fn",
+            )
+        )
+    else:
+        get_stream_done_targets = None
+
     # --- Build input handler ---
     if spec.wait_for and spec.merge_fn:
         merge_fn = import_string(spec.merge_fn)
         sources = {spec.name_map.get(n, n) for n in spec.wait_for}
-        input_handler = AggregatedInput(sources=sources, merge=merge_fn)
+        expected_sources_fn = None
+        if spec.wait_for_fn:
+            wait_for_fn = import_string(spec.wait_for_fn)
+
+            def expected_sources_fn(request_id, from_stage, data, _fn=wait_for_fn):
+                resolved_sources = _fn(request_id, from_stage, data)
+                return _map_wait_source_list(resolved_sources)
+
+        input_handler = AggregatedInput(
+            sources=sources,
+            merge=merge_fn,
+            expected_sources_fn=expected_sources_fn,
+        )
     else:
         input_handler = DirectInput()
     project_payload = {
@@ -194,7 +349,9 @@ def _run_stage(
         scheduler=scheduler,
         project_payload=project_payload or None,
         stream_targets=spec.stream_targets or None,
+        get_stream_done_targets=get_stream_done_targets,
         same_gpu_targets=spec.same_gpu_targets or None,
+        can_accept_stream_before_payload=spec.can_accept_stream_before_payload,
         tp_fanout=tp_fanout,
         is_terminal=spec.is_terminal,
     )
@@ -202,14 +359,23 @@ def _run_stage(
     if spec.is_stream_receiver:
         stage._stream_queue = StreamQueue(max_pending=4096)
 
-    # --- Run ---
-    async def _start_and_run():
-        await stage.start()
-        log.info("Stage %s (tp_rank=%d) ready", spec.stage_name, spec.tp_rank)
-        ready_event.set()
-        await stage.run()
+    return stage
 
-    asyncio.run(_start_and_run())
+
+def _construct_scheduler(
+    spec: StageProcessSpec,
+    gpu_id: int | None,
+    log: logging.Logger,
+) -> Any:
+    """Build a scheduler, serializing GPU factory work per visible device."""
+
+    factory = import_string(spec.factory)
+    if gpu_id is None:
+        return factory(**spec.factory_args)
+
+    with gpu_startup_lock(int(gpu_id)) as lock_path:
+        log.info(f"Acquired GPU startup lock for stage {spec.stage_name}: {lock_path}")
+        return factory(**spec.factory_args)
 
 
 def _factory_args_use_cuda(factory_args: Mapping[str, Any]) -> bool:
@@ -229,17 +395,16 @@ def get_stage_process_env(
 
     source_env = env if env is not None else os.environ
     original_visible = source_env.get("CUDA_VISIBLE_DEVICES")
+    if spec.gpu_id is None:
+        raise ValueError(f"tp stage {spec.stage_name!r} requires a GPU id")
     if original_visible:
         visible_devices = [item.strip() for item in original_visible.split(",")]
-        if len(visible_devices) == 1:
-            mapped_gpu = visible_devices[0]
-        elif spec.gpu_id >= len(visible_devices):
+        if spec.gpu_id >= len(visible_devices):
             raise ValueError(
                 f"tp stage {spec.stage_name!r} assigned gpu_id={spec.gpu_id}, "
                 f"but CUDA_VISIBLE_DEVICES only exposes {visible_devices}"
             )
-        else:
-            mapped_gpu = visible_devices[spec.gpu_id]
+        mapped_gpu = visible_devices[spec.gpu_id]
     else:
         mapped_gpu = str(spec.gpu_id)
 
@@ -255,6 +420,17 @@ def _prepare_cuda_environment(
     log: logging.Logger,
 ) -> None:
     """Map TP rank processes to one visible CUDA device before torch init."""
+    if os.environ.get("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS") == "true":
+        mapped_gpu = os.environ.get("CUDA_VISIBLE_DEVICES", str(spec.gpu_id))
+        _normalize_spec_gpu_id_to_local_device(spec)
+        log.info(
+            "TP stage %s rank %d sees CUDA_VISIBLE_DEVICES=%s (local gpu_id=0)",
+            spec.stage_name,
+            spec.tp_rank,
+            mapped_gpu,
+        )
+        return
+
     env_updates = get_stage_process_env(spec)
     if not env_updates:
         return
@@ -263,15 +439,18 @@ def _prepare_cuda_environment(
     for key, value in env_updates.items():
         os.environ[key] = value
 
-    if "gpu_id" in spec.factory_args:
-        spec.factory_args["gpu_id"] = 0
-    if "gpu_id" in spec.relay_config:
-        spec.relay_config["gpu_id"] = 0
-    spec.gpu_id = 0
-
+    _normalize_spec_gpu_id_to_local_device(spec)
     log.info(
         "Mapped TP stage %s rank %d to CUDA_VISIBLE_DEVICES=%s (local gpu_id=0)",
         spec.stage_name,
         spec.tp_rank,
         mapped_gpu,
     )
+
+
+def _normalize_spec_gpu_id_to_local_device(spec: StageProcessSpec) -> None:
+    if "gpu_id" in spec.factory_args:
+        spec.factory_args["gpu_id"] = 0
+    if "gpu_id" in spec.relay_config:
+        spec.relay_config["gpu_id"] = 0
+    spec.gpu_id = 0
