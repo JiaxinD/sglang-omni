@@ -15,9 +15,8 @@ Follows from [sglang#16546](https://github.com/sgl-project/sglang/issues/16546).
 7. [Multi-Process Runner](#multi-process-runner)
 8. [Supported Pipelines](#supported-pipelines)
 9. [Adding a New Model](#adding-a-new-model)
-10. [Open design questions](#open-design-questions)
-11. [Progress Tracking](#progress-tracking)
-12. [Design Decision History](#design-decision-history)
+10. [Progress Tracking](#progress-tracking)
+11. [Design Decision History](#design-decision-history)
 
 ## Architecture
 
@@ -125,13 +124,7 @@ classDiagram
 
 ```
 
-> **Pending — Huapeng**: Architecture overview needs three additions before this section is final.
->
-> 1. Restore the `HTTP API → Client` lifecycle edge to the system overview (currently missing). (raised by Chenyang)
-> 2. Add the WebSocket entrypoint to the overview. (raised by Chenyang)
-> 3. Add an HTTPS design layer subsection (entry point, request routing, WebSocket bridge). (existing TODO)
->
-> Two diagram-level suggestions from Yichi are folded into the same revision: (a) illustrate the ModelRunner hook by splitting `prepare_prefill` / `decode` and `post_prefill` / `decode` rather than the generic `prepare` / `post_forward` (thinker and talker behave differently here); (b) decide whether a `Client` section belongs in this doc.
+> **Pending — Huapeng**: System Overview diagram restoration + Class Diagram refinement + new HTTPS design layer subsection + "Client" section decision. Tracked in [#538 §1.1](https://github.com/sgl-project/sglang-omni/issues/538).
 
 ---
 
@@ -247,8 +240,6 @@ All schedulers share the same interface: `inbox`, `outbox`, `start()`, `stop()`,
 
 ### OmniScheduler — Composition with SGLang
 
-![OmniScheduler — Composition with SGLang](images/omni_scheduler_composition.png)
-
 For AR stages. Subset of SGLang Scheduler — reuses `get_next_batch_to_run()`, `run_batch()`, `process_batch_result()`, `event_loop_normal()`, overlap scheduling.
 
 - **Reused from SGLang:** `get_next_batch_to_run()`, `process_batch_result()`, `self_check_during_idle()` — KV cache management, prefill/decode scheduling, tree cache, dLLM support
@@ -265,7 +256,7 @@ Composing on top of SGLang's `Scheduler` is the right call, but only if we pin t
 2. **Minimize reuse surface.** Treat `PrefillManager` and `DecodeManager` as black boxes — public methods only, no reads or writes of internal attributes. The moment we touch internals, composition becomes a fork.
 3. **Upstream-first, when affordable.** If OmniScheduler needs something SGLang doesn't cleanly expose, the preferred fix is a hook or factored-out method in SGLang `main` rather than a downstream patch. Today the cost of upstream PRs is high enough that we don't routinely do this; it remains the long-term direction.
 
-`CodePredictor` is placed under Talker, but whether `ThinkerScheduler` and `CodePredictorScheduler` need a separate documented split (their KV cache shapes are quite different) is still an open design question.[^q-thinker-codepredictor-split]
+`CodePredictor` is placed under Talker, but whether `ThinkerScheduler` and `CodePredictorScheduler` need a separate documented split (their KV cache shapes are quite different) is tracked in [#538 §2.1](https://github.com/sgl-project/sglang-omni/issues/538).
 
 ### Error handling
 
@@ -341,29 +332,7 @@ class ModelRunner:
 
 Shared: `ForwardBatch` construction, sampling, repetition penalty, codec suppression, output processing.
 
-> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current hook into `before_forward` (always mutates `forward_batch` in place) and an explicit `custom_forward` branch. The current "the hook returned a value, so short-circuit" pattern is misleading; the explicit split makes the prefill-with-injection path (Fish TTS) honest.
->
-> **Verified status (2026-05-23):** not yet implemented. `sglang_omni/model_runner/base.py:33` `execute()` still uses the short-circuit pattern. Note: the actual code further splits the hook into `prepare_prefill` / `prepare_decode` (the doc body above shows the older single-hook form for clarity) — but the underlying `if batch_result is None → standard forward` short-circuit Chenyang flagged is unchanged. Proposed shape:
-
-```python
-def execute(self, scheduler_output):
-    forward_batch = ForwardBatch.init_new(...)
-
-    # Mutate forward_batch in place (e.g. inject multimodal embeds).
-    self.before_forward(forward_batch, ...)
-
-    # Two mutually exclusive paths:
-    #   - custom_forward: model-specific forward (e.g. Fish TTS prefill
-    #     with VQ embedding injection).
-    #   - default forward: standard tp_worker.forward_batch_generation.
-    if self.has_custom_forward:
-        forward_output = self.custom_forward(forward_batch, ...)
-    else:
-        forward_output = self.tp_worker.forward_batch_generation(forward_batch)
-
-    self.post_forward(forward_output, ...)
-    return ModelRunnerOutput(...)
-```
+> **Pending — Jingwen**: Refactor proposal (raised by Chenyang) — split the current hook into `before_forward` + explicit `custom_forward`. Verified not implemented as of 2026-05-23 (`sglang_omni/model_runner/base.py:33` still uses the short-circuit pattern). Tracked in [#538 §1.2](https://github.com/sgl-project/sglang-omni/issues/538) including the proposed code shape and decision ask.
 
 ### `ThinkerModelRunner`
 
@@ -513,9 +482,7 @@ Speech pipeline (8 stages): `preprocessing → image_encoder → audio_encoder �
 
 The "tower" terminology for image/audio encoders follows the official Qwen3-Omni names; we keep that vocabulary here rather than introducing a divergent local one.
 
-> **Pending — Jingwen**: `PipelineState` and `OmniEvent` are model-specific but read as framework-level types. Rename to disambiguate (suggested by Chenyang).
->
-> **Verified status (2026-05-23):** not yet renamed. Both names still live in `sglang_omni/models/qwen3_omni/payload_types.py` and are referenced by `components/preprocessor.py`, `components/streaming_detokenizer.py`, and `components/talker_prefill.py`. Same names also appear in `sglang_omni/models/ming_omni/io.py` — any rename should consider both models.
+> **Pending — Jingwen**: `PipelineState` / `OmniEvent` rename to disambiguate model-specific types from framework-level ones (suggested by Chenyang). Verified not renamed as of 2026-05-23 (lives in `qwen3_omni/payload_types.py` and `ming_omni/io.py`). Tracked in [#538 §1.3](https://github.com/sgl-project/sglang-omni/issues/538).
 
 ### Fish Audio S2-Pro
 
@@ -611,7 +578,7 @@ Stages may share GPUs. Earlier topologies hard-rejected same-GPU speech-stage pl
 
 Memory-fraction semantics have also been pinned down: vLLM's `gpu_memory_utilization` is a fraction of total VRAM, while SGLang's `mem_fraction_static` is a fraction of remaining VRAM after weights load — more principled for single-stage LLM, but ambiguous for omni where stages load sequentially and "remaining" depends on load order. The placement model now uses one explicit semantics rather than inheriting the ambiguity.
 
-Whether `factory` and `factory_args` should collapse into a single field is still open.[^q-factory-args-merge]
+Whether `factory` and `factory_args` should collapse into a single field is tracked in [#538 §2.2](https://github.com/sgl-project/sglang-omni/issues/538).
 
 ### `PipelineConfig` reference
 
@@ -655,15 +622,13 @@ graph TB
     Main -->|ZMQ| P3
 ```
 
-> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). `StageGroup` is the only consumer of `StageProcessSpec`, the subprocess entrypoint is ~40 lines, and the spec is a small dataclass — none of the three justifies its own file. Consolidating keeps "how a stage's processes get defined, spawned, and managed" in one place and leaves `mp_runner.py` focused on cross-stage orchestration.
->
-> **Verified status (2026-05-23):** not yet merged. `sglang_omni/pipeline/stage_group.py` and `sglang_omni/pipeline/stage_process.py` both still present; no `stage_workers.py` exists.
+> **Pending — Jingwen**: Merge `stage_group.py` + `stage_process.py` into a single `stage_workers.py` (suggested by Chenyang). Verified not merged as of 2026-05-23 (both files still separate; no `stage_workers.py` exists). Tracked in [#538 §1.4](https://github.com/sgl-project/sglang-omni/issues/538).
 
 ### `StageProcessSpec`
 
 A fully-resolved, picklable dataclass built once in the main process. Subprocesses never re-compile the pipeline config — they just construct a `Stage` from the spec and run it.
 
-A rename to `StageLaunchConfig` would carry the same meaning more clearly; this remains an open suggestion.[^q-spec-rename]
+A rename to `StageLaunchConfig` would carry the same meaning more clearly; tracked in [#538 §2.3](https://github.com/sgl-project/sglang-omni/issues/538).
 
 The main process resolves all dotted strings, injects `model_path` / `gpu_id` into factory args, allocates ZMQ endpoints, and computes stream targets and relay config. The spec captures everything the child process needs.
 
@@ -766,25 +731,13 @@ Everything else (`Stage`, `Coordinator`, `OmniScheduler`, `ModelRunner`, relay, 
 
 ---
 
-## Open design questions
-
-These are surfaced for visibility — none block current work. Footnotes from earlier sections land here.
-
-[^q-thinker-codepredictor-split]: **Thinker vs CodePredictor scheduler split.** `CodePredictor` is currently placed under Talker, but the KV cache shape diverges from `ThinkerScheduler` enough that a documented separation may be warranted. No proposal is on the table yet; tracking here so future scheduler refactors revisit it. (raised by Chenyang)
-
-[^q-realtime-streaming]: **Realtime streaming-input semantics.** The `/realtime` endpoint shipped in PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) (merged 2026-05-18) — WebSocket-backed streaming-in audio with SSE-style server events, aligned with OpenAI's realtime interface. Detailed protocol — chunk framing, partial-result emission, cancellation semantics — is documented in #385's session-state-machine implementation rather than mirrored here. Footnote retained as a forward reference. (raised by Huapeng)
-
-[^q-factory-args-merge]: **Collapse `factory` and `factory_args`.** Currently `StageConfig` carries `factory` (dotted path) and `factory_args` (dict) as separate fields. They could plausibly be one field — open question whether the gain in conciseness is worth losing the per-field type. (raised by Chenyang)
-
-[^q-spec-rename]: **`StageProcessSpec` → `StageLaunchConfig` rename.** "Spec" is vague; `StageLaunchConfig` reads as what it is — the picklable record of everything a subprocess needs to launch a stage. Cosmetic but worth doing the next time the class is touched. (raised by Chenyang)
-
----
-
 ## Progress Tracking
 
-[PR #334](https://github.com/sgl-project/sglang-omni/pull/334) — V1 pipeline is still being debugged to pass all CIs.
+[PR #334](https://github.com/sgl-project/sglang-omni/pull/334) introduced the V1 pipeline (merged 2026-05-02). Subsequent V1 work — including this RFC consolidation — is captured in the Design Decision History section below; ongoing follow-ups are tracked in [#538](https://github.com/sgl-project/sglang-omni/issues/538).
 
 Following the suggestion in [#188 (comment)](https://github.com/sgl-project/sglang-omni/issues/188#issuecomment-4161198732), we should also track how many files need to be touched and the upper bound of the cost of integrating a new model. Boson's upcoming model will serve as the first concrete data point.
+
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** The `/realtime` endpoint shipped in PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) (merged 2026-05-18) — WebSocket-backed streaming-in audio with SSE-style server events, aligned with OpenAI's realtime interface. Detailed protocol — chunk framing, partial-result emission, cancellation semantics — is documented in #385's session-state-machine implementation rather than mirrored here. Footnote retained as a forward reference. (raised by Huapeng)
 
 ---
 
