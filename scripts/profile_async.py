@@ -34,22 +34,55 @@ MODEL = "boson-sglang/higgs-audio-v3-tts-4b-base"
 INJECT = f"{REPO}/scripts/profile_inject"
 
 # (tag, concurrency, output_len, warmup_steps, capture_steps)
+# Windows are kept well under the EOC-bound natural decode length (~the prompts
+# stop on EOC before max_new_tokens), so cudaProfilerStop always fires inside
+# the run. A ~30-step steady-state window is ample to characterise per-step gaps.
 CONFIGS = [
-    ("bs1_olen256", 1, 256, 40, 120),
-    ("bs4_olen256", 4, 256, 40, 120),
-    ("bs16_olen256", 16, 256, 40, 120),
-    ("bs32_olen256", 32, 256, 40, 120),
-    ("bs4_olen64", 4, 64, 10, 40),
-    ("bs4_olen1024", 4, 1024, 100, 300),
+    ("bs1_olen256", 1, 256, 10, 30),
+    ("bs4_olen256", 4, 256, 10, 30),
+    ("bs16_olen256", 16, 256, 10, 30),
+    ("bs32_olen256", 32, 256, 10, 30),
+    ("bs4_olen64", 4, 64, 8, 24),
+    ("bs4_olen1024", 4, 1024, 10, 30),
 ]
 
 
 def _kill_servers():
-    subprocess.run("ps aux | grep '[s]glang_omni.cli serve' | awk '{print $2}' "
-                   "| xargs -r kill -9", shell=True)
-    subprocess.run("ps aux | grep '[n]sys profile' | awk '{print $2}' "
-                   "| xargs -r kill -9", shell=True)
-    time.sleep(4)
+    # Kill the whole pipeline: the cli, the spawned stage subprocesses (which
+    # actually bind the API port and otherwise linger -> the next server falls
+    # back to an ephemeral port), and the nsys wrapper.
+    pat = "[s]glang_omni.cli serve|[n]sys profile|[s]tage_process|multiprocessing.spawn"
+    subprocess.run(f"ps aux | grep -E '{pat}' | awk '{{print $2}}' | xargs -r kill -9",
+                   shell=True)
+    time.sleep(5)
+
+
+def _actual_port(log_path, default):
+    """The omni server falls back to an ephemeral port if the requested one is
+    taken; read the real port it bound from its log."""
+    import re
+    try:
+        m = re.findall(r"Uvicorn running on http://[\d.]+:(\d+)", open(log_path).read())
+        if m:
+            return int(m[-1])
+    except FileNotFoundError:
+        pass
+    return default
+
+
+def _health(port, timeout=60):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            requests.get(f"http://127.0.0.1:{port}/health", timeout=3)
+            return True
+        except Exception:
+            try:
+                requests.get(f"http://127.0.0.1:{port}/", timeout=3)
+                return True
+            except Exception:
+                time.sleep(2)
+    return False
 
 
 def _launch(tag, gpu, port, warmup, capture, rep_path, log_path):
@@ -58,6 +91,12 @@ def _launch(tag, gpu, port, warmup, capture, rep_path, log_path):
     env["SGLANG_OMNI_ENABLE_ASYNC_DECODE"] = "1"
     env["SGLANG_OMNI_PROFILE_WARMUP"] = str(warmup)
     env["SGLANG_OMNI_PROFILE_CAPTURE"] = str(capture)
+    # Cap the KV/static footprint so the profile fits alongside other jobs on a
+    # shared card (decode needs KV only for the active batch). Overridable.
+    env.setdefault("SGLANG_OMNI_PROFILE_MEM_FRAC",
+                   os.environ.get("PROF_MEM_FRAC", "0.12"))
+    env.setdefault("SGLANG_OMNI_PROFILE_MAXRUN", "34")
+    env.setdefault("SGLANG_OMNI_PROFILE_MAXTOK", "49152")
     env["PYTHONPATH"] = f"{INJECT}:{REPO}"
     log = open(log_path, "w")
     cmd = [
@@ -133,9 +172,15 @@ def _analyze(rep_path):
     )
     if out.returncode != 0:
         return {"error": f"nsys stats failed: {out.stderr[:200]}"}
-    # Find the CSV block (header contains Start and Duration columns)
+    # nsys prints preamble lines ("Generating SQLite...", "Processing...") before
+    # the real CSV header. Find the header line (starts with "Start (ns)").
+    lines = out.stdout.splitlines()
+    hdr_i = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("Start (ns)")), None)
+    if hdr_i is None:
+        return {"error": f"no CSV header in nsys output: {lines[:3]}"}
     rows = []
-    reader = csv.DictReader(io.StringIO(out.stdout))
+    reader = csv.DictReader(io.StringIO("\n".join(lines[hdr_i:])))
     start_key = dur_key = None
     for fn in (reader.fieldnames or []):
         lf = fn.lower()
@@ -200,17 +245,21 @@ def main():
 
     configs = [c for c in CONFIGS if (not args.only or c[0] == args.only)]
     results = {}
-    for tag, conc, olen, warmup, capture in configs:
+    for ci, (tag, conc, olen, warmup, capture) in enumerate(configs):
+        port = args.port + ci  # unique per config to avoid stale-port fallback
         print(f"\n===== {tag} (conc={conc} olen={olen} "
-              f"warmup={warmup} capture={capture}) =====", flush=True)
+              f"warmup={warmup} capture={capture} port={port}) =====", flush=True)
         _kill_servers()
         rep = os.path.join(args.outdir, tag)
         log = f"/tmp/profile_{tag}.log"
-        proc, _ = _launch(tag, args.gpu, args.port, warmup, capture, rep, log)
+        proc, _ = _launch(tag, args.gpu, port, warmup, capture, rep, log)
         try:
             _wait_ready(log, proc)
-            print("  server ready; driving load...", flush=True)
-            _drive(args.port, sample, conc, olen)
+            real_port = _actual_port(log, port)
+            if not _health(real_port):
+                raise RuntimeError(f"server not reachable on port {real_port}")
+            print(f"  server ready on port {real_port}; driving load...", flush=True)
+            _drive(real_port, sample, conc, olen)
             ok = _wait_capture_done(log, proc)
             print(f"  capture done={ok}", flush=True)
         finally:
