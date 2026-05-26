@@ -186,6 +186,28 @@ Each event carries a base64-encoded audio chunk; the stream ends with `data: [DO
 Both expose an identical request API. The 1.7B model has higher capacity (typically better
 quality) at a larger memory and latency cost; the 0.6B model is lighter and faster.
 
+## Benchmark Results
+
+Qwen3-TTS-12Hz-0.6B-Base on Seed-TTS EN (1088 utterances, reference voice cloning from each
+prompt), concurrency 16, WER scored with HF Whisper-large-v3. Hardware: 1× H200 SXM.
+
+| Metric | Value |
+|---|---|
+| WER (corpus, excl. runaway outliers) | 1.07% |
+| WER (per-sample median / p95) | 0.00% / 9.09% |
+| WER (corpus micro-avg, raw) | 18.29% |
+| Runaway samples (>50% WER) | 2 / 1088 (0.2%) |
+| Latency mean / median (s) | 6.61 / 6.24 |
+| RTF mean / median | 1.51 / 1.48 |
+| Output throughput (tok/s) | 115.4 |
+| Completed / failed requests | 1088 / 0 |
+
+Typical output is clean (0.00% median WER, 9.09% p95). Two utterances (0.2%) ran away into a
+repetition loop and generated ~164 s of looping audio up to `max_new_tokens`, which alone lifts
+the raw micro-average to 18.29%; excluding those, corpus WER is 1.07%. RTF > 1 reflects the
+0.6B codec pipeline at concurrency 16, not single-stream latency. The 1.7B checkpoint trades
+latency for quality.
+
 ## Known Limitations
 
 - **Reference audio recommended.** As a cloning model, Qwen3-TTS Base produces robotic speech
@@ -194,3 +216,7 @@ quality) at a larger memory and latency cost; the 0.6B model is lighter and fast
   speaker similarity than speaker-embedding-only (x-vector) mode.
 - **Language detection.** `language: auto` may misdetect for short or code-switched inputs;
   set `language` explicitly when you know the target language.
+- **Rare runaway generation.** Roughly 0.2% of utterances (observed on the 0.6B checkpoint) can
+  fall into a repetition loop and keep generating up to `max_new_tokens`. Raising
+  `repetition_penalty` (default `1.05`) or lowering `max_new_tokens` mitigates it; the 1.7B
+  checkpoint is less prone.
