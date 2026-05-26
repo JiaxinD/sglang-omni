@@ -125,11 +125,29 @@ Each event carries a base64-encoded audio chunk; the stream ends with `data: [DO
 > parameters such as `top_p`, `top_k`, and `temperature` are not used. Reference-clip voice
 > cloning (`references`) is **not** supported for Voxtral — use a preset `voice` instead.
 
-## Performance
+## Benchmark Results
 
-Per the [model card](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603), Voxtral targets
-production voice agents: ~70 ms first-audio latency at concurrency 1 (RTF ≈ 0.10) and high
-throughput under load on a single GPU with ≥16 GB of memory. Output is 24 kHz.
+Seed-TTS EN (full set, 1088 utterances), bf16, `max_new_tokens=4096`,
+`--no-ref-audio --voice cheerful_female`, concurrency 16, WER scored with HF
+Whisper-large-v3. Hardware: 1× H200 SXM.
+
+| Metric | Value |
+|---|---|
+| WER (corpus micro-avg) | 1.20% |
+| WER (per-sample mean / median) | 1.22% / 0.00% |
+| WER (per-sample p95 / max) | 9.09% / 42.86% |
+| >50% WER samples | 0 / 1088 |
+| Latency mean / median (s) | 2.94 / 2.86 |
+| Latency p95 / p99 (s) | 4.56 / 5.37 |
+| RTF mean / median | 0.519 / 0.541 |
+| Output throughput (tok/s) | 383.7 |
+| Throughput (req/s) | 5.40 |
+| Completed / failed requests | 1088 / 0 |
+
+Reproduce with the SeedTTS command in the [TTS usage guide](../basic_usage/tts.md). The Voxtral
+model card also quotes ~70 ms first-audio latency at concurrency 1; the table above is a
+throughput-oriented run at concurrency 16, so its RTF reflects batched load rather than the
+latency-optimized single-stream figure. Output is 24 kHz.
 
 ## Known Limitations
 
