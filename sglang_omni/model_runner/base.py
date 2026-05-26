@@ -141,6 +141,12 @@ class ModelRunner:
             return None
         forward_batch, schedule_batch, model_worker_batch, is_prefill = built
         assert not is_prefill, "async lookahead launch is decode-only"
+        # Mark this step as a lookahead launch so model-runner prepare hooks can
+        # tell it apart from a fast-path (sync) decode step, without a persistent
+        # flag on the runner. Only set on the launch path; the sync execute()
+        # leaves it absent. (forward_batch already carries per-step scratch like
+        # req_ids, so a transient attribute here is consistent with its use.)
+        forward_batch._is_lookahead = True
         batch_result = self._prepare_and_forward(
             forward_batch, schedule_batch, scheduler_output.requests, is_prefill
         )

@@ -116,7 +116,11 @@ class HiggsTTSModelRunner(ModelRunner):
             rows_py, dtype=torch.long, device=model._cg_row_indices.device
         )
 
-        if self._async_enabled and n_real > 0:
+        if (
+            self._async_enabled
+            and getattr(forward_batch, "_is_lookahead", False)
+            and n_real > 0
+        ):
             # Async-lookahead overrun guard (GPU-side, no host sync): a request
             # that finished via EOC at the prior step is still in this batch
             # with pool.generation_done=True. Running the normal decode forward
@@ -124,6 +128,12 @@ class HiggsTTSModelRunner(ModelRunner):
             # to the reset padding row — its overrun output is discarded by the
             # collect's finished()/was_done skip anyway. Length-finish rows have
             # generation_done=False and are untouched.
+            #
+            # Only the lookahead launch path can carry such an overrun (the
+            # 1-wasted-step lag). On a fast-path (sync) decode step finished reqs
+            # are filtered out before the step, so no generation_done row is ever
+            # present and this gather+torch.where would be pure wasted GPU work —
+            # gate it on the per-step lookahead marker set in execute_launch.
             rows_t_real = model._cg_row_indices[:n_real]
             done = model._sampler_pool.generation_done[rows_t_real]
             model._cg_row_indices[:n_real] = torch.where(
