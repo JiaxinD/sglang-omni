@@ -9,10 +9,10 @@ Captures async-decode overlap stats WITHOUT changing the math or timing:
 
 Production code is untouched; this lives only on the benchmark's PYTHONPATH.
 """
+
 import json
 import os
 import signal
-
 
 _runners = []  # ModelRunner instances seen
 

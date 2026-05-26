@@ -18,8 +18,6 @@ import queue as _queue_mod
 import time
 import types
 from collections import deque
-
-import torch
 from typing import Any, Callable
 
 import torch
@@ -1006,9 +1004,7 @@ class OmniScheduler:
         """
         pre_finished = [r.finished() for r in batch.reqs]
         # rids finished in a PRIOR step (overrun) — suppress their stream emit
-        skip_rids = {
-            batch.reqs[i].rid for i, was in enumerate(pre_finished) if was
-        }
+        skip_rids = {batch.reqs[i].rid for i, was in enumerate(pre_finished) if was}
         result = self._run_batch_resolve(
             batch, sched_output, pending_step, skip_rids=skip_rids
         )

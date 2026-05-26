@@ -13,6 +13,7 @@ greedy to argmax (sampler.py ``_sample_independent_batched``), production
 production sampler path OFF vs ON. Production code is untouched; this lives only
 on the verify script's PYTHONPATH.
 """
+
 import hashlib
 import os
 

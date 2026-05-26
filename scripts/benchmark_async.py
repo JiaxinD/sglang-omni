@@ -48,9 +48,21 @@ def _launch(port, gpu, async_on, stats_path, log_path):
         os.remove(stats_path)
     log = open(log_path, "w")
     return subprocess.Popen(
-        [sys.executable, "-m", "sglang_omni.cli", "serve",
-         "--config", "examples/configs/higgs_tts.yaml", "--port", str(port)],
-        cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+        [
+            sys.executable,
+            "-m",
+            "sglang_omni.cli",
+            "serve",
+            "--config",
+            "examples/configs/higgs_tts.yaml",
+            "--port",
+            str(port),
+        ],
+        cwd=REPO,
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
 
 
@@ -80,8 +92,13 @@ def _kill(proc):
 
 
 def _one(url, s, max_new_tokens):
-    payload = {"model": MODEL, "input": s.target_text, "ref_audio": s.ref_audio,
-               "ref_text": s.ref_text, "max_new_tokens": max_new_tokens}
+    payload = {
+        "model": MODEL,
+        "input": s.target_text,
+        "ref_audio": s.ref_audio,
+        "ref_text": s.ref_text,
+        "max_new_tokens": max_new_tokens,
+    }
     t0 = time.time()
     r = requests.post(url, json=payload, timeout=300)
     dt = time.time() - t0
@@ -127,8 +144,9 @@ def main():
             proc = _launch(args.port, args.gpu, async_on, stats, log)
             try:
                 _wait(log, proc)
-                lat, wall = _run(args.port, samples, args.requests, conc,
-                                 args.max_new_tokens)
+                lat, wall = _run(
+                    args.port, samples, args.requests, conc, args.max_new_tokens
+                )
             finally:
                 _kill(proc)
                 time.sleep(5)
@@ -137,19 +155,28 @@ def main():
                 qstats = json.load(open(stats))
             steps = qstats.get("query_hit", 0) + qstats.get("query_miss", 0)
             results[(conc, tag)] = {
-                "lat_mean": statistics.mean(lat), "lat_p50": _pct(lat, 50),
-                "lat_p99": _pct(lat, 99), "wall": wall, "n": len(lat),
-                "throughput": len(lat) / wall, "steps": steps, **qstats,
+                "lat_mean": statistics.mean(lat),
+                "lat_p50": _pct(lat, 50),
+                "lat_p99": _pct(lat, 99),
+                "wall": wall,
+                "n": len(lat),
+                "throughput": len(lat) / wall,
+                "steps": steps,
+                **qstats,
             }
-            print(f"  mean={statistics.mean(lat)*1000:.0f}ms "
-                  f"p50={_pct(lat,50)*1000:.0f}ms p99={_pct(lat,99)*1000:.0f}ms "
-                  f"thrpt={len(lat)/wall:.2f}req/s steps={steps} "
-                  f"qhit={qstats.get('query_hit','?')}/{qstats.get('query_miss','?')}",
-                  flush=True)
+            print(
+                f"  mean={statistics.mean(lat)*1000:.0f}ms "
+                f"p50={_pct(lat,50)*1000:.0f}ms p99={_pct(lat,99)*1000:.0f}ms "
+                f"thrpt={len(lat)/wall:.2f}req/s steps={steps} "
+                f"qhit={qstats.get('query_hit','?')}/{qstats.get('query_miss','?')}",
+                flush=True,
+            )
 
     print("\n" + "=" * 70)
-    print(f"{'config':<16}{'mean ms':>10}{'p50 ms':>9}{'p99 ms':>9}"
-          f"{'req/s':>8}{'qhit%':>8}")
+    print(
+        f"{'config':<16}{'mean ms':>10}{'p50 ms':>9}{'p99 ms':>9}"
+        f"{'req/s':>8}{'qhit%':>8}"
+    )
     for conc in concs:
         for tag in ("OFF", "ON"):
             r = results.get((conc, tag))
@@ -158,17 +185,24 @@ def main():
             qh = r.get("query_hit", 0)
             qm = r.get("query_miss", 0)
             qpct = (100 * qh / (qh + qm)) if (qh + qm) else 0
-            print(f"bs={conc:<2} {tag:<10}{r['lat_mean']*1000:>10.0f}"
-                  f"{r['lat_p50']*1000:>9.0f}{r['lat_p99']*1000:>9.0f}"
-                  f"{r['throughput']:>8.2f}{qpct:>8.1f}")
+            print(
+                f"bs={conc:<2} {tag:<10}{r['lat_mean']*1000:>10.0f}"
+                f"{r['lat_p50']*1000:>9.0f}{r['lat_p99']*1000:>9.0f}"
+                f"{r['throughput']:>8.2f}{qpct:>8.1f}"
+            )
         off, on = results.get((conc, "OFF")), results.get((conc, "ON"))
         if off and on:
             d = (off["lat_mean"] - on["lat_mean"]) / off["lat_mean"] * 100
-            print(f"  -> bs={conc} async latency delta: {d:+.1f}% "
-                  f"(neg=faster); throughput {on['throughput']/off['throughput']:.3f}x")
+            print(
+                f"  -> bs={conc} async latency delta: {d:+.1f}% "
+                f"(neg=faster); throughput {on['throughput']/off['throughput']:.3f}x"
+            )
     print("=" * 70)
-    json.dump({f"{c}_{t}": v for (c, t), v in results.items()},
-              open("/tmp/bench_results.json", "w"), indent=2)
+    json.dump(
+        {f"{c}_{t}": v for (c, t), v in results.items()},
+        open("/tmp/bench_results.json", "w"),
+        indent=2,
+    )
 
 
 if __name__ == "__main__":
