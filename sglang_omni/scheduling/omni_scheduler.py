@@ -629,13 +629,18 @@ class OmniScheduler:
         ]
         return SchedulerOutput(requests=sched_reqs, batch_data=batch)
 
-    def _emit_stream_output(self, sched_output, mr_output) -> None:
+    def _emit_stream_output(self, sched_output, mr_output, skip_rids=()) -> None:
         """Emit per-request stream chunks from a ModelRunnerOutput. Shared by
-        the sync and async (resolve) paths."""
+        the sync and async (resolve) paths. ``skip_rids`` suppresses emission
+        for requests already finished in an earlier step (the lookahead
+        overrun) — emitting their extra chunk would corrupt the downstream
+        vocoder's delayed-code stream."""
         if self._stream_output_builder is None:
             return
         for sched_req in sched_output.requests:
             rid = sched_req.request_id
+            if rid in skip_rids:
+                continue
             req_output = mr_output.outputs[rid]
             emitted_any = False
             for msg in self._stream_output_builder(rid, sched_req.data, req_output):
@@ -675,9 +680,10 @@ class OmniScheduler:
         pending_step = self._model_runner.execute_launch(sched_output)
         return sched_output, pending_step
 
-    def _run_batch_resolve(self, batch, sched_output, pending_step):
+    def _run_batch_resolve(self, batch, sched_output, pending_step, skip_rids=()):
         """Async: resolve the given launched step (wait event, host collect),
-        emit its stream chunks, and return its GenerationBatchResult.
+        emit its stream chunks (except overrun reqs in ``skip_rids``), and
+        return its GenerationBatchResult.
 
         next_token_ids comes from the resolved step's own batch_result, not
         ``batch.output_ids`` — the running batch's output_ids was already
@@ -688,7 +694,7 @@ class OmniScheduler:
         mr_output = self._model_runner.execute_resolve(pending_step)
         if mr_output is None:
             return _FAILED_BATCH_RESULT
-        self._emit_stream_output(sched_output, mr_output)
+        self._emit_stream_output(sched_output, mr_output, skip_rids=skip_rids)
         return GenerationBatchResult(
             logits_output=None,
             next_token_ids=pending_step.batch_result.next_token_ids,
@@ -983,14 +989,25 @@ class OmniScheduler:
         Lookahead overrun: a request that finishes at step S is still present in
         step S+1's (already-launched) batch — its S+1 output is discarded by the
         collect's ``_cg_was_done`` skip, but upstream process_batch_result would
-        re-free its KV. So drop already-finished reqs (and their next_token_ids
-        rows) from this lagged batch before processing. Reqs that finish *at*
-        this step are not yet ``finished()`` and are kept/processed normally.
+        re-free its KV. So drop reqs that were ALREADY finished in an earlier
+        step (and their next_token_ids rows) from this lagged batch.
+
+        Crucially, snapshot finished-state BEFORE the resolve: a req that
+        finishes *during* this step's collect (e.g. an EOC finish, which
+        _mark_sampler_finished sets) must be KEPT so process_batch_result emits
+        it — only reqs finished in a *prior* step are the overrun to drop.
         """
-        result = self._run_batch_resolve(batch, sched_output, pending_step)
+        pre_finished = [r.finished() for r in batch.reqs]
+        # rids finished in a PRIOR step (overrun) — suppress their stream emit
+        skip_rids = {
+            batch.reqs[i].rid for i, was in enumerate(pre_finished) if was
+        }
+        result = self._run_batch_resolve(
+            batch, sched_output, pending_step, skip_rids=skip_rids
+        )
         if result is _FAILED_BATCH_RESULT:
             return
-        keep = [i for i, r in enumerate(batch.reqs) if not r.finished()]
+        keep = [i for i, was_finished in enumerate(pre_finished) if not was_finished]
         if len(keep) < len(batch.reqs):
             if result.next_token_ids is not None and keep:
                 idx = torch.tensor(keep, device=result.next_token_ids.device)
