@@ -50,6 +50,39 @@ class HiggsTTSModelRunner(ModelRunner):
         del schedule_batch
         self._collect_step_outputs_cg(result, forward_batch, requests)
 
+    def post_decode_launch(self, result, forward_batch, requests):
+        """Async-decode GPU half: scatter + pack (GPU->GPU), then a
+        non-blocking D2H of the staging snapshot into a pinned host buffer.
+        Returns the buffer; the base runner records the event right after, so
+        ``event.query()`` then means "this snapshot is on the host".
+        """
+        del result
+        if len(requests) == 0:
+            return None
+        n_real = len(requests)
+        bs = int(forward_batch.batch_size)
+        if bs < n_real:
+            raise ValueError(
+                f"forward_batch.batch_size ({bs}) < len(requests) ({n_real})"
+            )
+        staging = self._decode_pack_gpu(n_real)
+        host_buf = self._next_host_staging(self.model._cg_collect_staging)
+        host_buf[:n_real].copy_(staging[:n_real], non_blocking=True)
+        return host_buf
+
+    def post_decode_resolve(
+        self, host_buf, result, forward_batch, schedule_batch, requests
+    ):
+        """Async-decode host half: read the already-copied pinned snapshot and
+        run the per-request collect loop. Mirrors the tail of
+        ``_collect_step_outputs_cg`` (shares ``_decode_collect_host``).
+        """
+        del forward_batch, schedule_batch
+        if len(requests) == 0:
+            return
+        n_real = len(requests)
+        self._decode_collect_host(host_buf[:n_real], result, requests)
+
     def _populate_cg_buffers(self, forward_batch, requests) -> None:
         """Fill the model's CG buffers for one decode step.
 
@@ -128,19 +161,30 @@ class HiggsTTSModelRunner(ModelRunner):
     def _collect_step_outputs_cg(
         self, result: Any, forward_batch: Any, requests: list
     ) -> None:
-        """Scatter shadow state back into the pool and append per-request
-        codes from the CG output buffers.
+        """Synchronous collect: scatter + pack (GPU->GPU), one blocking D2H,
+        then the host collect loop. Used when async decode is off; behavior is
+        identical to the pre-split implementation (now factored into
+        ``_decode_pack_gpu`` + ``_decode_collect_host``, which the async
+        ``post_decode_launch`` / ``post_decode_resolve`` also reuse).
         """
         if len(requests) == 0:
             return
-        model = self.model
         n_real = len(requests)
         bs = int(forward_batch.batch_size)
         if bs < n_real:
             raise ValueError(
                 f"forward_batch.batch_size ({bs}) < len(requests) ({n_real})"
             )
+        staging = self._decode_pack_gpu(n_real)
+        combined_cpu = staging[:n_real].cpu()  # one blocking D2H (sync path)
+        self._decode_collect_host(combined_cpu, result, requests)
 
+    def _decode_pack_gpu(self, n_real: int) -> torch.Tensor:
+        """Scatter shadow sampler state back into the pool and pack the three
+        collect tensors (codes / was_done / generation_done) into the staging
+        buffer. All GPU->GPU; returns the device staging buffer.
+        """
+        model = self.model
         rows_t = model._cg_row_indices[:n_real]
         pool = model._sampler_pool
         pool.delay_count[rows_t] = model._cg_active_delay_count[:n_real]
@@ -148,13 +192,24 @@ class HiggsTTSModelRunner(ModelRunner):
         pool.generation_done[rows_t] = model._cg_active_generation_done[:n_real]
         pool.last_codes[rows_t] = model._cg_active_last_codes[:n_real]
 
-        # Note(Jiaxin): pack the 3 tensors, copy back with one D2H, then slice on host.
+        # Note(Jiaxin): pack the 3 tensors so a single D2H pulls them all back.
         num_codebooks = model._cg_codes_BN.shape[1]
         staging = model._cg_collect_staging
         staging[:n_real, :num_codebooks] = model._cg_codes_BN[:n_real]
         staging[:n_real, num_codebooks] = model._cg_was_done[:n_real]
         staging[:n_real, num_codebooks + 1] = model._cg_active_generation_done[:n_real]
-        combined_cpu = staging[:n_real].cpu()
+        return staging
+
+    def _decode_collect_host(
+        self, combined_cpu: torch.Tensor, result: Any, requests: list
+    ) -> None:
+        """Host-side collect loop over an already-D2H'd staging snapshot:
+        append per-request codes, mark finishes, build ``result.next_token_ids``.
+        Skips chunked and already-done rows (the latter is what makes the
+        one-step-lookahead overrun harmless — see r1_idempotency_check.md).
+        """
+        model = self.model
+        num_codebooks = model._cg_codes_BN.shape[1]
         codes_BN_cpu = combined_cpu[:, :num_codebooks]
         was_done_cpu = combined_cpu[:, num_codebooks].bool().tolist()
         gen_done_after_cpu = combined_cpu[:, num_codebooks + 1].bool().tolist()
