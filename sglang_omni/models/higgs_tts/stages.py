@@ -284,6 +284,13 @@ def create_sglang_tts_engine_executor(
         max_new_tokens_cap=max_new_tokens,
     )
 
+    # One-step-lookahead async decode. Off by default; opt in via the
+    # SGLANG_OMNI_ENABLE_ASYNC_DECODE=1 env flag (or server_args attribute).
+    # Higgs is the first model migrated to the async-safe split hooks.
+    enable_async_decode = bool(
+        int(os.environ.get("SGLANG_OMNI_ENABLE_ASYNC_DECODE", "0"))
+    ) or bool(getattr(server_args, "enable_async_decode", False))
+
     return OmniScheduler(
         tp_worker=model_worker,
         tree_cache=tree_cache,
@@ -297,6 +304,7 @@ def create_sglang_tts_engine_executor(
         request_builder=request_builder,
         result_adapter=result_adapter,
         abort_callback=model.reset_request,
+        enable_async_decode=enable_async_decode,
     )
 
 
