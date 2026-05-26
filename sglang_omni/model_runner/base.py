@@ -195,6 +195,7 @@ class ModelRunner:
             pending.schedule_batch,
             pending.model_worker_batch,
             pending.scheduler_output,
+            set_output_ids=False,
         )
 
     # ------------------------------------------------------------------
@@ -272,10 +273,27 @@ class ModelRunner:
         return batch_result
 
     def _finalize(
-        self, batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output
+        self,
+        batch_result,
+        forward_batch,
+        schedule_batch,
+        model_worker_batch,
+        scheduler_output,
+        set_output_ids: bool = True,
     ) -> ModelRunnerOutput:
         """Final sampling (if still needed) + output extraction + per-request
-        bookkeeping. Shared tail of both the sync and async paths."""
+        bookkeeping. Shared tail of both the sync and async paths.
+
+        ``set_output_ids`` publishes this step's tokens onto
+        ``schedule_batch.output_ids`` so the NEXT step's ``prepare_for_decode``
+        can build its input_ids. The synchronous path needs this. The async
+        RESOLVE path must NOT do it: under launch-first the resolve runs one
+        step behind, and ``schedule_batch`` here is the *live* running batch
+        whose output_ids was already published by the (current) launch at the
+        right length — re-stamping the lagged step's next_token_ids would leave
+        a stale-length output_ids on the running batch, which the next
+        prepare_for_decode turns into an input_ids that mismatches seq_lens once
+        a request finishes mid-batch (the bs>1 replay size mismatch)."""
         if schedule_batch.is_prefill_only:
             if batch_result.next_token_ids is None:
                 batch_result.next_token_ids = torch.zeros(
@@ -290,7 +308,8 @@ class ModelRunner:
                 schedule_batch,
                 scheduler_output.requests,
             )
-        schedule_batch.output_ids = batch_result.next_token_ids
+        if set_output_ids:
+            schedule_batch.output_ids = batch_result.next_token_ids
 
         outputs = self.output_processor.process(batch_result, scheduler_output)
         self.post_process_outputs(batch_result, scheduler_output, outputs)

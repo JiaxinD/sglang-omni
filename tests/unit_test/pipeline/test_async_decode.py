@@ -55,8 +55,9 @@ class _StubRunner(ModelRunner):
         self.resolve_calls += 1
         self.last_resolved_buf = host_buf
 
-    def _finalize(self, batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output):
+    def _finalize(self, batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output, set_output_ids=True):
         self.finalize_calls += 1
+        self.last_set_output_ids = set_output_ids
         return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
 
 
@@ -90,6 +91,12 @@ def test_launch_returns_handle_resolve_consumes_it():
     assert out is not None
     assert (r.launch_calls, r.resolve_calls, r.finalize_calls) == (1, 1, 1)
     assert (r._async_query_hit, r._async_query_miss) == (1, 0)
+    # resolve must NOT re-publish output_ids: under launch-first it runs one
+    # step behind on the LIVE running batch, whose output_ids the current launch
+    # already set at the right length. Re-stamping the lagged step's tokens
+    # leaves a stale-length output_ids -> input_ids/seq_lens mismatch once a req
+    # finishes mid-batch (the bs>1 replay crash). The launch publishes it.
+    assert r.last_set_output_ids is False
 
 
 def test_two_launches_return_distinct_handles():
