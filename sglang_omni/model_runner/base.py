@@ -35,8 +35,10 @@ class _PendingStep:
 
     event: Any  # torch.cuda.Event, recorded right after the async D2H copy
     host_buf: Any  # pinned host tensor holding this step's staging snapshot
-    requests: list  # this step's sched_output.requests (resolve routing)
+    scheduler_output: Any  # this step's SchedulerOutput (routing + output proc)
+    forward_batch: Any  # for resolve-time finalize sampling
     schedule_batch: Any  # to set .output_ids during resolve
+    model_worker_batch: Any  # for the prefill-only finalize branch (unused in decode)
     batch_result: Any  # carries logits_output (device of next_token_ids)
     n_real: int  # number of real (non-padding) rows this step
 
@@ -61,6 +63,10 @@ class ModelRunner:
         self._pending: _PendingStep | None = None
         self._staging_slot: int = 0
         self._host_staging_buffers: list[torch.Tensor] = []
+        # Observability: how often resolve found the event already done
+        # (overlap worked) vs had to block on synchronize().
+        self._async_query_hit: int = 0
+        self._async_query_miss: int = 0
 
     def _next_host_staging(self, device_staging: torch.Tensor) -> torch.Tensor:
         """Return a pinned host buffer mirroring ``device_staging``'s full
@@ -87,7 +93,118 @@ class ModelRunner:
         return buf
 
     def execute(self, scheduler_output: Any) -> ModelRunnerOutput:
-        """Full pipeline: build batch → prepare → forward → post → sample → output."""
+        """Full synchronous pipeline: build → prepare → forward → post →
+        sample → output.
+
+        Used when async decode is disabled. Behavior is byte-identical to the
+        pre-async implementation: it is a pure extraction over the same shared
+        sub-steps (``_build_forward_batch`` / ``_prepare_and_forward`` /
+        ``_finalize``) that ``execute_launch`` + ``execute_resolve`` also use,
+        in the same order. Async decode splits this at the post-decode boundary.
+        """
+        built = self._build_forward_batch(scheduler_output)
+        if built is None:
+            return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
+        forward_batch, schedule_batch, model_worker_batch, is_prefill = built
+        batch_result = self._prepare_and_forward(
+            forward_batch, schedule_batch, scheduler_output.requests, is_prefill
+        )
+        if is_prefill:
+            self.post_prefill(
+                batch_result, forward_batch, schedule_batch, scheduler_output.requests
+            )
+        else:
+            self.post_decode(
+                batch_result, forward_batch, schedule_batch, scheduler_output.requests
+            )
+        return self._finalize(
+            batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output
+        )
+
+    # ------------------------------------------------------------------
+    # Async decode: launch / resolve split (one-step lookahead, decode only)
+    # ------------------------------------------------------------------
+
+    def execute_launch(self, scheduler_output: Any) -> None:
+        """Enqueue a decode step's forward + on-GPU sample, snapshot its
+        collect state into a pinned host buffer (``post_decode_launch``), and
+        record a CUDA event right after that async D2H. Does NOT wait on the
+        GPU. Decode batches only.
+
+        Invariant: ``self._pending`` is None on entry (at most one step in
+        flight). Pair every ``execute_launch`` with one ``execute_resolve``.
+        """
+        assert (
+            self._pending is None
+        ), "execute_launch with a step already in flight — resolve it first"
+        built = self._build_forward_batch(scheduler_output)
+        if built is None:
+            return
+        forward_batch, schedule_batch, model_worker_batch, is_prefill = built
+        assert not is_prefill, "async lookahead launch is decode-only"
+        batch_result = self._prepare_and_forward(
+            forward_batch, schedule_batch, scheduler_output.requests, is_prefill
+        )
+        host_buf = self.post_decode_launch(
+            batch_result, forward_batch, scheduler_output.requests
+        )
+        event = torch.cuda.Event()
+        # Recorded AFTER the async D2H enqueued by post_decode_launch, so
+        # event.query()==True means the host buffer is ready (design.md §3).
+        event.record()
+        self._pending = _PendingStep(
+            event=event,
+            host_buf=host_buf,
+            scheduler_output=scheduler_output,
+            forward_batch=forward_batch,
+            schedule_batch=schedule_batch,
+            model_worker_batch=model_worker_batch,
+            batch_result=batch_result,
+            n_real=len(scheduler_output.requests),
+        )
+
+    def execute_resolve(self) -> ModelRunnerOutput | None:
+        """Consume the in-flight decode step: wait on its event (non-blocking
+        ``query()``, else ``synchronize()``), read the pinned host buffer and
+        run the per-request collect loop (``post_decode_resolve``), then
+        finalize sampling/output. Returns that step's ``ModelRunnerOutput``
+        (the launched step — not the current one), or None if nothing is in
+        flight (e.g. first iteration / after a drain).
+        """
+        pending = self._pending
+        self._pending = None
+        if pending is None:
+            return None
+        if pending.event.query():
+            self._async_query_hit += 1
+        else:
+            pending.event.synchronize()
+            self._async_query_miss += 1
+        self.post_decode_resolve(
+            pending.host_buf,
+            pending.batch_result,
+            pending.forward_batch,
+            pending.schedule_batch,
+            pending.scheduler_output.requests,
+        )
+        return self._finalize(
+            pending.batch_result,
+            pending.forward_batch,
+            pending.schedule_batch,
+            pending.model_worker_batch,
+            pending.scheduler_output,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared execute sub-steps — one definition routed through by both the
+    # synchronous execute() and the async launch/resolve, so behavior can't
+    # drift between the two paths.
+    # ------------------------------------------------------------------
+
+    def _build_forward_batch(self, scheduler_output: Any):
+        """Build the ForwardBatch + capture-hidden mode. Returns
+        ``(forward_batch, schedule_batch, model_worker_batch, is_prefill)``, or
+        None when there is no batch to run."""
         from sglang.srt.model_executor.forward_batch_info import (
             CaptureHiddenMode,
             ForwardBatch,
@@ -98,7 +215,7 @@ class ModelRunner:
 
         schedule_batch = scheduler_output.batch_data
         if schedule_batch is None:
-            return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
+            return None
 
         model_worker_batch = schedule_batch.get_model_worker_batch()
         is_prefill = bool(schedule_batch.forward_mode.is_extend())
@@ -120,61 +237,43 @@ class ModelRunner:
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.tp_worker.model_runner
         )
+        return forward_batch, schedule_batch, model_worker_batch, is_prefill
 
-        # Hook: model-specific preparation. Returns batch_result if it ran
-        # a custom forward path, or None for standard forward.
+    def _prepare_and_forward(self, forward_batch, schedule_batch, requests, is_prefill):
+        """Prepare hook → standard forward (if not custom) → sample-before-post
+        block. Returns ``batch_result``."""
+        # Hook: model-specific preparation. Returns batch_result if it ran a
+        # custom forward path, or None for the standard forward.
         batch_result = (
-            self.prepare_prefill(
-                forward_batch, schedule_batch, scheduler_output.requests
-            )
+            self.prepare_prefill(forward_batch, schedule_batch, requests)
             if is_prefill
-            else self.prepare_decode(
-                forward_batch, schedule_batch, scheduler_output.requests
-            )
+            else self.prepare_decode(forward_batch, schedule_batch, requests)
         )
-
         if batch_result is None:
-            # Standard forward path
             batch_result = self.tp_worker.forward_batch_generation(forward_batch)
 
         if (
             not schedule_batch.is_prefill_only
             and batch_result.next_token_ids is None
             and (
-                self.sample_before_post_prefill(
-                    forward_batch, schedule_batch, scheduler_output.requests
-                )
+                self.sample_before_post_prefill(forward_batch, schedule_batch, requests)
                 if is_prefill
                 else self.sample_before_post_decode(
-                    forward_batch, schedule_batch, scheduler_output.requests
+                    forward_batch, schedule_batch, requests
                 )
             )
         ):
             batch_result.next_token_ids = self._sample_next_token_ids(
-                batch_result.logits_output,
-                forward_batch,
-                schedule_batch,
-                scheduler_output.requests,
+                batch_result.logits_output, forward_batch, schedule_batch, requests
             )
             schedule_batch.output_ids = batch_result.next_token_ids
+        return batch_result
 
-        # Hook: model-specific post-processing
-        if is_prefill:
-            self.post_prefill(
-                batch_result,
-                forward_batch,
-                schedule_batch,
-                scheduler_output.requests,
-            )
-        else:
-            self.post_decode(
-                batch_result,
-                forward_batch,
-                schedule_batch,
-                scheduler_output.requests,
-            )
-
-        # Sampling + logit processing
+    def _finalize(
+        self, batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output
+    ) -> ModelRunnerOutput:
+        """Final sampling (if still needed) + output extraction + per-request
+        bookkeeping. Shared tail of both the sync and async paths."""
         if schedule_batch.is_prefill_only:
             if batch_result.next_token_ids is None:
                 batch_result.next_token_ids = torch.zeros(
@@ -191,7 +290,6 @@ class ModelRunner:
             )
         schedule_batch.output_ids = batch_result.next_token_ids
 
-        # Output extraction
         outputs = self.output_processor.process(batch_result, scheduler_output)
         self.post_process_outputs(batch_result, scheduler_output, outputs)
         for sched_req in scheduler_output.requests:
@@ -248,6 +346,42 @@ class ModelRunner:
         outputs: dict[str, RequestOutput],
     ) -> None:
         """Called after output tokens are materialized into RequestOutput."""
+
+    def post_decode_launch(
+        self, result: Any, forward_batch: Any, requests: list
+    ) -> Any:
+        """Async-decode GPU half of ``post_decode``: scatter GPU state, pack
+        the collect tensors, enqueue a non-blocking D2H into a pinned host
+        buffer (obtained via ``self._next_host_staging``), and return that
+        buffer. The caller records a CUDA event immediately after.
+
+        Default raises: a model must implement this together with
+        ``post_decode_resolve`` to be async-decode-safe. The synchronous
+        ``post_decode`` reads live GPU buffers that the next launch would
+        overwrite, so it cannot simply be deferred (design.md §1.6).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support async decode: implement "
+            "post_decode_launch / post_decode_resolve"
+        )
+
+    def post_decode_resolve(
+        self,
+        host_buf: Any,
+        result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        """Async-decode host half of ``post_decode``: read the pinned
+        ``host_buf`` (populated by the launch-time D2H) and run the
+        per-request collect loop, setting ``result.next_token_ids``.
+        Default raises (see ``post_decode_launch``).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support async decode: implement "
+            "post_decode_launch / post_decode_resolve"
+        )
 
     def sample_before_post_prefill(
         self, forward_batch: Any, schedule_batch: Any, requests: list
