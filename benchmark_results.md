@@ -87,11 +87,34 @@ adopt the upstream overlap scheduler) — a different work item.
   same per-step structure, so the collect-overlap gain is expected to persist, but
   that is inferred, not an e2e latency number.
 
+## Fast path: bypass lookahead for bs < threshold (commit `33daa47`)
+
+The bs=1 regression motivated a fast path: decode batches below
+`async_decode_min_batch_size` (default 2) skip the lookahead and run a plain
+synchronous step (the same `run_batch` path as async-OFF). Same-session
+measurement (GPU3, greedy, olen=128, 7 kept runs × 20 req; warmup discarded):
+
+| bs=1 config | mean ± std (ms) | 95% CI | vs OFF | engaged? |
+|---|---|---|---|---|
+| OFF | 535.0 ± 2.4 | [532.8, 537.2] | — | — |
+| ON, lookahead (`MIN_BS=1`) | 541.0 ± 3.5 | [537.8, 544.3] | **−1.13%** (CI [−1.80,−0.46], p=0.004) | query_hit=16024 (lookahead) |
+| ON, **fast-path** (`MIN_BS=2`) | 538.0 ± 1.9 | [536.3, 539.8] | **−0.57%** (CI [−1.04,−0.09], p=0.02) | resolve_stats=NONE (fast path) |
+
+The fast path **roughly halves** the bs=1 regression (−1.13% → −0.57%, 6→3 ms)
+and provably engages (zero lookahead resolves). It does **not** fully eliminate
+it: a small ~0.57% (borderline-significant) residual remains, from (1) the async
+event loop's per-step branch (`_batch_is_decode` + threshold check + a no-op
+drain call) being slightly heavier than `_event_loop_normal`, and (2) the model
+runner's `_async_enabled=True` still running the per-step overrun guard in
+`_populate_cg_buffers` even on a fast-path (sync) step. bs≥2 is unaffected
+(always lookahead) so bs=4 stays +4.7%.
+
 ## Bottom line
 
 Mechanism: ✅ correct (output_codes bit-identical OFF vs ON, bs=1 and bs=4,
 100/100 each) and engaging (100% query_hit). Wall-time (greedy, fixed olen,
-9×20 req, statistically firm): **bs=1 −1.2% (regression), bs=4 +4.7% latency /
-+6.3% throughput.** A modest but real bs>1 throughput win with a small bs=1 cost
-— so keep it off by default and enable for batched serving. Plan B would not add
-to this on Higgs.
+statistically firm): **bs=4 +4.7% latency / +6.3% throughput**; **bs=1 −0.57%
+with the fast path** (down from −1.13% lookahead — roughly halved, small residual
+remains). A modest but real bs>1 throughput win with a now-small bs=1 cost —
+keep off by default, enable for batched serving. Plan B would not add to this on
+Higgs.
