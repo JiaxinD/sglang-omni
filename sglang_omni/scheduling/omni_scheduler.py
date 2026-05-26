@@ -1060,10 +1060,14 @@ class OmniScheduler:
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
+            # Order matters for the bs=1 hot path: the batch-size check is the
+            # cheapest and most often decisive at low concurrency, so it
+            # short-circuits before the _batch_is_decode call (avoiding it
+            # entirely every bs=1 step).
             use_lookahead = (
                 batch is not None
-                and self._batch_is_decode(batch)
                 and len(batch.reqs) >= self.async_decode_min_batch_size
+                and self._batch_is_decode(batch)
             )
 
             if use_lookahead:
@@ -1081,7 +1085,10 @@ class OmniScheduler:
                 # drain transition), then run this batch synchronously. Bypassing
                 # the lookahead at bs=1 avoids its fixed per-step overhead, which
                 # at low concurrency has no overlap payoff (the bs=1 regression).
-                self._resolve_pending_async()
+                # Skip the drain call entirely in the common no-pending case (the
+                # bs=1 steady state) — _resolve_pending_async would just no-op.
+                if self._async_pending is not None:
+                    self._resolve_pending_async()
                 if batch:
                     result = self.run_batch(batch)
                     if result is not _FAILED_BATCH_RESULT:
