@@ -79,11 +79,11 @@ engaged. The same-session lookahead −1.13% reproduces the committed −1.16%.)
 
 ## Recommendation
 
-Ship the fast path: it halves the bs=1 cost for free and is the right default
-(only bs=1 diverts; bs≥2 keeps the +4.7% win). If you want the last ~0.57% gone,
-I can (a) inline the pending check and (b) skip the overrun guard when there's no
-in-flight pending — say the word; otherwise −0.57% (≈break-even, off by default
-anyway) is a reasonable place to stop.
+Ship the fast path. (Sections above record the understanding at the fast-path
+commit, when the residual read as a real ~0.57%; the **"Residual mitigation +
+noise-floor analysis"** section below supersedes that — the residual turned out
+to be below the benchmark's noise floor, and the two follow-up micro-opts
+fix 1 / fix 2 were done for structural leanness, not a measurable speedup.)
 
 ## Infra notes (why two GPU runs flaked)
 
@@ -95,3 +95,50 @@ run on a genuinely-free GPU3 produced the numbers above. The profiler driver
 already got real-port discovery + full-tree cleanup (`a172066`); the
 verify/benchmark scripts would benefit from the same (unique ports per server +
 GPU-mem precheck) if this is re-run.
+
+## Residual mitigation + noise-floor analysis (fix 1 + fix 2)
+
+Two follow-up commits target the residual bs=1 cost identified above.
+
+- **fix 1 — `88f56ee`** (event-loop hot path): reorder the `use_lookahead`
+  predicate so the cheap `len(batch.reqs) >= threshold` check short-circuits
+  before `_batch_is_decode()` (bs=1 then never calls it), and skip the
+  `_resolve_pending_async()` call when `_async_pending is None`. Both strictly
+  *remove* work on the bs=1 path; semantics unchanged.
+- **fix 2 — `de7e936`** (overrun guard): the `_populate_cg_buffers` overrun
+  guard (gather `generation_done[rows]` + `torch.where`) exists for the lookahead
+  1-wasted-step lag. A fast-path (sync) step has no lag — finished reqs are
+  filtered before the step — so the guard is pure wasted GPU work there. Gate it
+  on a per-step marker (`execute_launch` sets `forward_batch._is_lookahead`;
+  sync `execute()` leaves it absent). No new persistent state, no hook signature
+  change, ~2 LOC. bs≥2 lookahead overrun correctness unchanged.
+
+### Why we did NOT re-benchmark bs=1 wall-time for these
+
+**The bs=1 OFF-vs-ON effect is below this benchmark's noise floor**, so more
+runs would only produce more noise, not information:
+
+- OFF and ON are **separate server processes launched minutes apart** on a
+  **shared H200 node**; between-launch load / GPU-clock drift is ~**±1.5%**.
+- The *same* fast-path bs=1 code measured **−0.57%** in one session and
+  **−2.16%** in another (OFF 535→529, ON 538→541). That **1.6% spread is the
+  noise floor**, not a real change — fix 1 can only *remove* work, so it cannot
+  have made ON 11 ms slower; the shift is between-server variance.
+- Within a single server the runs are tight (±~2 ms ≈ ±0.4%), but the
+  cross-server comparison the delta depends on is not reproducible at <1%.
+- **Upper bound from structure, not measurement:** fast-path bs=1 executes the
+  *identical* synchronous `run_batch` path as async-OFF, so the true regression
+  is the event-loop branch only — tens of microseconds, i.e. ≈0. fix 1/fix 2
+  shave a little more off that already-sub-noise residual.
+
+The −0.57% / −1.13% / −2.16% figures are cited **only to characterize the noise
+floor**, not as a result. Resolving a <0.5% effect would require interleaved
+request-level A/B against two concurrently-running servers (eliminating the
+between-launch confound) — out of proportion to a sub-noise, off-by-default cost.
+
+### Verdict (final)
+
+Ship fix 1 + fix 2 for structural leanness (less per-step work, no wasted GPU op
+on fast-path steps), not for a measurable bs=1 speedup. Correctness is the gate
+and it holds (bit-identical bs=1 & bs=4). bs=4 is untouched by both fixes
+(lookahead path unchanged) → stays **+4.7% latency / +6.3% throughput**.
