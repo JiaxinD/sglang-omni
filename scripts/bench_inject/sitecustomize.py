@@ -35,9 +35,13 @@ def _install():
     def _dump(*_):
         hit = sum(getattr(r, "_async_query_hit", 0) for r in _runners)
         miss = sum(getattr(r, "_async_query_miss", 0) for r in _runners)
+        # Only the stage process that actually holds a model runner with
+        # resolve activity writes — otherwise sibling stage processes (which
+        # share the env path) would race and overwrite with zeros.
         try:
-            with open(path, "w") as fh:
-                json.dump({"query_hit": hit, "query_miss": miss}, fh)
+            if hit + miss > 0:
+                with open(path, "w") as fh:
+                    json.dump({"query_hit": hit, "query_miss": miss}, fh)
         finally:
             os._exit(0)
 
