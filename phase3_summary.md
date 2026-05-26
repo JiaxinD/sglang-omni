@@ -24,23 +24,29 @@ cache was split into its own PR (`sampling_cache_pr_plan.md`).
 | `42fccad` | `scripts/verify_correctness.py` gate + `verify_inject` + `benchmark_async.py` + `bench_inject` |
 | `b000038` | drop overrun reqs via `batch.reqs` trim (not `filter_batch` — `copy()` omits seq_lens); bench-stats only written by the runner-holding stage process |
 
+**3 follow-up commits (bs>1 + sampler determinism — this round):**
+| sha | what |
+|-----|------|
+| `fbeb5b0` | **bs>1 fix**: `execute_resolve` passes `_finalize(set_output_ids=False)` so the lagged resolve stops re-stamping a stale-length output_ids on the live running batch (the replay size mismatch). + regression test. |
+| `12dbdfb` | **sampler determinism**: `_sample_independent_batched` short-circuits greedy to argmax (branchless, graph-safe) → reproducible `temperature=0`. + 3 unit tests. |
+| `9b70ca9` | tooling: `verify_correctness --concurrency` (bs>1, group by prompt-hash), drop argmax injector, + nsys profiler (`profile_async.py` / `profile_inject`). |
+
 ## Tests
-- `tests/unit_test/higgs_tts/` + `pipeline/test_scheduler.py` + `pipeline/test_async_decode.py`: **35 pass** (sync path unchanged; async state machine covered).
+- `tests/unit_test/higgs_tts/` + `pipeline/test_scheduler.py` + `pipeline/test_async_decode.py`: **38 pass** (sync path unchanged; async state machine + 3 new greedy-determinism tests + the resolve-output_ids regression assertion).
 - `tests/unit_test/pipeline/test_ipc.py`: **7 failures — PRE-EXISTING**, confirmed by running the base-commit (`be93a97`) version (7 fail there too). They concern the mp_runner/launcher IPC, unrelated to async decode; not introduced by this work.
-- **verify_correctness (PR merge gate), greedy, output_codes bit-identical OFF vs ON:**
-  - length-finish 10 prompts × 10 runs (max=32): **PASS, 100/100 bit-identical**, audio OK.
-  - EOC-finish 2 × 2 (max=256): **PASS, bit-identical**, audio OK.
-  - EOC-finish 10 × 10 (max=256): *(running — result appended to verdict)*.
-  - The 100/100 "audio sha differ" note is benign cross-process vocoder float nondeterminism (cuDNN/cuBLAS algo selection per process); the **output_codes** (what async decode controls) are bit-identical.
+- **verify_correctness (PR merge gate), production greedy (no argmax injector after `12dbdfb`), output_codes bit-identical OFF vs ON:**
+  - **bs=1, 10 prompts × 10 runs (max=128): PASS, 100/100 bit-identical.**
+  - **bs=4 (concurrency=4), 10 prompts × 10 runs (max=128): PASS, 100/100 bit-identical.** Per-prompt codes are invariant to batch composition AND to async timing (each round of a prompt is identical despite timing-varied batches), and OFF == ON.
+  - The bs=1 "audio sha differ" note is benign cross-process vocoder float nondeterminism (cuDNN/cuBLAS algo selection per process); the **output_codes** (what async decode controls) are bit-identical. (bs>1 audio sha isn't compared per-prompt — codes are the gate.)
 
 ## Q1 / Q2 (resolved — see `phase3_clarifications.md`)
 - **Q1**: lookahead = **1 wasted step**, not 2 (flag staleness is 2 but the finishing step isn't wasted). Invariant 3 unchanged. No loop reorder (resolve-first kills overlap).
 - **Q2**: `_FAILED_BATCH_RESULT` is an existing sentinel (`omni_scheduler.py:36`); the async loop reuses it.
 
 ## Honest uncertainties / things to flag
-1. **CG decode is non-deterministic at `temperature=0`** (PRE-EXISTING, not from this PR): `_sample_independent_batched` (sampler.py:214) uses `multinomial` and — unlike the per-row `_sample_independent` (sampler.py:124) — does NOT short-circuit greedy to `argmax`, so near-tie logits diverge run-to-run. The gate forces argmax via a non-invasive `scripts/verify_inject/sitecustomize.py` (patched before CUDA-graph capture). **Recommend a separate one-line fix** making the batched sampler short-circuit greedy like the per-row one — it would make production greedy reproducible.
+1. ~~**CG decode is non-deterministic at `temperature=0`**~~ **FIXED (commit `12dbdfb`).** `_sample_independent_batched` now short-circuits greedy to `argmax` (branchlessly, graph-safe), mirroring the per-row `_sample_independent`. Production `temperature=0` is reproducible, so the gate no longer injects an argmax patch (`verify_inject` keeps only the per-step code dump). New unit tests in `test_batched_step.py` cover temp=0 / top_k=1 / mixed rows.
 2. **EOC overrun guard adds a per-step GPU gather** (`generation_done[rows]` + `torch.where`) in `_populate_cg_buffers` when async is on — GPU-side, no host sync. Cheap, but it's extra work each decode step; an alternative is to suppress the launch entirely when all reqs are done (needs the resolve, which lags).
-3. **bs>1 (concurrent requests) is NOT yet working in async mode** — a real open bug. The bit-identical gate is bs=1 (concurrency=1, sequential). At bs=4 async ON, when one of several requests finishes mid-batch the next launched batch hits a `cuda_graph_runner.replay_prepare` size mismatch (tensor 3 vs 4) — the launch-first lag leaves the running batch's tensors inconsistent with its (reduced) req count. async **OFF** bs=4 is fine. **bs>1 needs additional work before merge**; bs=1 is verified correct. (See benchmark_results.md.)
+3. ~~**bs>1 (concurrent requests) is NOT yet working in async mode**~~ **FIXED (commit `fbeb5b0`).** Root cause was NOT a batch-trim problem (filter_batch trims correctly): `_finalize` re-published `schedule_batch.output_ids` during the *resolve*, but under launch-first the resolve lags one step and runs on the LIVE running batch whose output_ids the current launch already set at the right length — so it stamped a stale-length output_ids that the next `prepare_for_decode` turned into an input_ids mismatching seq_lens, tripping `replay_prepare` (`input_buffers.py` copy_, "tensor a (2) vs b (3)") once a req finished mid-batch. Fix: `execute_resolve` calls `_finalize(..., set_output_ids=False)`; the launch is the sole output_ids publisher. **Verified: bs=4 verify_correctness 10×10 = 100/100 bit-identical OFF vs ON** (and bs=1 still 100/100 — no regression). The bit-identical claim is now bs=1 AND bs=4.
 4. **async-off byte-identical** rests on `execute()` being a pure extraction over shared sub-steps (verified by inspection + 35 tests), not a diff against the pre-refactor binary.
 5. **abort during an in-flight step**: the launched step is always resolved (never stranded); the aborted req shares Req objects with `running_batch`; `_async_pending_batch()` is in the abort cleanup tuples. Covered by reasoning + existing abort tests, not exercised end-to-end.
 
