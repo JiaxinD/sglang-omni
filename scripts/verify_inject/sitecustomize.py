@@ -1,60 +1,69 @@
-"""Auto-imported (PYTHONPATH) injector for verify_correctness.py.
+"""Auto-imported (PYTHONPATH) code-dump injector for verify_correctness.py.
 
-Two non-invasive patches, applied at interpreter startup (before the server
-builds / captures CUDA graphs, so the graph captures the patched kernels):
+ONE non-invasive patch, applied at interpreter startup: if
+SGLANG_OMNI_VERIFY_DUMP is set, tee each request's per-step appended codes to
+that JSONL file (the shared ``_decode_collect_host`` is the single collect point
+for both the sync and async paths). Each line also carries a stable ``pid`` (a
+hash of the request's prompt token ids) so concurrent (bs>1) runs can be grouped
+back per prompt for the bit-identical comparison.
 
-1. Force TRUE greedy: replace the Higgs batched sampler with argmax. The
-   production CG sampler (_sample_independent_batched) uses multinomial even at
-   temperature~0 (unlike the per-row _sample_independent which short-circuits
-   to argmax), so decode is otherwise non-deterministic run-to-run. argmax is
-   RNG-free and batch-shape-invariant -> deterministic, so async-on vs
-   async-off output_codes can be compared bit-for-bit.
-
-2. If SGLANG_OMNI_VERIFY_DUMP is set, tee each request's per-step appended
-   codes to that JSONL file (the shared _decode_collect_host is the single
-   collect point for both the sync and async paths).
-
-Production code is untouched; this lives only on the verify script's PYTHONPATH.
+Note: this NO LONGER forces argmax. Since the batched sampler now short-circuits
+greedy to argmax (sampler.py ``_sample_independent_batched``), production
+``temperature=0`` is itself deterministic, so the gate compares the real
+production sampler path OFF vs ON. Production code is untouched; this lives only
+on the verify script's PYTHONPATH.
 """
+import hashlib
 import os
 
 
+def _prompt_id(data) -> str:
+    """Stable short hash of the prompt token ids — identical across server runs
+    and batch sizes, unlike the server-assigned random rid."""
+    ids = getattr(data, "input_ids", None)
+    if ids is None:
+        return "?"
+    try:
+        seq = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+    except Exception:
+        return "?"
+    return hashlib.blake2b(repr(seq).encode(), digest_size=8).hexdigest()
+
+
 def _install():
-    import torch
-
     from sglang_omni.models.higgs_tts import model_runner as _mr
-    from sglang_omni.models.higgs_tts import sampler as _samp
-
-    def _argmax_sampler(logits_BNV, *, temperature=None, top_p=None, top_k_buf=None):
-        return logits_BNV.argmax(dim=-1).to(torch.long)
-
-    _samp._sample_independent_batched = _argmax_sampler
 
     dump_path = os.environ.get("SGLANG_OMNI_VERIFY_DUMP")
-    if dump_path:
-        import json
+    if not dump_path:
+        return
 
-        _orig = _mr.HiggsTTSModelRunner._decode_collect_host
-        _fh = open(dump_path, "a", buffering=1)
+    import json
 
-        def _patched(self, combined_cpu, result, requests):
-            before = [len(sr.data.output_codes) for sr in requests]
-            _orig(self, combined_cpu, result, requests)
-            for sr, n0 in zip(requests, before):
-                oc = sr.data.output_codes
-                if len(oc) > n0:
-                    _fh.write(
-                        json.dumps(
-                            {"rid": str(sr.request_id), "codes": oc[-1].tolist()}
-                        )
-                        + "\n"
+    _orig = _mr.HiggsTTSModelRunner._decode_collect_host
+    _fh = open(dump_path, "a", buffering=1)
+
+    def _patched(self, combined_cpu, result, requests):
+        before = [len(sr.data.output_codes) for sr in requests]
+        _orig(self, combined_cpu, result, requests)
+        for sr, n0 in zip(requests, before):
+            oc = sr.data.output_codes
+            if len(oc) > n0:
+                _fh.write(
+                    json.dumps(
+                        {
+                            "rid": str(sr.request_id),
+                            "pid": _prompt_id(sr.data),
+                            "codes": oc[-1].tolist(),
+                        }
                     )
+                    + "\n"
+                )
 
-        _mr.HiggsTTSModelRunner._decode_collect_host = _patched
+    _mr.HiggsTTSModelRunner._decode_collect_host = _patched
 
 
 try:
     _install()
-    print("[verify_inject] greedy/argmax + code-dump patches installed")
+    print("[verify_inject] per-step code-dump patch installed (no argmax force)")
 except Exception as exc:  # never break the server if the injector misfires
     print(f"[verify_inject] WARNING: install failed: {exc!r}")
