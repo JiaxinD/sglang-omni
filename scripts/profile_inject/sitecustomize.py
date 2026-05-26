@@ -14,6 +14,7 @@ ModelRunner.execute_launch / execute_resolve at import time.
 Lives only on the profiler's PYTHONPATH; the server in normal operation never
 imports it.
 """
+
 import os
 
 
@@ -29,18 +30,24 @@ def _patch_mem():
 
     _orig = _st.create_sglang_tts_engine_executor
 
-    def _patched(model_path, *, device="cuda:0", max_new_tokens=2048,
-                 server_args_overrides=None):
+    def _patched(
+        model_path, *, device="cuda:0", max_new_tokens=2048, server_args_overrides=None
+    ):
         ov = dict(server_args_overrides or {})
         ov["mem_fraction_static"] = float(mf)
         ov["max_running_requests"] = int(
-            os.environ.get("SGLANG_OMNI_PROFILE_MAXRUN", "34"))
+            os.environ.get("SGLANG_OMNI_PROFILE_MAXRUN", "34")
+        )
         mtt = os.environ.get("SGLANG_OMNI_PROFILE_MAXTOK")
         if mtt:
             ov["max_total_tokens"] = int(mtt)
         print(f"[profile_inject] tts_engine mem overrides: {ov}", flush=True)
-        return _orig(model_path, device=device, max_new_tokens=max_new_tokens,
-                     server_args_overrides=ov)
+        return _orig(
+            model_path,
+            device=device,
+            max_new_tokens=max_new_tokens,
+            server_args_overrides=ov,
+        )
 
     _st.create_sglang_tts_engine_executor = _patched
 
@@ -65,20 +72,23 @@ def _install():
         if st["step"] == warmup and not st["started"]:
             cudart.cudaProfilerStart()
             st["started"] = True
-            print(f"[profile_inject] cudaProfilerStart @ decode step {st['step']}",
-                  flush=True)
+            print(
+                f"[profile_inject] cudaProfilerStart @ decode step {st['step']}",
+                flush=True,
+            )
         nvtx.range_push("decode_launch")
         try:
             return _orig_launch(self, scheduler_output)
         finally:
             nvtx.range_pop()
             st["step"] += 1
-            if (st["started"] and not st["stopped"]
-                    and st["step"] >= warmup + capture):
+            if st["started"] and not st["stopped"] and st["step"] >= warmup + capture:
                 cudart.cudaProfilerStop()
                 st["stopped"] = True
-                print(f"[profile_inject] cudaProfilerStop @ decode step {st['step']}",
-                      flush=True)
+                print(
+                    f"[profile_inject] cudaProfilerStop @ decode step {st['step']}",
+                    flush=True,
+                )
 
     def execute_resolve(self, pending):
         nvtx.range_push("decode_resolve")

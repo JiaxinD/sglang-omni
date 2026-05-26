@@ -51,11 +51,21 @@ class _StubRunner(ModelRunner):
         self.launch_calls += 1
         return f"hostbuf-{self.launch_calls}"
 
-    def post_decode_resolve(self, host_buf, result, forward_batch, schedule_batch, requests):
+    def post_decode_resolve(
+        self, host_buf, result, forward_batch, schedule_batch, requests
+    ):
         self.resolve_calls += 1
         self.last_resolved_buf = host_buf
 
-    def _finalize(self, batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output, set_output_ids=True):
+    def _finalize(
+        self,
+        batch_result,
+        forward_batch,
+        schedule_batch,
+        model_worker_batch,
+        scheduler_output,
+        set_output_ids=True,
+    ):
         self.finalize_calls += 1
         self.last_set_output_ids = set_output_ids
         return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
@@ -129,9 +139,7 @@ def test_query_miss_falls_back_to_synchronize():
     assert (r._async_query_hit, r._async_query_miss) == (0, 1)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="pinned memory requires CUDA"
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned memory requires CUDA")
 def test_host_staging_pingpong():
     r = _StubRunner()
     dev = torch.zeros(8, 18)
@@ -145,10 +153,14 @@ def test_host_staging_pingpong():
 
 def test_batch_is_decode():
     decode = types.SimpleNamespace(
-        forward_mode=types.SimpleNamespace(is_decode=lambda: True, is_extend=lambda: False)
+        forward_mode=types.SimpleNamespace(
+            is_decode=lambda: True, is_extend=lambda: False
+        )
     )
     extend = types.SimpleNamespace(
-        forward_mode=types.SimpleNamespace(is_decode=lambda: False, is_extend=lambda: True)
+        forward_mode=types.SimpleNamespace(
+            is_decode=lambda: False, is_extend=lambda: True
+        )
     )
     assert OmniScheduler._batch_is_decode(decode) is True
     assert OmniScheduler._batch_is_decode(extend) is False
@@ -234,12 +246,14 @@ def test_fast_path_bs1_bypasses_lookahead_and_drains_on_transition():
     # bs sequence: 1, 2, 2, 1, 1, idle
     events, s = _drive_loop([1, 2, 2, 1, 1, None], min_bs=2)
     assert events == [
-        "sync",              # bs1: fast path (no pending to drain)
-        "launch",            # bs2: lookahead, no prev pending
-        "launch", "resolve", # bs2: lookahead launch + resolve prev
-        "resolve", "sync",   # bs1: DRAIN the in-flight bs2 step, then sync
-        "sync",              # bs1: fast path, nothing to drain
-        "idle",              # empty
+        "sync",  # bs1: fast path (no pending to drain)
+        "launch",  # bs2: lookahead, no prev pending
+        "launch",
+        "resolve",  # bs2: lookahead launch + resolve prev
+        "resolve",
+        "sync",  # bs1: DRAIN the in-flight bs2 step, then sync
+        "sync",  # bs1: fast path, nothing to drain
+        "idle",  # empty
     ]
     # the in-flight step was drained -> no pending left stranded
     assert s._async_pending is None

@@ -117,7 +117,11 @@ class ModelRunner:
                 batch_result, forward_batch, schedule_batch, scheduler_output.requests
             )
         return self._finalize(
-            batch_result, forward_batch, schedule_batch, model_worker_batch, scheduler_output
+            batch_result,
+            forward_batch,
+            schedule_batch,
+            model_worker_batch,
+            scheduler_output,
         )
 
     # ------------------------------------------------------------------
@@ -174,7 +178,9 @@ class ModelRunner:
             n_real=len(scheduler_output.requests),
         )
 
-    def execute_resolve(self, pending: "_PendingStep | None") -> ModelRunnerOutput | None:
+    def execute_resolve(
+        self, pending: "_PendingStep | None"
+    ) -> ModelRunnerOutput | None:
         """Consume a launched decode step: wait on its event (non-blocking
         ``query()``, else ``synchronize()``), read the pinned host buffer and
         run the per-request collect loop (``post_decode_resolve``), then

@@ -49,9 +49,20 @@ def _launch_server(port, gpu, async_on, dump_path, log_path):
     open(dump_path, "w").close()  # truncate
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "sglang_omni.cli", "serve",
-         "--config", "examples/configs/higgs_tts.yaml", "--port", str(port)],
-        cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
+        [
+            sys.executable,
+            "-m",
+            "sglang_omni.cli",
+            "serve",
+            "--config",
+            "examples/configs/higgs_tts.yaml",
+            "--port",
+            str(port),
+        ],
+        cwd=REPO,
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
     return proc
@@ -90,9 +101,12 @@ def _collect(port, samples, runs, max_new_tokens, dump_path):
     for p, s in enumerate(samples):
         for r in range(runs):
             payload = {
-                "model": MODEL, "input": s.target_text,
-                "ref_audio": s.ref_audio, "ref_text": s.ref_text,
-                "max_new_tokens": max_new_tokens, "temperature": 0.0,
+                "model": MODEL,
+                "input": s.target_text,
+                "ref_audio": s.ref_audio,
+                "ref_text": s.ref_text,
+                "max_new_tokens": max_new_tokens,
+                "temperature": 0.0,
             }
             # The gate is output_codes (what async decode controls). Codes are
             # dumped DURING decode, before vocoding, so capture them even if the
@@ -133,9 +147,12 @@ def _collect_concurrent(port, samples, runs, max_new_tokens, dump_path, concurre
 
     def _send(s):
         payload = {
-            "model": MODEL, "input": s.target_text,
-            "ref_audio": s.ref_audio, "ref_text": s.ref_text,
-            "max_new_tokens": max_new_tokens, "temperature": 0.0,
+            "model": MODEL,
+            "input": s.target_text,
+            "ref_audio": s.ref_audio,
+            "ref_text": s.ref_text,
+            "max_new_tokens": max_new_tokens,
+            "temperature": 0.0,
         }
         try:
             resp = requests.post(url, json=payload, timeout=180)
@@ -162,8 +179,7 @@ def _collect_concurrent(port, samples, runs, max_new_tokens, dump_path, concurre
             # Audio bytes can't be mapped back to a pid in concurrent mode, so
             # the per-prompt sha isn't compared here (codes are the gate). A
             # shared sentinel keeps _compare from miscounting it as an error.
-            out[(pid, r)] = {"sha": "concurrent-na", "codes": codes,
-                             "audio_ok": True}
+            out[(pid, r)] = {"sha": "concurrent-na", "codes": codes, "audio_ok": True}
     return out
 
 
@@ -175,7 +191,9 @@ def _codes_diff(ca, cb, p, r):
         if xa != xb:
             for k, (ta, tb) in enumerate(zip(xa, xb)):
                 if ta != tb:
-                    return f"prompt {p} run {r} step {step} codebook {k}: OFF={ta} ON={tb}"
+                    return (
+                        f"prompt {p} run {r} step {step} codebook {k}: OFF={ta} ON={tb}"
+                    )
             return f"prompt {p} run {r} step {step}: {xa} vs {xb}"
     return None
 
@@ -213,11 +231,15 @@ def _compare(a, b):
             audio_mismatch += 1
     note = ""
     if audio_mismatch:
-        note += (f"  [note: {audio_mismatch}/{len(a)} audio sha differ despite "
-                 f"identical codes — cross-process vocoder float nondeterminism]")
+        note += (
+            f"  [note: {audio_mismatch}/{len(a)} audio sha differ despite "
+            f"identical codes — cross-process vocoder float nondeterminism]"
+        )
     if audio_failed:
-        note += (f"  [note: {audio_failed}/{len(a)} audio responses errored "
-                 f"(downstream vocoder; decode codes still captured & compared)]")
+        note += (
+            f"  [note: {audio_failed}/{len(a)} audio responses errored "
+            f"(downstream vocoder; decode codes still captured & compared)]"
+        )
     return True, f"all {len(a)} (prompt,run) output_codes bit-identical{note}"
 
 
@@ -230,16 +252,23 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--meta", default="zhaochenyang20/seed-tts-eval-arrow")
     ap.add_argument("--lang", default="en")
-    ap.add_argument("--concurrency", type=int, default=1,
-                    help="1 = sequential bs=1 (group by prompt index); "
-                         ">1 = fire all prompts concurrently per run (bs>1, "
-                         "group by stable prompt-hash pid)")
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="1 = sequential bs=1 (group by prompt index); "
+        ">1 = fire all prompts concurrently per run (bs>1, "
+        "group by stable prompt-hash pid)",
+    )
     args = ap.parse_args()
 
     samples = _load_samples(args.meta, args.prompts, args.lang)
-    print(f"loaded {len(samples)} prompts; runs={args.runs}; "
-          f"max_new_tokens={args.max_new_tokens}; "
-          f"concurrency={args.concurrency}", flush=True)
+    print(
+        f"loaded {len(samples)} prompts; runs={args.runs}; "
+        f"max_new_tokens={args.max_new_tokens}; "
+        f"concurrency={args.concurrency}",
+        flush=True,
+    )
 
     results = {}
     for async_on in (False, True):
@@ -250,16 +279,25 @@ def main():
         proc = _launch_server(args.port, args.gpu, async_on, dump, log)
         try:
             _wait_ready(log, proc)
-            print(f"  ready; sending {args.prompts}x{args.runs} requests "
-                  f"(concurrency={args.concurrency})...", flush=True)
+            print(
+                f"  ready; sending {args.prompts}x{args.runs} requests "
+                f"(concurrency={args.concurrency})...",
+                flush=True,
+            )
             t0 = time.time()
             if args.concurrency > 1:
                 results[tag] = _collect_concurrent(
-                    args.port, samples, args.runs, args.max_new_tokens, dump,
-                    args.concurrency)
+                    args.port,
+                    samples,
+                    args.runs,
+                    args.max_new_tokens,
+                    dump,
+                    args.concurrency,
+                )
             else:
-                results[tag] = _collect(args.port, samples, args.runs,
-                                        args.max_new_tokens, dump)
+                results[tag] = _collect(
+                    args.port, samples, args.runs, args.max_new_tokens, dump
+                )
             print(f"  done in {time.time()-t0:.0f}s", flush=True)
         finally:
             _kill(proc)

@@ -52,8 +52,9 @@ def _kill_servers():
     # actually bind the API port and otherwise linger -> the next server falls
     # back to an ephemeral port), and the nsys wrapper.
     pat = "[s]glang_omni.cli serve|[n]sys profile|[s]tage_process|multiprocessing.spawn"
-    subprocess.run(f"ps aux | grep -E '{pat}' | awk '{{print $2}}' | xargs -r kill -9",
-                   shell=True)
+    subprocess.run(
+        f"ps aux | grep -E '{pat}' | awk '{{print $2}}' | xargs -r kill -9", shell=True
+    )
     time.sleep(5)
 
 
@@ -61,6 +62,7 @@ def _actual_port(log_path, default):
     """The omni server falls back to an ephemeral port if the requested one is
     taken; read the real port it bound from its log."""
     import re
+
     try:
         m = re.findall(r"Uvicorn running on http://[\d.]+:(\d+)", open(log_path).read())
         if m:
@@ -93,24 +95,44 @@ def _launch(tag, gpu, port, warmup, capture, rep_path, log_path):
     env["SGLANG_OMNI_PROFILE_CAPTURE"] = str(capture)
     # Cap the KV/static footprint so the profile fits alongside other jobs on a
     # shared card (decode needs KV only for the active batch). Overridable.
-    env.setdefault("SGLANG_OMNI_PROFILE_MEM_FRAC",
-                   os.environ.get("PROF_MEM_FRAC", "0.12"))
+    env.setdefault(
+        "SGLANG_OMNI_PROFILE_MEM_FRAC", os.environ.get("PROF_MEM_FRAC", "0.12")
+    )
     env.setdefault("SGLANG_OMNI_PROFILE_MAXRUN", "34")
     env.setdefault("SGLANG_OMNI_PROFILE_MAXTOK", "49152")
     env["PYTHONPATH"] = f"{INJECT}:{REPO}"
     log = open(log_path, "w")
     cmd = [
-        "nsys", "profile",
+        "nsys",
+        "profile",
         "--capture-range=cudaProfilerApi",
         "--capture-range-end=stop-shutdown",
         "--trace=cuda,nvtx",
-        "--sample=none", "--cpuctxsw=none",
-        "-o", rep_path, "--force-overwrite=true",
-        sys.executable, "-m", "sglang_omni.cli", "serve",
-        "--config", "examples/configs/higgs_tts.yaml", "--port", str(port),
+        "--sample=none",
+        "--cpuctxsw=none",
+        "-o",
+        rep_path,
+        "--force-overwrite=true",
+        sys.executable,
+        "-m",
+        "sglang_omni.cli",
+        "serve",
+        "--config",
+        "examples/configs/higgs_tts.yaml",
+        "--port",
+        str(port),
     ]
-    return subprocess.Popen(cmd, cwd=REPO, env=env, stdout=log,
-                            stderr=subprocess.STDOUT, start_new_session=True), log
+    return (
+        subprocess.Popen(
+            cmd,
+            cwd=REPO,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        ),
+        log,
+    )
 
 
 def _wait_ready(log_path, proc, timeout=480):
@@ -131,9 +153,14 @@ def _drive(port, sample, conc, olen):
     url = f"http://127.0.0.1:{port}/v1/audio/speech"
 
     def _send(_):
-        payload = {"model": MODEL, "input": sample.target_text,
-                   "ref_audio": sample.ref_audio, "ref_text": sample.ref_text,
-                   "max_new_tokens": olen, "temperature": 0.0}
+        payload = {
+            "model": MODEL,
+            "input": sample.target_text,
+            "ref_audio": sample.ref_audio,
+            "ref_text": sample.ref_text,
+            "max_new_tokens": olen,
+            "temperature": 0.0,
+        }
         try:
             requests.post(url, json=payload, timeout=600)
         except Exception as exc:
@@ -166,23 +193,31 @@ def _analyze(rep_path):
     if not os.path.exists(rep):
         return {"error": f"no report at {rep}"}
     out = subprocess.run(
-        ["nsys", "stats", "--report", "cuda_gpu_trace", "--format", "csv",
-         "--force-export=true", rep],
-        capture_output=True, text=True,
+        [
+            "nsys",
+            "stats",
+            "--report",
+            "cuda_gpu_trace",
+            "--format",
+            "csv",
+            "--force-export=true",
+            rep,
+        ],
+        capture_output=True,
+        text=True,
     )
     if out.returncode != 0:
         return {"error": f"nsys stats failed: {out.stderr[:200]}"}
     # nsys prints preamble lines ("Generating SQLite...", "Processing...") before
     # the real CSV header. Find the header line (starts with "Start (ns)").
     lines = out.stdout.splitlines()
-    hdr_i = next((i for i, ln in enumerate(lines)
-                  if ln.startswith("Start (ns)")), None)
+    hdr_i = next((i for i, ln in enumerate(lines) if ln.startswith("Start (ns)")), None)
     if hdr_i is None:
         return {"error": f"no CSV header in nsys output: {lines[:3]}"}
     rows = []
     reader = csv.DictReader(io.StringIO("\n".join(lines[hdr_i:])))
     start_key = dur_key = None
-    for fn in (reader.fieldnames or []):
+    for fn in reader.fieldnames or []:
         lf = fn.lower()
         if lf.startswith("start"):
             start_key = fn
@@ -240,15 +275,20 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     sys.path.insert(0, REPO)
     from benchmarks.dataset.seedtts import load_seedtts_samples
-    sample = load_seedtts_samples("zhaochenyang20/seed-tts-eval-arrow", 1,
-                                  split="en")[0]
+
+    sample = load_seedtts_samples("zhaochenyang20/seed-tts-eval-arrow", 1, split="en")[
+        0
+    ]
 
     configs = [c for c in CONFIGS if (not args.only or c[0] == args.only)]
     results = {}
     for ci, (tag, conc, olen, warmup, capture) in enumerate(configs):
         port = args.port + ci  # unique per config to avoid stale-port fallback
-        print(f"\n===== {tag} (conc={conc} olen={olen} "
-              f"warmup={warmup} capture={capture} port={port}) =====", flush=True)
+        print(
+            f"\n===== {tag} (conc={conc} olen={olen} "
+            f"warmup={warmup} capture={capture} port={port}) =====",
+            flush=True,
+        )
         _kill_servers()
         rep = os.path.join(args.outdir, tag)
         log = f"/tmp/profile_{tag}.log"
@@ -274,19 +314,25 @@ def main():
         print(f"  {stats}", flush=True)
 
     print("\n" + "=" * 92)
-    print(f"{'config':<16}{'kernels':>9}{'window ms':>11}{'busy %':>9}"
-          f"{'idle ms':>9}{'maxgap ms':>11}{'gaps>=0.5ms':>13}")
+    print(
+        f"{'config':<16}{'kernels':>9}{'window ms':>11}{'busy %':>9}"
+        f"{'idle ms':>9}{'maxgap ms':>11}{'gaps>=0.5ms':>13}"
+    )
     for tag, st in results.items():
         if "error" in st:
             print(f"{tag:<16}  ERROR: {st['error']}")
             continue
-        print(f"{tag:<16}{st['kernels']:>9}{st['window_ms']:>11.1f}"
-              f"{st['busy_pct']:>9.1f}{st['idle_ms']:>9.2f}"
-              f"{st['max_gap_ms']:>11.3f}{st['n_gaps_ge_0p5ms']:>13}")
+        print(
+            f"{tag:<16}{st['kernels']:>9}{st['window_ms']:>11.1f}"
+            f"{st['busy_pct']:>9.1f}{st['idle_ms']:>9.2f}"
+            f"{st['max_gap_ms']:>11.3f}{st['n_gaps_ge_0p5ms']:>13}"
+        )
     print("=" * 92)
     import json
-    json.dump(results, open(os.path.join(args.outdir, "stall_stats.json"), "w"),
-              indent=2)
+
+    json.dump(
+        results, open(os.path.join(args.outdir, "stall_stats.json"), "w"), indent=2
+    )
     print(f"wrote {args.outdir}/stall_stats.json")
 
 
