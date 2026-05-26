@@ -116,6 +116,20 @@ class HiggsTTSModelRunner(ModelRunner):
             rows_py, dtype=torch.long, device=model._cg_row_indices.device
         )
 
+        if self._async_enabled and n_real > 0:
+            # Async-lookahead overrun guard (GPU-side, no host sync): a request
+            # that finished via EOC at the prior step is still in this batch
+            # with pool.generation_done=True. Running the normal decode forward
+            # for such a done row trips a device-side gather assert, so route it
+            # to the reset padding row — its overrun output is discarded by the
+            # collect's finished()/was_done skip anyway. Length-finish rows have
+            # generation_done=False and are untouched.
+            rows_t_real = model._cg_row_indices[:n_real]
+            done = model._sampler_pool.generation_done[rows_t_real]
+            model._cg_row_indices[:n_real] = torch.where(
+                done, torch.full_like(rows_t_real, model._padding_row), rows_t_real
+            )
+
         temps, top_ps, top_ks = self._extract_decode_sampling_params(
             forward_batch, n_real
         )
