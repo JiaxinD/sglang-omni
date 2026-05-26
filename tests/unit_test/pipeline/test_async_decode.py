@@ -162,3 +162,98 @@ def test_async_pending_batch_getattr_safe():
     assert s._async_pending_batch() is None
     s._async_pending = ("batchX", "sched_out", "pending_step")
     assert s._async_pending_batch() == "batchX"
+
+
+# ---------------------------------------------------------------------------
+# Fast path: bs < async_decode_min_batch_size bypasses the lookahead and runs a
+# plain synchronous step (avoids the bs=1 overhead regression). Drives the real
+# _event_loop_async_decode with stubbed deps over a scripted batch-size sequence
+# that exercises the 1 -> 2 -> 2 -> 1 -> 1 transitions, incl. the bs>=2 -> bs=1
+# drain.
+# ---------------------------------------------------------------------------
+
+
+class _FakeBatch:
+    def __init__(self, n):
+        self.reqs = [object() for _ in range(n)]
+
+    def copy(self):
+        return self
+
+
+def _drive_loop(seq, min_bs=2):
+    """Run the real event loop over `seq` (each item = bs int, or None for idle)
+    and return the ordered list of path events taken."""
+    events = []
+    s = OmniScheduler.__new__(OmniScheduler)
+    s._running = True
+    s._engine_paused = False
+    s._async_pending = None
+    s.async_decode_min_batch_size = min_bs
+    s.cur_batch = None
+    s.last_batch = None
+    s.recv_requests = lambda: []
+    s._take_deferred_request_payloads = lambda: []
+    s.process_input_requests = lambda r: None
+    s._batch_is_decode = lambda b: True
+    s.self_check_during_idle = lambda: events.append("idle")
+    s.self_check_during_busy = lambda: None
+
+    def launch(b):
+        events.append("launch")
+        return ("sched_output", "pending_step")
+
+    s._run_batch_launch = launch
+    s._resolve_and_process = lambda pb, ps, pstep: events.append("resolve")
+    # use the REAL drain helper so the bs>=2 -> bs=1 transition is exercised
+    s._resolve_pending_async = OmniScheduler._resolve_pending_async.__get__(s)
+
+    def run_batch(b):
+        events.append("sync")
+        return object()  # not _FAILED_BATCH_RESULT
+
+    s.run_batch = run_batch
+    s.process_batch_result = lambda b, r: None
+
+    batches = [None if n is None else _FakeBatch(n) for n in seq]
+    state = {"i": 0}
+
+    def gnb():
+        i = state["i"]
+        state["i"] += 1
+        if i >= len(batches) - 1:
+            s._running = False  # stop after the final scripted item
+        return batches[i] if i < len(batches) else None
+
+    s.get_next_batch_to_run = gnb
+    s._event_loop_async_decode()
+    return events, s
+
+
+def test_fast_path_bs1_bypasses_lookahead_and_drains_on_transition():
+    # bs sequence: 1, 2, 2, 1, 1, idle
+    events, s = _drive_loop([1, 2, 2, 1, 1, None], min_bs=2)
+    assert events == [
+        "sync",              # bs1: fast path (no pending to drain)
+        "launch",            # bs2: lookahead, no prev pending
+        "launch", "resolve", # bs2: lookahead launch + resolve prev
+        "resolve", "sync",   # bs1: DRAIN the in-flight bs2 step, then sync
+        "sync",              # bs1: fast path, nothing to drain
+        "idle",              # empty
+    ]
+    # the in-flight step was drained -> no pending left stranded
+    assert s._async_pending is None
+
+
+def test_fast_path_threshold_one_keeps_all_decode_on_lookahead():
+    # min_bs=1 -> even bs=1 uses lookahead (fast path disabled). The trailing
+    # empty step drains the last in-flight launch before going idle.
+    events, _ = _drive_loop([1, 1, None], min_bs=1)
+    assert events == ["launch", "launch", "resolve", "resolve", "idle"]
+
+
+def test_fast_path_threshold_four_routes_bs1_to_3_sync():
+    # min_bs=4 -> bs=3 still bypasses (sync); bs=4 uses lookahead; the trailing
+    # empty step drains the bs=4 launch.
+    events, _ = _drive_loop([3, 4, None], min_bs=4)
+    assert events == ["sync", "launch", "resolve", "idle"]

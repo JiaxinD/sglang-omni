@@ -102,6 +102,7 @@ class OmniScheduler:
         abort_callback: Callable[[str], None] | None = None,
         enable_overlap: bool = False,
         enable_async_decode: bool = False,
+        async_decode_min_batch_size: int = 2,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
@@ -132,6 +133,12 @@ class OmniScheduler:
         # One-step-lookahead async decode (single stream + CUDA event). Only
         # safe for model runners that implement post_decode_launch/resolve.
         self.enable_async_decode = enable_async_decode
+        # Below this decode batch size the lookahead is bypassed for a plain
+        # synchronous step: at low concurrency the per-step collect is too small
+        # to overlap, so the lookahead's fixed overhead is a net loss (the bs=1
+        # regression — see benchmark_results.md / stall_analysis.md). Default 2
+        # = only bs=1 takes the fast path.
+        self.async_decode_min_batch_size = int(async_decode_min_batch_size)
         if model_runner is not None:
             model_runner._async_enabled = enable_async_decode
 
@@ -1053,7 +1060,13 @@ class OmniScheduler:
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
-            if batch is not None and self._batch_is_decode(batch):
+            use_lookahead = (
+                batch is not None
+                and self._batch_is_decode(batch)
+                and len(batch.reqs) >= self.async_decode_min_batch_size
+            )
+
+            if use_lookahead:
                 # launch current decode step, then resolve the previous one
                 sched_output, pending_step = self._run_batch_launch(batch)
                 prev_pending = self._async_pending
@@ -1062,8 +1075,12 @@ class OmniScheduler:
                     pb, ps, pstep = prev_pending
                     self._resolve_and_process(pb, ps, pstep)
             else:
-                # prefill / empty: flush in-flight decode (preserve ordering),
-                # then run this batch synchronously
+                # Fast path (low-concurrency decode below the threshold) +
+                # prefill + empty all land here: flush any in-flight lookahead
+                # step first (preserve ordering — this is also the bs>=2 -> bs=1
+                # drain transition), then run this batch synchronously. Bypassing
+                # the lookahead at bs=1 avoids its fixed per-step overhead, which
+                # at low concurrency has no overlap payoff (the bs=1 regression).
                 self._resolve_pending_async()
                 if batch:
                     result = self.run_batch(batch)
