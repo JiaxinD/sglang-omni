@@ -290,6 +290,12 @@ def create_sglang_tts_engine_executor(
     enable_async_decode = bool(
         int(os.environ.get("SGLANG_OMNI_ENABLE_ASYNC_DECODE", "0"))
     ) or bool(getattr(server_args, "enable_async_decode", False))
+    # Decode batches smaller than this bypass the lookahead (plain sync step);
+    # default 2 = only bs=1 takes the fast path. Tunable via env / server_args.
+    async_decode_min_batch_size = int(
+        os.environ.get("SGLANG_OMNI_ASYNC_DECODE_MIN_BS", "")
+        or getattr(server_args, "async_decode_min_batch_size", 2)
+    )
 
     return OmniScheduler(
         tp_worker=model_worker,
@@ -305,6 +311,7 @@ def create_sglang_tts_engine_executor(
         result_adapter=result_adapter,
         abort_callback=model.reset_request,
         enable_async_decode=enable_async_decode,
+        async_decode_min_batch_size=async_decode_min_batch_size,
     )
 
 
