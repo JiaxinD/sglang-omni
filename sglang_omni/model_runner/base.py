@@ -7,6 +7,7 @@ pass, sampling, logit post-processing, and output extraction.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -14,6 +15,30 @@ import torch
 from sglang_omni.scheduling.types import ModelRunnerOutput, RequestOutput
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PendingStep:
+    """One decode step launched on the GPU but not yet consumed on the host.
+
+    Async-decode (one-step lookahead) bookkeeping: a launched step has its
+    forward + on-GPU sample enqueued, its collect-staging buffer async-copied
+    (D2H) into ``host_buf``, and ``event`` recorded right after that copy.
+    ``execute_resolve`` later waits on ``event`` and reads ``host_buf``.
+
+    Invariant: at most one ``_PendingStep`` is live at a time (see
+    ``ModelRunner._pending``). ``host_buf`` is pinned and ping-ponged between
+    two buffers so resolve(N) can read one while launch(N+1)'s D2H writes the
+    other (a CPU-read vs GPU-write race not covered by stream ordering —
+    design.md §1.4).
+    """
+
+    event: Any  # torch.cuda.Event, recorded right after the async D2H copy
+    host_buf: Any  # pinned host tensor holding this step's staging snapshot
+    requests: list  # this step's sched_output.requests (resolve routing)
+    schedule_batch: Any  # to set .output_ids during resolve
+    batch_result: Any  # carries logits_output (device of next_token_ids)
+    n_real: int  # number of real (non-padding) rows this step
 
 
 class ModelRunner:
@@ -29,6 +54,37 @@ class ModelRunner:
         self.output_processor = output_processor
         self.device = torch.device(f"cuda:{tp_worker.gpu_id}")
         self.model = tp_worker.model_runner.model
+
+        # Async decode (one-step lookahead). Inert unless ``_async_enabled``
+        # is set (commit 5 wires it from server_args.enable_async_decode).
+        self._async_enabled: bool = False
+        self._pending: _PendingStep | None = None
+        self._staging_slot: int = 0
+        self._host_staging_buffers: list[torch.Tensor] = []
+
+    def _next_host_staging(self, device_staging: torch.Tensor) -> torch.Tensor:
+        """Return a pinned host buffer mirroring ``device_staging``'s full
+        shape, ping-ponging between two buffers on each call.
+
+        Two buffers are required: resolve(N) reads one on the host while
+        launch(N+1)'s async D2H writes the other. That CPU-read vs GPU-write
+        overlap is not protected by single-stream ordering (design.md §1.4).
+        Buffers are allocated lazily on first use (the base runner does not
+        know the model-specific staging shape at construction time).
+        """
+        if not self._host_staging_buffers:
+            self._host_staging_buffers = [
+                torch.empty(
+                    device_staging.shape,
+                    dtype=device_staging.dtype,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                for _ in range(2)
+            ]
+        buf = self._host_staging_buffers[self._staging_slot]
+        self._staging_slot ^= 1
+        return buf
 
     def execute(self, scheduler_output: Any) -> ModelRunnerOutput:
         """Full pipeline: build batch → prepare → forward → post → sample → output."""
