@@ -52,6 +52,132 @@ def _patch_mem():
     _st.create_sglang_tts_engine_executor = _patched
 
 
+def _wrap_nvtx(func, label, nvtx):
+    """Wrap ``func`` so each call is bracketed by an NVTX push/pop ``label``."""
+    def wrapped(*args, **kwargs):
+        nvtx.range_push(label)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            nvtx.range_pop()
+    wrapped.__name__ = getattr(func, "__name__", "wrapped")
+    return wrapped
+
+
+def _patch_method(cls, name, label, nvtx):
+    """Monkeypatch ``cls.name`` to push NVTX range ``label``. Handles plain
+    instance methods and staticmethods. No-op (logged) if the attribute is not
+    defined directly on ``cls``."""
+    raw = cls.__dict__.get(name)
+    if raw is None:
+        print(f"[profile_inject] FINE skip {cls.__name__}.{name} (not on class)",
+              flush=True)
+        return
+    if isinstance(raw, staticmethod):
+        setattr(cls, name, staticmethod(_wrap_nvtx(raw.__func__, label, nvtx)))
+    else:
+        setattr(cls, name, _wrap_nvtx(raw, label, nvtx))
+    print(f"[profile_inject] FINE wrapped {cls.__name__}.{name} -> {label}",
+          flush=True)
+
+
+def _install_collect_probe(higgs_cls, nvtx):
+    """Replace ``_decode_collect_host`` with a faithful copy that brackets its
+    three parts (host flag reads / per-request python loop / next_token_ids H2D)
+    in NVTX sub-ranges. Profiling-only; logic is identical to the original so
+    correctness is unchanged. Falls back to a plain wrap if anything is off."""
+    import torch
+
+    orig = higgs_cls.__dict__.get("_decode_collect_host")
+    if orig is None:
+        print("[profile_inject] FINE skip collect probe (method absent)", flush=True)
+        return
+
+    def probed(self, combined_cpu, result, requests):
+        nvtx.range_push("resolve.collect_host")
+        try:
+            model = self.model
+            num_codebooks = model._cg_codes_BN.shape[1]
+            codes_BN_cpu = combined_cpu[:, :num_codebooks]
+            nvtx.range_push("collect.read_flags")
+            was_done_cpu = combined_cpu[:, num_codebooks].bool().tolist()
+            gen_done_after_cpu = combined_cpu[:, num_codebooks + 1].bool().tolist()
+            nvtx.range_pop()
+            cb0_per_row = []
+            nvtx.range_push("collect.pyloop")
+            for b, sched_req in enumerate(requests):
+                data = sched_req.data
+                req = data.req
+                if req.is_chunked > 0:
+                    cb0_per_row.append(0)
+                    continue
+                if req.finished():
+                    cb0_per_row.append(0)
+                    continue
+                if was_done_cpu[b]:
+                    cb0_per_row.append(0)
+                    continue
+                codes_N = codes_BN_cpu[b]
+                data.output_codes.append(codes_N.to(torch.long))
+                data.generation_done = bool(gen_done_after_cpu[b])
+                self._mark_sampler_finished(req, data.generation_done)
+                cb0_per_row.append(int(codes_N[0].item()))
+            nvtx.range_pop()
+            nvtx.range_push("collect.next_ids_h2d")
+            result.next_token_ids = torch.tensor(
+                cb0_per_row, dtype=torch.long,
+                device=result.logits_output.next_token_logits.device,
+            )
+            nvtx.range_pop()
+        finally:
+            nvtx.range_pop()
+
+    higgs_cls._decode_collect_host = probed
+    print("[profile_inject] FINE collect probe installed (resolve.collect_host "
+          "split into read_flags/pyloop/next_ids_h2d)", flush=True)
+
+
+def _patch_fine(nvtx):
+    """Env-gated finer-grained NVTX ranges INSIDE the decode launch/resolve path
+    so the ~3.8ms per-step CPU gap (stall_analysis.md) can be attributed to its
+    individual sub-steps. Profiling-only; nests under decode_launch /
+    decode_resolve. Each wrap is independent — one missing symbol can't disarm
+    the rest."""
+    if os.environ.get("SGLANG_OMNI_PROFILE_FINE") != "1":
+        return
+    from sglang_omni.model_runner.base import ModelRunner
+    from sglang_omni.model_runner.model_worker import ModelWorker
+    from sglang_omni.models.higgs_tts.model_runner import HiggsTTSModelRunner
+    from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+
+    # scheduler-level (sibling of decode_launch in the event loop)
+    _patch_method(OmniScheduler, "get_next_batch_to_run", "step.get_next_batch", nvtx)
+    # launch path (nested under decode_launch)
+    _patch_method(ModelRunner, "_build_forward_batch", "launch.build_forward_batch", nvtx)
+    _patch_method(HiggsTTSModelRunner, "_populate_cg_buffers",
+                  "launch.populate_cg_buffers", nvtx)
+    _patch_method(HiggsTTSModelRunner, "_extract_decode_sampling_params",
+                  "launch.extract_sampling_params", nvtx)
+    _patch_method(ModelWorker, "forward_batch_generation", "launch.forward", nvtx)
+    _patch_method(ModelRunner, "_sample_next_token_ids", "launch.sample", nvtx)
+    _patch_method(HiggsTTSModelRunner, "post_decode_launch",
+                  "launch.post_decode_launch", nvtx)
+    _patch_method(HiggsTTSModelRunner, "_decode_pack_gpu", "launch.pack_gpu", nvtx)
+    # resolve path (nested under decode_resolve). Replace with a sub-probed
+    # copy (NOT just a wrap) so the 3.4ms collect_host can be split into its
+    # host-read / python-loop / next_ids-H2D parts — the H2D is a blocking
+    # cudaMemcpy on the single decode stream and is the prime sync suspect.
+    _install_collect_probe(HiggsTTSModelRunner, nvtx)
+    # CUDA graph replay (nested under launch.forward) — optional: only present
+    # when decode runs under a captured graph.
+    try:
+        from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
+        _patch_method(CudaGraphRunner, "replay", "launch.forward_replay", nvtx)
+    except Exception as exc:  # pragma: no cover - import shape varies upstream
+        print(f"[profile_inject] FINE skip CudaGraphRunner.replay ({exc!r})",
+              flush=True)
+
+
 def _install():
     import torch
 
@@ -60,6 +186,7 @@ def _install():
     from sglang_omni.model_runner import base as _b
 
     nvtx = torch.cuda.nvtx
+    _patch_fine(nvtx)
     cudart = torch.cuda.cudart()
     warmup = int(os.environ.get("SGLANG_OMNI_PROFILE_WARMUP", "40"))
     capture = int(os.environ.get("SGLANG_OMNI_PROFILE_CAPTURE", "80"))
