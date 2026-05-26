@@ -992,7 +992,12 @@ class OmniScheduler:
             if result.next_token_ids is not None and keep:
                 idx = torch.tensor(keep, device=result.next_token_ids.device)
                 result.next_token_ids = result.next_token_ids[idx]
-            batch.filter_batch(keep_indices=keep)
+            # Drop overrun reqs from the batch. NOT filter_batch(): batch is a
+            # ScheduleBatch.copy() which omits seq_lens (it carries only the
+            # fields process_batch_result needs). process_batch_result_decode
+            # zips batch.reqs with next_token_ids and uses Req attributes (not
+            # positional batch tensors), so trimming reqs in lockstep suffices.
+            batch.reqs = [batch.reqs[i] for i in keep]
         if batch.reqs:
             self.process_batch_result(batch, result)
 
