@@ -3,85 +3,95 @@
 Hardware: ion9 H200 (single GPU). Server: `sglang_omni.cli serve --config
 examples/configs/higgs_tts.yaml`, async OFF (`_event_loop_normal`) vs ON
 (`_event_loop_async_decode`, via `SGLANG_OMNI_ENABLE_ASYNC_DECODE=1`).
-Driver: `scripts/benchmark_async.py`, 20–24 requests/config, `max_new_tokens=128`,
-production sampling. Metric: end-to-end `/v1/audio/speech` latency (prefill +
-decode + vocoder + transport). `query_hit` = fraction of decode steps where
-`execute_resolve` found the CUDA event already done (overlap engaged) vs had to
-block — captured via `scripts/bench_inject`.
+`query_hit` = fraction of decode steps where `execute_resolve` found the CUDA
+event already done (overlap engaged) vs had to block.
 
-## Results
+## Statistical methodology (v2 — the numbers to cite)
 
-bs=4 now runs (was a crash before the launch-first output_ids fix, commit
-`fbeb5b0`). Two independent runs per batch size; production sampling's variable
-output lengths give the OFF baseline run-to-run spread, so a range is shown.
+Driver `scripts/benchmark_v2.py`. The headline numbers below are measured under:
+- **Greedy, `temperature=0`** (deterministic via the T4 batched-sampler argmax
+  short-circuit) → per-prompt output length is fixed, so wall-time is not
+  contaminated by output-length jitter.
+- **Fixed `max_new_tokens=128`.**
+- **10 runs/config** (a run = 20 requests at concurrency=bs); **run #0 discarded
+  as warmup**; statistics over the remaining **9 runs**.
+- Per-config CI = Student-t with **8 dof** (n=9, t≈2.31). OFF-vs-ON delta uses a
+  **Welch** two-sample t 95% CI; "significant" = the CI does not cross 0.
 
-| config | mean ms | p50 ms | p99 ms | req/s | query_hit | async Δlatency / throughput |
-|---|---|---|---|---|---|---|
-| Higgs bs=1 OFF | 554–564 | ~570 | ~800 | 1.77–1.81 | — (sync) | — |
-| Higgs bs=1 ON  | 555–561 | ~585 | ~820 | 1.78–1.80 | **100%** | **+0.5% (neutral), 1.005x** |
-| Higgs bs=4 OFF | 888–976 | ~900 | ~1380 | 3.83–4.27 | — (sync) | — |
-| Higgs bs=4 ON  | 771–778 | ~820 | ~1200 | 4.77–4.81 | **100%** | **+13–20% faster, 1.13–1.25x** |
+## Results (v2 — greedy, fixed olen, 9×20 req)
+
+| config | mean ± std (ms) | 95% CI (ms) | p50 | p99 | throughput (req/s) | query_hit |
+|--------|----------------:|-------------|----:|----:|-------------------:|-----------|
+| bs=1 OFF | 521.0 ± 1.4 | [519.9, 522.1] | 462 | 658 | 1.919 ± 0.005 | — (sync) |
+| bs=1 ON  | 527.0 ± 1.0 | [526.3, 527.8] | 468 | 666 | 1.897 ± 0.004 | **100%** |
+| bs=4 OFF | 751.1 ± 8.6 | [744.5, 757.7] | 721 | 1005 | 4.910 ± 0.058 | — (sync) |
+| bs=4 ON  | 715.9 ± 9.4 | [708.7, 723.1] | 690 | 970 | 5.217 ± 0.068 | **100%** |
+
+**OFF vs ON:**
+
+| | latency Δ (OFF−ON) | 95% CI | p | throughput | verdict |
+|---|---|---|---|---|---|
+| bs=1 | −6.0 ms (**−1.16%**) | [−1.40%, −0.92%] | 5.8e-8 | ×0.989 | **significant — ON ~1.2% SLOWER** |
+| bs=4 | +35.2 ms (**+4.69%**) | [+3.49%, +5.88%] | 3.6e-7 | ×1.063 (+6.3%) | **significant — ON ~4.7% FASTER** |
 
 ## Honest assessment
 
-**The async overlap is latency-neutral at bs=1 but a real win at bs>1.**
+**bs=1: a small but significant regression (~1.2%).** The lookahead's fixed
+per-step bookkeeping (event record/query, staging handle, early output_ids
+publish) costs ~6 ms and there is no overlap payoff — a single request's per-step
+collect is too small to hide anything. (Earlier runs called this "neutral"; with
+production-sampling noise removed it is a small *real* regression, not zero.)
 
-- `query_hit = 100%` at both batch sizes (every step, `execute_resolve` finds the
-  event already done — the host collect ran concurrently with the next forward,
-  exactly as launch-first intends).
-- **bs=1: neutral** (+0.5%, within noise). The per-step host collect for a single
-  request is tiny, so hiding it behind the forward recovers ~nothing. This matches
-  the earlier bs=1 finding and PR #572 (batching the per-step D2H 3→1 was also
-  neutral).
-- **bs=4: ~13–20% faster, ~1.13–1.25× throughput.** The per-step collect scales
-  with the number of requests (the Python collect loop, per-req sampler-state
-  scatter, D2H of a bigger snapshot). At bs=4 that work is substantial, and
-  launch-first overlaps step N-1's collect behind step N's forward, so the saving
-  is real and grows with batch size. **This is the regime that matters for
-  throughput**, and the feature delivers there.
+**bs=4: a real, statistically firm win — but ~5%, not the earlier ballpark.**
++4.7% latency / +6.3% throughput, both CIs well clear of 0, p<1e-6. launch-first
+hides step N−1's collect behind step N's forward, and that collect scales with
+batch size, so the gain shows up only at bs>1.
 
-### Why the gain is bs-dependent — reconciled with the nsys profile
+### Correction vs the earlier "ballpark" numbers
+
+An earlier 2-run pass with **production sampling** (temperature=1.0) reported
+bs=4 "+13–20% latency / ~1.2× throughput" (OFF 888–976 ms, ON 771–778 ms). That
+was inflated by **output-length jitter**: with stochastic sampling the OFF runs
+drew longer outputs than ON, exaggerating the delta. The fixed-greedy v2
+measurement is the apples-to-apples truth: **+4.7% / +6.3%**. (bs=1 ballpark:
+OFF 554–564, ON 555–561 — "neutral", now refined to −1.2%.) The ballpark numbers
+are retained here only as a cautionary reference; **cite the v2 numbers.**
+
+### Reconciliation with the nsys profile
 
 `stall_analysis.md` (decode-isolated nsys, async ON) shows the GPU is ~98% idle
-during decode with a ~3.8 ms serial gap per step *regardless of batch size*. That
-residual gap is the **next step's** `get_next_batch_to_run` + `prepare_for_decode`
-CPU work, which happens before the next forward is even enqueued and so cannot be
-hidden behind the current forward by any stream trick. What launch-first *does*
-hide is the **previous step's collect**; that collect is small at bs=1 (neutral)
-and large at bs=4 (the win). The two measurements agree:
-
-- Overlap-able work (collect) → scales with bs → the bs=4 speedup.
-- Non-overlap-able work (next-step prepare, ~3.8 ms) → the residual GPU idle that
-  remains even with async ON.
+during decode with a ~3.8 ms serial gap/step that is the **next step's**
+`get_next_batch_to_run` + `prepare_for_decode` CPU work — not overlap-able by any
+stream trick, and untouched by async. What launch-first *does* hide is the
+**previous step's collect** (small at bs=1 → net loss after overhead; larger at
+bs=4 → net +4.7%). The single-digit % size of even the bs=4 win is exactly what
+the "GPU mostly idle, big non-overlappable CPU residual" profile predicts.
 
 ## Plan B (multi-stream) implication
 
 `stall_analysis.md` answer is **(b): not worth doing.** The residual ~3.8 ms gap
-is CPU per-step scheduler/prepare work, not the D2H that Plan B's alt-stream would
-overlap — and Plan A already overlaps the D2H/collect (`query_hit=100%`). Plan B's
-incremental target on Higgs is ≈0. The large remaining opportunity is the CPU
-per-step path itself (reduce Python per-step work / capture more into CUDA Graph /
-adopt the upstream overlap scheduler), which is a different work item.
+is CPU scheduler/prepare work, not the D2H Plan B's alt-stream would overlap, and
+Plan A already overlaps the D2H/collect (`query_hit=100%`). Plan B's incremental
+target on Higgs is ≈0. The large remaining opportunity is the CPU per-step path
+itself (vectorize/sink `_populate_cg_buffers`, capture more into CUDA Graph, or
+adopt the upstream overlap scheduler) — a different work item.
 
 ## Could not / did not measure (honest gaps)
 
-- **Llama-3-8B (bs=1/8, olen=512) — N/A by design.** This optimization lives in
-  the omni `ModelRunner` + `OmniScheduler`; plain Llama-3-8B is served by upstream
-  sglang directly (its own FutureMap overlap scheduler) and never flows through
-  this code path, so the flag is inert for it. Reported as N/A, not fabricated.
-- **Run count.** Two runs per config (not a large sample); production sampling
-  makes per-run output length vary, which is why OFF spreads 888–976 ms at bs=4.
-  The ON numbers are tighter (771–778) and the gain direction/magnitude is
-  consistent across both runs and mechanistically explained, but this is a
-  ballpark, not a tightly-bounded measurement.
-- Higher concurrency (bs=16/32) latency not run end-to-end here; the nsys profile
-  (`stall_analysis.md`) covers bs up to 32 and shows the same per-step structure,
-  so the collect-overlap gain is expected to persist/grow, but that's inferred,
-  not an e2e latency number.
+- **Llama-3-8B (bs=1/8) — N/A by design.** This optimization lives in the omni
+  `ModelRunner` + `OmniScheduler`; plain Llama-3-8B is served by upstream sglang
+  directly (its own FutureMap overlap scheduler) and never flows through this
+  code path, so the flag is inert. Reported as N/A, not fabricated.
+- **Matrix kept to bs=1 / bs=4** (the firm-up task scope). bs=8/16/32 e2e latency
+  not run; the nsys profile (`stall_analysis.md`) covers bs up to 32 and shows the
+  same per-step structure, so the collect-overlap gain is expected to persist, but
+  that is inferred, not an e2e latency number.
 
 ## Bottom line
 
-Mechanism: ✅ correct (output_codes bit-identical OFF vs ON, **bs=1 and bs=4**,
-100/100 each) and engaging (100% query_hit). Wall-time: **neutral at bs=1, ~13–20%
-faster (≈1.2× throughput) at bs=4** — a genuine throughput win in the batched
-regime, not just structural cleanup. Plan B would not add to this on Higgs.
+Mechanism: ✅ correct (output_codes bit-identical OFF vs ON, bs=1 and bs=4,
+100/100 each) and engaging (100% query_hit). Wall-time (greedy, fixed olen,
+9×20 req, statistically firm): **bs=1 −1.2% (regression), bs=4 +4.7% latency /
++6.3% throughput.** A modest but real bs>1 throughput win with a small bs=1 cost
+— so keep it off by default and enable for batched serving. Plan B would not add
+to this on Higgs.
