@@ -98,6 +98,7 @@ class OmniScheduler:
         stream_done_handler: Callable | None = None,
         abort_callback: Callable[[str], None] | None = None,
         enable_overlap: bool = False,
+        enable_async_decode: bool = False,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
@@ -125,6 +126,11 @@ class OmniScheduler:
         self.moe_ep_size = 1
         self.page_size = server_args.page_size
         self.enable_overlap = enable_overlap
+        # One-step-lookahead async decode (single stream + CUDA event). Only
+        # safe for model runners that implement post_decode_launch/resolve.
+        self.enable_async_decode = enable_async_decode
+        if model_runner is not None:
+            model_runner._async_enabled = enable_async_decode
 
         # Token / memory info (upstream reads from tp_worker.get_worker_info)
         mr = tp_worker.model_runner
