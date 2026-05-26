@@ -4,6 +4,10 @@
 The heavy sub-steps (_build_forward_batch / _prepare_and_forward / _finalize)
 and the model-specific hooks are stubbed, and torch.cuda.Event is patched, so
 these run CPU-only. The pinned ping-pong test is CUDA-guarded.
+
+Pending ownership lives with the CALLER (execute_launch returns a handle,
+execute_resolve takes it) because launch-first scheduling has two steps
+momentarily in flight.
 """
 from __future__ import annotations
 
@@ -23,7 +27,6 @@ class _StubRunner(ModelRunner):
 
     def __init__(self):
         self._async_enabled = True
-        self._pending = None
         self._staging_slot = 0
         self._host_staging_buffers = []
         self._async_query_hit = 0
@@ -78,53 +81,45 @@ def _sched_output(n):
     return types.SimpleNamespace(requests=list(range(n)), batch_data=object())
 
 
-def test_launch_sets_pending_resolve_clears_it():
+def test_launch_returns_handle_resolve_consumes_it():
     r = _StubRunner()
     with _patch_event(ready=True):
-        r.execute_launch(_sched_output(2))
-        assert r._pending is not None
-        assert r._pending.n_real == 2
-        out = r.execute_resolve()
-    assert r._pending is None
+        step = r.execute_launch(_sched_output(2))
+        assert step is not None and step.n_real == 2
+        out = r.execute_resolve(step)
     assert out is not None
     assert (r.launch_calls, r.resolve_calls, r.finalize_calls) == (1, 1, 1)
     assert (r._async_query_hit, r._async_query_miss) == (1, 0)
 
 
-def test_double_launch_without_resolve_asserts():
+def test_two_launches_return_distinct_handles():
+    # launch-first keeps two steps in flight; both must be independent handles
     r = _StubRunner()
     with _patch_event(ready=True):
-        r.execute_launch(_sched_output(1))
-        with pytest.raises(AssertionError):
-            r.execute_launch(_sched_output(1))  # invariant: <=1 in flight
+        s1 = r.execute_launch(_sched_output(1))
+        s2 = r.execute_launch(_sched_output(1))
+        assert s1 is not s2 and s1.host_buf != s2.host_buf
+        # resolve in order N-1 then N
+        r.execute_resolve(s1)
+        assert r.last_resolved_buf == s1.host_buf
+        r.execute_resolve(s2)
+        assert r.last_resolved_buf == s2.host_buf
 
 
-def test_resolve_without_pending_returns_none():
-    # Warmup: first iteration has nothing to resolve.
+def test_resolve_none_returns_none():
+    # Warmup / drained: nothing to resolve.
     r = _StubRunner()
-    assert r.execute_resolve() is None
+    assert r.execute_resolve(None) is None
     assert r.finalize_calls == 0
 
 
 def test_query_miss_falls_back_to_synchronize():
     r = _StubRunner()
     with _patch_event(ready=False):
-        r.execute_launch(_sched_output(1))
-        ev = r._pending.event
-        r.execute_resolve()
-    assert ev.synced is True
+        step = r.execute_launch(_sched_output(1))
+        r.execute_resolve(step)
+    assert step.event.synced is True
     assert (r._async_query_hit, r._async_query_miss) == (0, 1)
-
-
-def test_resolve_consumes_the_launched_steps_buffer():
-    r = _StubRunner()
-    with _patch_event(ready=True):
-        r.execute_launch(_sched_output(1))
-        r.execute_resolve()
-        assert r.last_resolved_buf == "hostbuf-1"  # step N's buffer
-        r.execute_launch(_sched_output(1))
-        r.execute_resolve()
-        assert r.last_resolved_buf == "hostbuf-2"  # step N+1's buffer
 
 
 @pytest.mark.skipif(
@@ -158,5 +153,5 @@ def test_async_pending_batch_getattr_safe():
     # must tolerate that (test fixtures may bypass __init__).
     s = OmniScheduler.__new__(OmniScheduler)
     assert s._async_pending_batch() is None
-    s._async_pending = ("batchX", "sched_out")
+    s._async_pending = ("batchX", "sched_out", "pending_step")
     assert s._async_pending_batch() == "batchX"

@@ -18,6 +18,8 @@ import queue as _queue_mod
 import time
 import types
 from collections import deque
+
+import torch
 from typing import Any, Callable
 
 import torch
@@ -666,20 +668,32 @@ class OmniScheduler:
     def _run_batch_launch(self, batch):
         """Async: build SchedulerOutput and launch the decode step on the GPU
         (forward + sample + async D2H of the collect snapshot), without waiting.
-        Returns the SchedulerOutput (needed for resolve-time stream emit)."""
+        Returns ``(sched_output, pending_step)``; the caller holds the pending
+        step (launch-first keeps two steps momentarily in flight)."""
         self._emit_prefill_start_for_batch(batch)
         sched_output = self._build_sched_output(batch)
-        self._model_runner.execute_launch(sched_output)
-        return sched_output
+        pending_step = self._model_runner.execute_launch(sched_output)
+        return sched_output, pending_step
 
-    def _run_batch_resolve(self, batch, sched_output):
-        """Async: resolve the in-flight decode step (wait event, host collect),
-        emit its stream chunks, and return its GenerationBatchResult."""
-        mr_output = self._model_runner.execute_resolve()
+    def _run_batch_resolve(self, batch, sched_output, pending_step):
+        """Async: resolve the given launched step (wait event, host collect),
+        emit its stream chunks, and return its GenerationBatchResult.
+
+        next_token_ids comes from the resolved step's own batch_result, not
+        ``batch.output_ids`` — the running batch's output_ids was already
+        consumed (reset to None) by the next step's prepare_for_decode.
+        """
+        from sglang.srt.managers.scheduler import GenerationBatchResult
+
+        mr_output = self._model_runner.execute_resolve(pending_step)
         if mr_output is None:
             return _FAILED_BATCH_RESULT
         self._emit_stream_output(sched_output, mr_output)
-        return self._make_batch_result(batch, mr_output)
+        return GenerationBatchResult(
+            logits_output=None,
+            next_token_ids=pending_step.batch_result.next_token_ids,
+            can_run_cuda_graph=mr_output.can_run_cuda_graph,
+        )
 
     def _handle_batch_failure(self, batch: Any, error: Exception) -> None:
         reqs = list(batch.reqs)
@@ -957,9 +971,33 @@ class OmniScheduler:
 
         ``getattr`` with default so abort paths stay safe even for schedulers
         built without going through ``__init__`` (e.g. unit-test fixtures).
+        ``_async_pending`` is ``(batch, sched_output, pending_step)`` or None.
         """
         pending = getattr(self, "_async_pending", None)
         return pending[0] if pending is not None else None
+
+    def _resolve_and_process(self, batch, sched_output, pending_step) -> None:
+        """Resolve a launched step and feed it to process_batch_result, after
+        dropping requests that already finished in an earlier step.
+
+        Lookahead overrun: a request that finishes at step S is still present in
+        step S+1's (already-launched) batch — its S+1 output is discarded by the
+        collect's ``_cg_was_done`` skip, but upstream process_batch_result would
+        re-free its KV. So drop already-finished reqs (and their next_token_ids
+        rows) from this lagged batch before processing. Reqs that finish *at*
+        this step are not yet ``finished()`` and are kept/processed normally.
+        """
+        result = self._run_batch_resolve(batch, sched_output, pending_step)
+        if result is _FAILED_BATCH_RESULT:
+            return
+        keep = [i for i, r in enumerate(batch.reqs) if not r.finished()]
+        if len(keep) < len(batch.reqs):
+            if result.next_token_ids is not None and keep:
+                idx = torch.tensor(keep, device=result.next_token_ids.device)
+                result.next_token_ids = result.next_token_ids[idx]
+            batch.filter_batch(keep_indices=keep)
+        if batch.reqs:
+            self.process_batch_result(batch, result)
 
     def _resolve_pending_async(self) -> None:
         """Resolve + process the in-flight decode step, if any. Used to flush
@@ -967,11 +1005,9 @@ class OmniScheduler:
         """
         if self._async_pending is None:
             return
-        batch, sched_output = self._async_pending
+        batch, sched_output, pending_step = self._async_pending
         self._async_pending = None
-        result = self._run_batch_resolve(batch, sched_output)
-        if result is not _FAILED_BATCH_RESULT:
-            self.process_batch_result(batch, result)
+        self._resolve_and_process(batch, sched_output, pending_step)
 
     def _event_loop_async_decode(self) -> None:
         """One-step-lookahead decode loop (single stream + CUDA event).
@@ -997,14 +1033,12 @@ class OmniScheduler:
 
             if batch is not None and self._batch_is_decode(batch):
                 # launch current decode step, then resolve the previous one
-                sched_output = self._run_batch_launch(batch)
+                sched_output, pending_step = self._run_batch_launch(batch)
                 prev_pending = self._async_pending
-                self._async_pending = (batch.copy(), sched_output)
+                self._async_pending = (batch.copy(), sched_output, pending_step)
                 if prev_pending is not None:
-                    pb, ps = prev_pending
-                    result = self._run_batch_resolve(pb, ps)
-                    if result is not _FAILED_BATCH_RESULT:
-                        self.process_batch_result(pb, result)
+                    pb, ps, pstep = prev_pending
+                    self._resolve_and_process(pb, ps, pstep)
             else:
                 # prefill / empty: flush in-flight decode (preserve ordering),
                 # then run this batch synchronously

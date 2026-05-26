@@ -60,7 +60,6 @@ class ModelRunner:
         # Async decode (one-step lookahead). Inert unless ``_async_enabled``
         # is set (commit 5 wires it from server_args.enable_async_decode).
         self._async_enabled: bool = False
-        self._pending: _PendingStep | None = None
         self._staging_slot: int = 0
         self._host_staging_buffers: list[torch.Tensor] = []
         # Observability: how often resolve found the event already done
@@ -125,21 +124,21 @@ class ModelRunner:
     # Async decode: launch / resolve split (one-step lookahead, decode only)
     # ------------------------------------------------------------------
 
-    def execute_launch(self, scheduler_output: Any) -> None:
+    def execute_launch(self, scheduler_output: Any) -> "_PendingStep | None":
         """Enqueue a decode step's forward + on-GPU sample, snapshot its
         collect state into a pinned host buffer (``post_decode_launch``), and
         record a CUDA event right after that async D2H. Does NOT wait on the
         GPU. Decode batches only.
 
-        Invariant: ``self._pending`` is None on entry (at most one step in
-        flight). Pair every ``execute_launch`` with one ``execute_resolve``.
+        Returns the ``_PendingStep`` handle (or None if there was no batch).
+        The CALLER owns the handle and passes it to ``execute_resolve`` later.
+        Ownership lives with the caller (not on ``self``) because launch-first
+        scheduling has two steps momentarily in flight: the just-launched step
+        N and the not-yet-resolved step N-1.
         """
-        assert (
-            self._pending is None
-        ), "execute_launch with a step already in flight — resolve it first"
         built = self._build_forward_batch(scheduler_output)
         if built is None:
-            return
+            return None
         forward_batch, schedule_batch, model_worker_batch, is_prefill = built
         assert not is_prefill, "async lookahead launch is decode-only"
         batch_result = self._prepare_and_forward(
@@ -148,11 +147,17 @@ class ModelRunner:
         host_buf = self.post_decode_launch(
             batch_result, forward_batch, scheduler_output.requests
         )
+        # Publish this step's output token ids now (post_decode_launch set them
+        # from GPU state without a host sync) so the NEXT decode step's
+        # get_next_batch_to_run / prepare_for_decode can build its input_ids —
+        # under lookahead the host collect (resolve) lags by one step.
+        if batch_result.next_token_ids is not None:
+            schedule_batch.output_ids = batch_result.next_token_ids
         event = torch.cuda.Event()
         # Recorded AFTER the async D2H enqueued by post_decode_launch, so
         # event.query()==True means the host buffer is ready (design.md §3).
         event.record()
-        self._pending = _PendingStep(
+        return _PendingStep(
             event=event,
             host_buf=host_buf,
             scheduler_output=scheduler_output,
@@ -163,16 +168,13 @@ class ModelRunner:
             n_real=len(scheduler_output.requests),
         )
 
-    def execute_resolve(self) -> ModelRunnerOutput | None:
-        """Consume the in-flight decode step: wait on its event (non-blocking
+    def execute_resolve(self, pending: "_PendingStep | None") -> ModelRunnerOutput | None:
+        """Consume a launched decode step: wait on its event (non-blocking
         ``query()``, else ``synchronize()``), read the pinned host buffer and
         run the per-request collect loop (``post_decode_resolve``), then
-        finalize sampling/output. Returns that step's ``ModelRunnerOutput``
-        (the launched step — not the current one), or None if nothing is in
-        flight (e.g. first iteration / after a drain).
+        finalize sampling/output. Returns that step's ``ModelRunnerOutput``,
+        or None if ``pending`` is None (first iteration / after a drain).
         """
-        pending = self._pending
-        self._pending = None
         if pending is None:
             return None
         if pending.event.query():
