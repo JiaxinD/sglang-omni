@@ -170,8 +170,7 @@ class HiggsTTSModel(nn.Module):
         self._cg_codes_BN = torch.zeros(
             pool_size, num_codebooks, dtype=torch.long, device=cg_device
         )
-        # Packs codes_BN | was_done | active_generation_done into one buffer so
-        # _collect_step_outputs_cg can pull per-step state back with a single D2H.
+        # Note(Jiaxin): Packs codes_BN | was_done | active_generation_done into one buffer.
         self._cg_collect_staging = torch.zeros(
             pool_size, num_codebooks + 2, dtype=torch.long, device=cg_device
         )

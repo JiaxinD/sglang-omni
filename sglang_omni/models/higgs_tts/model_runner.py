@@ -148,10 +148,7 @@ class HiggsTTSModelRunner(ModelRunner):
         pool.generation_done[rows_t] = model._cg_active_generation_done[:n_real]
         pool.last_codes[rows_t] = model._cg_active_last_codes[:n_real]
 
-        # Batch codes_BN | was_done | active_generation_done into the staging
-        # buffer so the per-step read back to CPU costs a single D2H sync (the
-        # GPU-side packs are async); .cpu() returns a fresh per-step copy, so the
-        # appended code rows below stay isolated from the next step's overwrite.
+        # Note(Jiaxin): pack the 3 tensors, copy back with one D2H, then slice on host.
         num_codebooks = model._cg_codes_BN.shape[1]
         staging = model._cg_collect_staging
         staging[:n_real, :num_codebooks] = model._cg_codes_BN[:n_real]
