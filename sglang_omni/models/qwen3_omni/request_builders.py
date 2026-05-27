@@ -561,7 +561,7 @@ def build_sglang_talker_request(
     thinker_chunks_done: bool = True,
     thinker_config: Any = None,
     talker_model_inputs: dict[str, Any] | None = None,
-    sampling_seed: int | None = None,
+    seed: int | None = None,
 ) -> "SGLangARRequestData":
     """Build SGLang AR request for the Talker from thinker hidden states.
 
@@ -605,7 +605,7 @@ def build_sglang_talker_request(
         repetition_penalty=repetition_penalty,
         stop_token_ids=[int(codec_eos_id)] if codec_eos_id is not None else None,
         logit_bias=None,
-        sampling_seed=sampling_seed,
+        sampling_seed=seed,
     )
     sampling_params.normalize(tokenizer)
     sampling_params.verify(codec_vocab_size)
