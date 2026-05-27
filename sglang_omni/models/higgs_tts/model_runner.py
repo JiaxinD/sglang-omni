@@ -40,10 +40,17 @@ class HiggsTTSModelRunner(ModelRunner):
         del forward_batch, schedule_batch
         self._collect_step_outputs(result, requests)
 
-    def prepare_decode(self, forward_batch, schedule_batch, requests):
+    def prepare_decode(
+        self,
+        forward_batch,
+        schedule_batch,
+        requests,
+        *,
+        is_lookahead: bool = False,
+    ):
         del schedule_batch
         forward_batch.req_ids = [req.request_id for req in requests]
-        self._populate_cg_buffers(forward_batch, requests)
+        self._populate_cg_buffers(forward_batch, requests, is_lookahead=is_lookahead)
         return None
 
     def post_decode(self, result, forward_batch, schedule_batch, requests):
@@ -93,7 +100,9 @@ class HiggsTTSModelRunner(ModelRunner):
         n_real = len(requests)
         self._decode_collect_host(host_buf[:n_real], result, requests)
 
-    def _populate_cg_buffers(self, forward_batch, requests) -> None:
+    def _populate_cg_buffers(
+        self, forward_batch, requests, *, is_lookahead: bool = False
+    ) -> None:
         """Fill the model's CG buffers for one decode step.
 
         Padding rows (``batch_size > len(requests)``) point at the
@@ -116,11 +125,7 @@ class HiggsTTSModelRunner(ModelRunner):
             rows_py, dtype=torch.long, device=model._cg_row_indices.device
         )
 
-        if (
-            self._async_enabled
-            and getattr(forward_batch, "_is_lookahead", False)
-            and n_real > 0
-        ):
+        if self._async_enabled and is_lookahead and n_real > 0:
             # Async-lookahead overrun guard (GPU-side, no host sync): a request
             # that finished via EOC at the prior step is still in this batch
             # with pool.generation_done=True. Running the normal decode forward
@@ -132,8 +137,7 @@ class HiggsTTSModelRunner(ModelRunner):
             # Only the lookahead launch path can carry such an overrun (the
             # 1-wasted-step lag). On a fast-path (sync) decode step finished reqs
             # are filtered out before the step, so no generation_done row is ever
-            # present and this gather+torch.where would be pure wasted GPU work —
-            # gate it on the per-step lookahead marker set in execute_launch.
+            # present and this gather+torch.where would be pure wasted GPU work.
             rows_t_real = model._cg_row_indices[:n_real]
             done = model._sampler_pool.generation_done[rows_t_real]
             model._cg_row_indices[:n_real] = torch.where(

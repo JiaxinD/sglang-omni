@@ -124,10 +124,6 @@ class ModelRunner:
             scheduler_output,
         )
 
-    # ------------------------------------------------------------------
-    # Async decode: launch / resolve split (one-step lookahead, decode only)
-    # ------------------------------------------------------------------
-
     def execute_launch(self, scheduler_output: Any) -> "_PendingStep | None":
         """Enqueue a decode step's forward + on-GPU sample, snapshot its
         collect state into a pinned host buffer (``post_decode_launch``), and
@@ -145,14 +141,12 @@ class ModelRunner:
             return None
         forward_batch, schedule_batch, model_worker_batch, is_prefill = built
         assert not is_prefill, "async lookahead launch is decode-only"
-        # Mark this step as a lookahead launch so model-runner prepare hooks can
-        # tell it apart from a fast-path (sync) decode step, without a persistent
-        # flag on the runner. Only set on the launch path; the sync execute()
-        # leaves it absent. (forward_batch already carries per-step scratch like
-        # req_ids, so a transient attribute here is consistent with its use.)
-        forward_batch._is_lookahead = True
         batch_result = self._prepare_and_forward(
-            forward_batch, schedule_batch, scheduler_output.requests, is_prefill
+            forward_batch,
+            schedule_batch,
+            scheduler_output.requests,
+            is_prefill,
+            is_lookahead=True,
         )
         host_buf = self.post_decode_launch(
             batch_result, forward_batch, scheduler_output.requests
@@ -194,6 +188,12 @@ class ModelRunner:
         else:
             pending.event.synchronize()
             self._async_query_miss += 1
+        skip_rids = {
+            req.request_id
+            for req in pending.scheduler_output.requests
+            if getattr(getattr(req, "data", None), "req", None) is not None
+            and req.data.req.finished()
+        }
         self.post_decode_resolve(
             pending.host_buf,
             pending.batch_result,
@@ -208,13 +208,8 @@ class ModelRunner:
             pending.model_worker_batch,
             pending.scheduler_output,
             set_output_ids=False,
+            skip_rids=skip_rids,
         )
-
-    # ------------------------------------------------------------------
-    # Shared execute sub-steps — one definition routed through by both the
-    # synchronous execute() and the async launch/resolve, so behavior can't
-    # drift between the two paths.
-    # ------------------------------------------------------------------
 
     def _build_forward_batch(self, scheduler_output: Any):
         """Build the ForwardBatch + capture-hidden mode. Returns
@@ -254,7 +249,15 @@ class ModelRunner:
         )
         return forward_batch, schedule_batch, model_worker_batch, is_prefill
 
-    def _prepare_and_forward(self, forward_batch, schedule_batch, requests, is_prefill):
+    def _prepare_and_forward(
+        self,
+        forward_batch,
+        schedule_batch,
+        requests,
+        is_prefill,
+        *,
+        is_lookahead: bool = False,
+    ):
         """Prepare hook → standard forward (if not custom) → sample-before-post
         block. Returns ``batch_result``."""
         # Hook: model-specific preparation. Returns batch_result if it ran a
@@ -262,7 +265,12 @@ class ModelRunner:
         batch_result = (
             self.prepare_prefill(forward_batch, schedule_batch, requests)
             if is_prefill
-            else self.prepare_decode(forward_batch, schedule_batch, requests)
+            else self.prepare_decode(
+                forward_batch,
+                schedule_batch,
+                requests,
+                is_lookahead=is_lookahead,
+            )
         )
         if batch_result is None:
             batch_result = self.tp_worker.forward_batch_generation(forward_batch)
@@ -292,6 +300,7 @@ class ModelRunner:
         model_worker_batch,
         scheduler_output,
         set_output_ids: bool = True,
+        skip_rids: set[str] | None = None,
     ) -> ModelRunnerOutput:
         """Final sampling (if still needed) + output extraction + per-request
         bookkeeping. Shared tail of both the sync and async paths.
@@ -325,7 +334,10 @@ class ModelRunner:
 
         outputs = self.output_processor.process(batch_result, scheduler_output)
         self.post_process_outputs(batch_result, scheduler_output, outputs)
+        skip_rids = skip_rids or set()
         for sched_req in scheduler_output.requests:
+            if sched_req.request_id in skip_rids:
+                continue
             data = sched_req.data
             data.generation_steps = int(data.generation_steps) + 1
             req_output = outputs[sched_req.request_id]
@@ -357,9 +369,15 @@ class ModelRunner:
         return None
 
     def prepare_decode(
-        self, forward_batch: Any, schedule_batch: Any, requests: list
+        self,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+        *,
+        is_lookahead: bool = False,
     ) -> Any | None:
         """Called before decode forward."""
+        del is_lookahead
         return None
 
     def post_prefill(

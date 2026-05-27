@@ -19,7 +19,7 @@ import torch
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
-from sglang_omni.scheduling.types import ModelRunnerOutput
+from sglang_omni.scheduling.types import ModelRunnerOutput, RequestOutput
 
 
 class _StubRunner(ModelRunner):
@@ -35,12 +35,23 @@ class _StubRunner(ModelRunner):
         self.resolve_calls = 0
         self.finalize_calls = 0
         self.last_resolved_buf = None
+        self.last_prepare_is_lookahead = None
+        self.last_skip_rids = None
 
     def _build_forward_batch(self, scheduler_output):
         sb = types.SimpleNamespace(is_prefill_only=False, output_ids=None)
         return types.SimpleNamespace(), sb, types.SimpleNamespace(), False  # decode
 
-    def _prepare_and_forward(self, forward_batch, schedule_batch, requests, is_prefill):
+    def _prepare_and_forward(
+        self,
+        forward_batch,
+        schedule_batch,
+        requests,
+        is_prefill,
+        *,
+        is_lookahead=False,
+    ):
+        self.last_prepare_is_lookahead = is_lookahead
         return types.SimpleNamespace(
             next_token_ids=object(),
             logits_output=types.SimpleNamespace(next_token_logits=None),
@@ -65,9 +76,11 @@ class _StubRunner(ModelRunner):
         model_worker_batch,
         scheduler_output,
         set_output_ids=True,
+        skip_rids=None,
     ):
         self.finalize_calls += 1
         self.last_set_output_ids = set_output_ids
+        self.last_skip_rids = skip_rids or set()
         return ModelRunnerOutput(outputs={}, req_ids=[], req_id_to_index={})
 
 
@@ -101,6 +114,7 @@ def test_launch_returns_handle_resolve_consumes_it():
     assert out is not None
     assert (r.launch_calls, r.resolve_calls, r.finalize_calls) == (1, 1, 1)
     assert (r._async_query_hit, r._async_query_miss) == (1, 0)
+    assert r.last_prepare_is_lookahead is True
     # resolve must NOT re-publish output_ids: under launch-first it runs one
     # step behind on the LIVE running batch, whose output_ids the current launch
     # already set at the right length. Re-stamping the lagged step's tokens
@@ -137,6 +151,73 @@ def test_query_miss_falls_back_to_synchronize():
         r.execute_resolve(step)
     assert step.event.synced is True
     assert (r._async_query_hit, r._async_query_miss) == (0, 1)
+
+
+def test_resolve_recomputes_finished_overrun_skip_rids():
+    r = _StubRunner()
+    keep_req = types.SimpleNamespace(finished=lambda: False)
+    skip_req = types.SimpleNamespace(finished=lambda: True)
+    sched_output = types.SimpleNamespace(
+        requests=[
+            types.SimpleNamespace(
+                request_id="keep",
+                data=types.SimpleNamespace(req=keep_req),
+            ),
+            types.SimpleNamespace(
+                request_id="skip",
+                data=types.SimpleNamespace(req=skip_req),
+            ),
+        ],
+        batch_data=object(),
+    )
+    with _patch_event(ready=True):
+        step = r.execute_launch(sched_output)
+        r.execute_resolve(step)
+    assert r.last_skip_rids == {"skip"}
+
+
+def test_finalize_skips_overrun_bookkeeping_and_extras():
+    class _OutputProcessor:
+        def process(self, batch_result, scheduler_output):
+            del batch_result
+            return {
+                req.request_id: RequestOutput(
+                    request_id=req.request_id, extra={"seen": req.request_id}
+                )
+                for req in scheduler_output.requests
+            }
+
+    runner = ModelRunner.__new__(ModelRunner)
+    runner.output_processor = _OutputProcessor()
+    batch_result = types.SimpleNamespace(
+        next_token_ids=torch.tensor([1, 2]),
+        logits_output=None,
+        can_run_cuda_graph=False,
+    )
+    schedule_batch = types.SimpleNamespace(is_prefill_only=False, output_ids=None)
+    model_worker_batch = types.SimpleNamespace()
+    keep_data = types.SimpleNamespace(generation_steps=0, extra_model_outputs={})
+    skip_data = types.SimpleNamespace(generation_steps=0, extra_model_outputs={})
+    scheduler_output = types.SimpleNamespace(
+        requests=[
+            types.SimpleNamespace(request_id="keep", data=keep_data),
+            types.SimpleNamespace(request_id="skip", data=skip_data),
+        ]
+    )
+
+    runner._finalize(
+        batch_result,
+        types.SimpleNamespace(),
+        schedule_batch,
+        model_worker_batch,
+        scheduler_output,
+        skip_rids={"skip"},
+    )
+
+    assert keep_data.generation_steps == 1
+    assert keep_data.extra_model_outputs == {"seen": "keep"}
+    assert skip_data.generation_steps == 0
+    assert skip_data.extra_model_outputs == {}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned memory requires CUDA")
