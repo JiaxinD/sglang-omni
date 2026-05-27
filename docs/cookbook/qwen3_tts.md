@@ -65,15 +65,8 @@ sgl-omni serve \
 
 ### Zero-shot
 
-```bash
-curl -X POST http://localhost:8000/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{"input": "Hello, how are you?"}' \
-  --output output.wav
-```
 
-Qwen3-TTS Base is a cloning model: without reference audio the voice sounds robotic. For
-natural results, provide a reference clip as shown below.
+Qwen3-TTS does not support zero-shot synthesis.
 
 ### Voice Cloning
 
@@ -86,7 +79,7 @@ mode.
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "Get the trust fund to the bank early.",
+    "input": "SGLang-Omni is a great project!",
     "references": [{
       "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav",
       "text": "We asked over twenty different people, and they all said it was his."
@@ -128,10 +121,10 @@ Portuguese, Spanish, and Italian.
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "今天天气不错。",
+    "input": "今天天气不错，就该出去晒晒太阳。",
     "references": [{
-      "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/zh/prompt-wavs/AISHELL3_SSB00050007.wav",
-      "text": "对，这样就可以了。"
+      "audio_path": "https://huggingface.co/datasets/zhaochenyang20/seed-tts-eval-mini/resolve/main/en/prompt-wavs/common_voice_en_10119832.wav",
+      "text": "We asked over twenty different people, and they all said it was his."
     }],
     "language": "Chinese"
   }' \
@@ -156,7 +149,7 @@ curl -N -X POST http://localhost:8000/v1/audio/speech \
 ```
 
 Each event carries a base64-encoded audio chunk; the stream ends with `data: [DONE]`. See the
-[TTS usage guide](../basic_usage/tts.md) for a full Python SSE consumer.
+[Higgs TTS cookbook](../cookbook/higgs_tts.md#streaming) for a full Python SSE consumer.
 
 ## Generation Parameters
 
