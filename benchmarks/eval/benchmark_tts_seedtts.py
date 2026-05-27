@@ -80,12 +80,14 @@ CI runs on a subset and has its own thresholds elsewhere (see tasks/*.py).
 
 Benchmark: SeedTTS  |  Dataset: seed-tts-eval, full set (EN=1088, ZH=2020)
 Hardware:  1 x H200 (default; non-H200 sources are tagged in Source column)
-Last verified: 2026-05-25
+Last verified: 2026-05-27
 
 Accuracy (accuracy.wer)
 
 Note: the Higgs TTS EN raw corpus WER includes 2 samples above 50% WER; the
-outlier-excluded corpus WER is 1.36%.
+outlier-excluded corpus WER is 1.36%. Likewise the Qwen3-0.6B EN raw corpus WER
+includes 2 runaway samples above 50% WER; its outlier-excluded corpus WER is 1.07%.
+Voxtral covers EN only (no Chinese), so it has no ZH row.
 
 | Model  | Config           | wer_corpus | wer_per_sample_mean | wer_per_sample_median | wer_per_sample_std | evaluated | skipped | Source                         |
 | ------ | ---------------- | ---------- | ------------------- | --------------------- | ------------------ | --------- | ------- | ------------------------------ |
@@ -103,6 +105,10 @@ outlier-excluded corpus WER is 1.36%.
 | S2-Pro | ZH, stream=True  | 0.90%      | 0.86%               | 0.00%                 | 2.1%               | 2020/2020 | 0       | PR #411 [H100, full-set, c=16] |
 | Higgs TTS | EN, stream=False | 4.68%   | 4.16%               | 0.00%                 | 91.2%              | 1088/1088 | 0       | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 | Higgs TTS | ZH, stream=False | 1.14%   | 1.08%               | 0.00%                 | 2.7%               | 2020/2020 | 0       | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
+| Voxtral | EN, stream=False | 1.20% | 1.22% | 0.00% | 3.8% | 1088/1088 | 0 | PR #585 [H200, full-set, c=16, --no-ref-audio --voice cheerful_female] |
+| Qwen3-0.6B | EN, stream=False | 18.29% | 19.15% | 0.00% | 426.6% | 1088/1088 | 0 | PR #585 [H200, full-set, c=16; raw incl 2 runaway >50% outliers, excl-outlier 1.07%] |
+| Qwen3-0.6B | ZH, stream=False | 1.05% | 1.01% | 0.00% | 2.7% | 2020/2020 | 0 | PR #585 [H200, full-set, c=16] |
+| Qwen3-1.7B | EN, stream=False | 0.97% | 0.94% | 0.00% | 3.5% | 1088/1088 | 0 | PR #585 [H200, full-set, c=16] |
 
 Generation speed (generation.speed)
 
@@ -122,6 +128,10 @@ Generation speed (generation.speed)
 | S2-Pro | ZH, stream=True  | 11.417         | 15.020        | 2.141    | 1.398          | 65.5                           | PR #411 [H100, V1-pipeline, full-set, c=16] |
 | Higgs TTS | EN, stream=False | 1.749       | 2.600         | 0.425    | 9.104          | 112.9                          | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
 | Higgs TTS | ZH, stream=False | 1.629       | 2.110         | 0.282    | 9.792          | 109.9                          | PR #534 [H200, full-set, c=16, CUDA Graph on, torch.compile off] |
+| Voxtral | EN, stream=False | 2.940 | 4.561 | 0.519 | 5.398 | N/A | PR #585 [H200, full-set, c=16, --no-ref-audio --voice cheerful_female] |
+| Qwen3-0.6B | EN, stream=False | 6.613 | 9.378 | 1.507 | 2.040 | 8.9 | PR #585 [H200, full-set, c=16] |
+| Qwen3-0.6B | ZH, stream=False | 8.438 | 10.863 | 1.365 | 1.889 | 9.4 | PR #585 [H200, full-set, c=16] |
+| Qwen3-1.7B | EN, stream=False | 6.220 | 9.180 | 1.507 | 2.557 | 8.7 | PR #585 [H200, full-set, c=16] |
 
 Note (Chenyang): output-token rates here count S2-Pro's codec tokens. They are not
 comparable to Qwen3-Omni rates in benchmark_omni_seedtts.py, whose tokens are
