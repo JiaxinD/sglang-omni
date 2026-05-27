@@ -1095,8 +1095,10 @@ class OmniScheduler:
                     # drop. Higgs marks EOC finishes in the sampler so they leave the
                     # running set a step earlier; a model that marks no early finish
                     # (e.g. the Qwen talker) lands every finish in this window.
-                    if batch is not None and batch.reqs and any(
-                        r.finished() for r in batch.reqs
+                    if (
+                        batch is not None
+                        and batch.reqs
+                        and any(r.finished() for r in batch.reqs)
                     ):
                         batch.filter_batch()
                         if not batch.reqs:
