@@ -268,7 +268,8 @@ def test_async_pending_batch_getattr_safe():
 
 class _FakeBatch:
     def __init__(self, n):
-        self.reqs = [object() for _ in range(n)]
+        # real ScheduleBatch.reqs are Reqs with .finished(); none finish here
+        self.reqs = [types.SimpleNamespace(finished=lambda: False) for _ in range(n)]
 
     def copy(self):
         return self
@@ -352,3 +353,114 @@ def test_fast_path_threshold_four_routes_bs1_to_3_sync():
     # empty step drains the bs=4 launch.
     events, _ = _drive_loop([3, 4, None], min_bs=4)
     assert events == ["sync", "launch", "resolve", "idle"]
+
+
+# ---------------------------------------------------------------------------
+# Stale-batch overrun regression: the fast-path `batch` is built (get_next_batch
+# _to_run, top of loop) BEFORE the in-flight lookahead step is drained. If the
+# drain finishes a req that is also present in that batch, running the batch
+# again re-frees its KV cache (process_batch_result_decode -> release_kv_cache
+# -> pop_committed_kv_cache asserts "Committed KV cache already freed"). This is
+# the talker async-ON crash at bs>=2; the talker is hit because it marks no
+# early (sampler) finish, so every finish is detected only in the resolve half.
+# ---------------------------------------------------------------------------
+
+
+class _DFReq:
+    def __init__(self, name):
+        self.name = name
+        self._done = False
+
+    def finished(self):
+        return self._done
+
+
+class _DFBatch:
+    """ScheduleBatch stand-in: shares Req objects on copy() (as the real
+    .copy() does) and drops finished reqs on filter_batch() (as the real one
+    does when keep_indices is None)."""
+
+    def __init__(self, reqs):
+        self.reqs = list(reqs)
+
+    def copy(self):
+        return _DFBatch(self.reqs)
+
+    def filter_batch(self, keep_indices=None):
+        if keep_indices is None:
+            keep_indices = [i for i, r in enumerate(self.reqs) if not r.finished()]
+        self.reqs = [self.reqs[i] for i in keep_indices]
+
+    def is_empty(self):
+        return not self.reqs
+
+
+def test_fast_path_does_not_double_free_req_finished_by_drain():
+    victim = _DFReq("victim")
+    other = _DFReq("other")
+    running = [victim, other]  # both in flight at the start
+    freed = set()
+    double_freed = []
+
+    def release_kv(req):
+        if req.name in freed:
+            double_freed.append(req.name)
+        freed.add(req.name)
+
+    s = OmniScheduler.__new__(OmniScheduler)
+    s._running = True
+    s._engine_paused = False
+    s._async_pending = None
+    s.async_decode_min_batch_size = 2
+    s.cur_batch = None
+    s.last_batch = None
+    s.recv_requests = lambda: []
+    s._take_deferred_request_payloads = lambda: []
+    s.process_input_requests = lambda r: None
+    s._batch_is_decode = lambda b: True
+    s.self_check_during_idle = lambda: None
+    s.self_check_during_busy = lambda: None
+    s._run_batch_launch = lambda b: ("sched_output", "pending_step")
+    # real drain helper -> exercises the real fast-path ordering under test
+    s._resolve_pending_async = OmniScheduler._resolve_pending_async.__get__(s)
+
+    # Resolving a step finishes the next scheduled req and frees its KV (mirrors
+    # process_batch_result_decode -> release_kv_cache). other finishes first
+    # (bs 2 -> 1), then victim finishes in the bs=1 fast-path drain.
+    finish_order = [other, victim]
+
+    def resolve_and_process(pb, ps, pstep):
+        if finish_order:
+            r = finish_order.pop(0)
+            r._done = True
+            release_kv(r)
+            if r in running:
+                running.remove(r)
+
+    s._resolve_and_process = resolve_and_process
+
+    s.run_batch = lambda b: object()  # not _FAILED_BATCH_RESULT
+
+    def process_batch_result(b, r):
+        # process_batch_result_decode frees any req that is finished() at this
+        # step. For a stale batch carrying a req the drain already finished,
+        # this is the double free.
+        for req in b.reqs:
+            if req.finished():
+                release_kv(req)
+
+    s.process_batch_result = process_batch_result
+
+    state = {"i": 0}
+
+    def gnb():
+        state["i"] += 1
+        if not running:
+            s._running = False
+            return None
+        return _DFBatch(list(running))
+
+    s.get_next_batch_to_run = gnb
+    s._event_loop_async_decode()
+
+    assert not double_freed, f"KV double-freed (stale fast-path batch): {double_freed}"

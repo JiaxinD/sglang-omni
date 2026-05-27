@@ -1085,6 +1085,23 @@ class OmniScheduler:
                 # bs=1 steady state) — _resolve_pending_async would just no-op.
                 if self._async_pending is not None:
                     self._resolve_pending_async()
+                    # Stale-batch overrun: `batch` was built (get_next_batch_to_run,
+                    # top of loop) BEFORE this drain. The drain can finish reqs that
+                    # are still present in `batch` (the live running batch); running
+                    # them again double-frees their committed KV cache
+                    # (process_batch_result_decode -> release_kv_cache ->
+                    # pop_committed_kv_cache asserts "already freed"). Drop them —
+                    # the fast-path analogue of the _resolve_and_process pre_finished
+                    # drop. Higgs marks EOC finishes in the sampler so they leave the
+                    # running set a step earlier; a model that marks no early finish
+                    # (e.g. the Qwen talker) lands every finish in this window.
+                    if batch is not None and batch.reqs and any(
+                        r.finished() for r in batch.reqs
+                    ):
+                        batch.filter_batch()
+                        if not batch.reqs:
+                            batch = None
+                        self.cur_batch = batch
                 if batch:
                     result = self.run_batch(batch)
                     if result is not _FAILED_BATCH_RESULT:
