@@ -25,6 +25,7 @@ Our core features include:
 
    cookbook/voxtral_tts.md
    cookbook/qwen3_tts.md
+   cookbook/higgs_tts.md
 
 
 .. toctree::

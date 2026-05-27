@@ -8,8 +8,6 @@ playback sample rate. SGLang-Omni serves two checkpoints — `0.6B` and `1.7B` �
 `preprocessing → tts_engine → vocoder` pipeline and the OpenAI-compatible `/v1/audio/speech`
 endpoint.
 
-> Qwen3-TTS Base weights are released under **Apache-2.0**.
-
 ## Prerequisites
 
 ```bash

@@ -6,7 +6,6 @@ text-to-speech model from Mistral AI built on a Ministral-3B backbone. It genera
 voices. In SGLang-Omni, Voxtral runs as a `preprocessing → tts_generation → vocoder` pipeline
 and is served through the OpenAI-compatible `/v1/audio/speech` endpoint.
 
-> Voxtral-4B-TTS is released under **CC BY-NC 4.0** (non-commercial use only).
 
 ## Prerequisites
 
@@ -49,7 +48,7 @@ With no voice specified, Voxtral falls back to its default voice (`cheerful_fema
 ```bash
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"input": "Hello, how are you?"}' \
+  -d '{"input": "SGLang-Omni is a great project!"}' \
   --output output.wav
 ```
 
@@ -109,7 +108,7 @@ curl -N -X POST http://localhost:8000/v1/audio/speech \
 ```
 
 Each event carries a base64-encoded audio chunk; the stream ends with `data: [DONE]`. See the
-[TTS usage guide](../basic_usage/tts.md) for a full Python SSE consumer.
+[Higgs TTS cookbook](../cookbook/higgs_tts.md#streaming) for a full Python SSE consumer.
 
 ## Request Parameters
 
@@ -144,7 +143,7 @@ Whisper-large-v3. Hardware: 1× H200 SXM.
 | Throughput (req/s) | 5.40 |
 | Completed / failed requests | 1088 / 0 |
 
-Reproduce with the SeedTTS command in the [TTS usage guide](../basic_usage/tts.md). The Voxtral
+Reproduce with the SeedTTS command in our [seedTTS benchmark](./benchmarks/README.md). The Voxtral
 model card also quotes ~70 ms first-audio latency at concurrency 1; the table above is a
 throughput-oriented run at concurrency 16, so its RTF reflects batched load rather than the
 latency-optimized single-stream figure. Output is 24 kHz.

@@ -1045,7 +1045,7 @@ def create_talker_ar_executor_from_config(
     # — the `fused_experts (full graph)` backend picked in #344. Caller can
     # override via factory_args or the `--talker-cuda-graph off` CLI flag.
     # Note (Xuesong): pytorch backend works around an sglang upstream gap —
-    # Sampler.forward doesn't forward sampling_seed to flashinfer, so
+    # Sampler.forward doesn't forward seed to flashinfer, so
     # under cuda graph the captured RNG is boot-dependent and ~5% of prompts
     # trigger degenerate AR loops (see #408). Revert once upstream lands.
     overrides: dict[str, Any] = {
