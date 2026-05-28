@@ -9,6 +9,7 @@ Pending ownership lives with the CALLER (execute_launch returns a handle,
 execute_resolve takes it) because launch-first scheduling has two steps
 momentarily in flight.
 """
+
 from __future__ import annotations
 
 import types
@@ -102,7 +103,17 @@ def _patch_event(ready: bool):
 
 
 def _sched_output(n):
-    return types.SimpleNamespace(requests=list(range(n)), batch_data=object())
+    req_stub = types.SimpleNamespace(finished=lambda: False)
+    return types.SimpleNamespace(
+        requests=[
+            types.SimpleNamespace(
+                request_id=f"r{i}",
+                data=types.SimpleNamespace(req=req_stub),
+            )
+            for i in range(n)
+        ],
+        batch_data=object(),
+    )
 
 
 def test_launch_returns_handle_resolve_consumes_it():
@@ -464,3 +475,104 @@ def test_fast_path_does_not_double_free_req_finished_by_drain():
     s._event_loop_async_decode()
 
     assert not double_freed, f"KV double-freed (stale fast-path batch): {double_freed}"
+
+
+def _scaffold_async_loop(*, async_pending=None):
+    s = OmniScheduler.__new__(OmniScheduler)
+    s._running = True
+    s._engine_paused = False
+    s._async_pending = async_pending
+    s.async_decode_min_batch_size = 2
+    s.cur_batch = None
+    s.last_batch = None
+    s.recv_requests = lambda: []
+    s._take_deferred_request_payloads = lambda: []
+    s.process_input_requests = lambda r: None
+    s._batch_is_decode = lambda b: True
+    s.self_check_during_idle = lambda: None
+    s.self_check_during_busy = lambda: None
+    s._resolve_pending_async = OmniScheduler._resolve_pending_async.__get__(s)
+    return s
+
+
+def test_async_path_launch_failure_calls_handle_batch_failure():
+    failures = []
+    s = _scaffold_async_loop()
+
+    def launch(b):
+        raise RuntimeError("launch boom")
+
+    s._run_batch_launch = launch
+    s._resolve_and_process = lambda *a, **kw: None
+    s._handle_batch_failure = lambda b, exc: failures.append((b, type(exc), str(exc)))
+
+    batch = _FakeBatch(2)
+    batches = [batch]
+    state = {"i": 0}
+
+    def gnb():
+        i = state["i"]
+        state["i"] += 1
+        if i >= 0:
+            s._running = False
+        return batches[i] if i < len(batches) else None
+
+    s.get_next_batch_to_run = gnb
+    s._event_loop_async_decode()
+
+    assert failures == [(batch, RuntimeError, "launch boom")]
+    # launch failed before _async_pending was set; prev state preserved.
+    assert s._async_pending is None
+
+
+def test_async_path_resolve_failure_calls_handle_batch_failure():
+    failures = []
+    prev_batch = _FakeBatch(2)
+    s = _scaffold_async_loop(
+        async_pending=(prev_batch, "prev_sched", "prev_step"),
+    )
+
+    s._run_batch_launch = lambda b: ("sched_output", "pending_step")
+
+    def resolve(pb, ps, pstep):
+        raise RuntimeError("resolve boom")
+
+    s._resolve_and_process = resolve
+    s._handle_batch_failure = lambda b, exc: failures.append((b, type(exc), str(exc)))
+
+    new_batch = _FakeBatch(2)
+    batches = [new_batch]
+    state = {"i": 0}
+
+    def gnb():
+        i = state["i"]
+        state["i"] += 1
+        if i >= 0:
+            s._running = False
+        return batches[i] if i < len(batches) else None
+
+    s.get_next_batch_to_run = gnb
+    s._event_loop_async_decode()
+
+    assert failures == [(prev_batch, RuntimeError, "resolve boom")]
+    # launch succeeded; _async_pending was rotated to the new batch.
+    assert s._async_pending is not None
+    assert s._async_pending[0] is new_batch
+
+
+def test_drain_resolve_failure_calls_handle_batch_failure():
+    failures = []
+    stranded_batch = _FakeBatch(2)
+    s = OmniScheduler.__new__(OmniScheduler)
+    s._async_pending = (stranded_batch, "sched", "step")
+
+    def resolve(pb, ps, pstep):
+        raise RuntimeError("drain boom")
+
+    s._resolve_and_process = resolve
+    s._handle_batch_failure = lambda b, exc: failures.append((b, type(exc), str(exc)))
+
+    OmniScheduler._resolve_pending_async(s)
+
+    assert failures == [(stranded_batch, RuntimeError, "drain boom")]
+    assert s._async_pending is None

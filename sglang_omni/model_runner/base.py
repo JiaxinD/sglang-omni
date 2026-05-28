@@ -57,8 +57,7 @@ class ModelRunner:
         self.device = torch.device(f"cuda:{tp_worker.gpu_id}")
         self.model = tp_worker.model_runner.model
 
-        # Async decode (one-step lookahead). Inert unless ``_async_enabled``
-        # is set (commit 5 wires it from server_args.enable_async_decode).
+        # Async decode (one-step lookahead). Inert unless ``_async_enabled`` is set.
         self._async_enabled: bool = False
         self._staging_slot: int = 0
         self._host_staging_buffers: list[torch.Tensor] = []
@@ -191,8 +190,7 @@ class ModelRunner:
         skip_rids = {
             req.request_id
             for req in pending.scheduler_output.requests
-            if getattr(getattr(req, "data", None), "req", None) is not None
-            and req.data.req.finished()
+            if req.data.req.finished()
         }
         self.post_decode_resolve(
             pending.host_buf,

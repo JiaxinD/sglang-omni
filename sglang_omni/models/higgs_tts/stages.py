@@ -234,6 +234,8 @@ def create_sglang_tts_engine_executor(
     device: str = "cuda:0",
     max_new_tokens: int | None = 2048,
     server_args_overrides: dict[str, Any] | None = None,
+    enable_async_decode: bool = False,
+    async_decode_min_batch_size: int = 2,
 ):
     """sglang-backed AR engine for Higgs TTS."""
     checkpoint_dir = resolve_checkpoint(model_path)
@@ -282,19 +284,6 @@ def create_sglang_tts_engine_executor(
     request_builder, result_adapter = make_higgs_scheduler_adapters(
         model,
         max_new_tokens_cap=max_new_tokens,
-    )
-
-    # One-step-lookahead async decode. Off by default; opt in via the
-    # SGLANG_OMNI_ENABLE_ASYNC_DECODE=1 env flag (or server_args attribute).
-    # Higgs is the first model migrated to the async-safe split hooks.
-    enable_async_decode = bool(
-        int(os.environ.get("SGLANG_OMNI_ENABLE_ASYNC_DECODE", "0"))
-    ) or bool(getattr(server_args, "enable_async_decode", False))
-    # Decode batches smaller than this bypass the lookahead (plain sync step);
-    # default 2 = only bs=1 takes the fast path. Tunable via env / server_args.
-    async_decode_min_batch_size = int(
-        os.environ.get("SGLANG_OMNI_ASYNC_DECODE_MIN_BS", "")
-        or getattr(server_args, "async_decode_min_batch_size", 2)
     )
 
     return OmniScheduler(

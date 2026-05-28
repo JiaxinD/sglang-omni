@@ -1032,7 +1032,10 @@ class OmniScheduler:
             return
         batch, sched_output, pending_step = self._async_pending
         self._async_pending = None
-        self._resolve_and_process(batch, sched_output, pending_step)
+        try:
+            self._resolve_and_process(batch, sched_output, pending_step)
+        except Exception as exc:
+            self._handle_batch_failure(batch, exc)
 
     def _event_loop_async_decode(self) -> None:
         """One-step-lookahead decode loop (single stream + CUDA event).
@@ -1056,10 +1059,6 @@ class OmniScheduler:
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
-            # Order matters for the bs=1 hot path: the batch-size check is the
-            # cheapest and most often decisive at low concurrency, so it
-            # short-circuits before the _batch_is_decode call (avoiding it
-            # entirely every bs=1 step).
             use_lookahead = (
                 batch is not None
                 and len(batch.reqs) >= self.async_decode_min_batch_size
@@ -1067,13 +1066,19 @@ class OmniScheduler:
             )
 
             if use_lookahead:
-                # launch current decode step, then resolve the previous one
-                sched_output, pending_step = self._run_batch_launch(batch)
-                prev_pending = self._async_pending
-                self._async_pending = (batch.copy(), sched_output, pending_step)
-                if prev_pending is not None:
-                    pb, ps, pstep = prev_pending
-                    self._resolve_and_process(pb, ps, pstep)
+                try:
+                    sched_output, pending_step = self._run_batch_launch(batch)
+                except Exception as exc:
+                    self._handle_batch_failure(batch, exc)
+                else:
+                    prev_pending = self._async_pending
+                    self._async_pending = (batch.copy(), sched_output, pending_step)
+                    if prev_pending is not None:
+                        pb, ps, pstep = prev_pending
+                        try:
+                            self._resolve_and_process(pb, ps, pstep)
+                        except Exception as exc:
+                            self._handle_batch_failure(pb, exc)
             else:
                 # Fast path (low-concurrency decode below the threshold) +
                 # prefill + empty all land here: flush any in-flight lookahead
