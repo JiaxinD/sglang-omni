@@ -26,8 +26,12 @@ from sglang_omni.models.moss_tts_local.request_builders import (
     preprocess_moss_tts_local_payload,
     set_moss_tts_local_preprocessing_context,
 )
+from sglang_omni.preprocessing.cache_key import (
+    reference_path_cache_key as _reference_path_cache_key,
+)
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.scheduling.stage_cache import StageOutputCache
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 
 logger = logging.getLogger(__name__)
@@ -225,6 +229,105 @@ class _BatchedReferenceEncoder:
                     )
                 else:
                     future.set_result(outcome)
+
+
+class CachedReferenceEncoder:
+    """Content-addressed LRU cache + single-flight dedup in front of _BatchedReferenceEncoder.
+
+    Miss path returns the encoder's tensor unchanged (bit-identical to cache-off).
+    Hit path returns a fresh .clone().to(long) so callers cannot mutate cached state.
+    Stores codes as int32 on CPU (lossless for codebook values in [0, 1023]).
+    """
+
+    def __init__(
+        self,
+        encoder: _BatchedReferenceEncoder,
+        *,
+        max_items: int = 256,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> None:
+        self._encoder = encoder
+        self._cache = StageOutputCache(
+            max_size=max_items,
+            max_bytes=max_bytes,
+            cache_device="cpu",
+        )
+        self._lock = threading.Lock()
+        self._inflight: dict[str, concurrent.futures.Future] = {}
+        self._hits = 0
+        self._misses = 0
+        self._merged = 0
+
+    def encode(self, path: str) -> torch.Tensor:
+        path = str(path)
+        # Duration gate first: >100 s must never enter the cache or inflight dict.
+        _BatchedReferenceEncoder._check_reference_duration(path)
+        key = _reference_path_cache_key(path)
+        if key is None:
+            # Uncacheable (URL, missing file, etc.) — bypass entirely.
+            return self._encoder.encode(path)
+
+        leader_fut: concurrent.futures.Future | None = None
+        follower_fut: concurrent.futures.Future | None = None
+
+        with self._lock:
+            stored = self._cache.get(key)
+            if stored is not None:
+                self._hits += 1
+                return stored.clone().to(torch.long)
+            if key in self._inflight:
+                self._merged += 1
+                follower_fut = self._inflight[key]
+            else:
+                self._misses += 1
+                leader_fut = concurrent.futures.Future()
+                self._inflight[key] = leader_fut
+
+        if follower_fut is not None:
+            # Follower: wait for leader, return independent clone.
+            # Wrap any exception in a fresh instance so each waiter gets an
+            # independent object (a shared instance mutated by concurrent
+            # re-raises would corrupt all tracebacks — same issue as in
+            # _BatchedReferenceEncoder._worker, L216-221 of the original).
+            timeout = _BatchedReferenceEncoder.ENCODE_TIMEOUT_S + 10
+            try:
+                stored = follower_fut.result(timeout=timeout)
+            except Exception as cause:
+                raise RuntimeError(
+                    f"reference encode failed for {path!r}: {cause}"
+                ) from cause
+            return stored.clone().to(torch.long)
+
+        # Leader: encode then cache.
+        assert leader_fut is not None
+        try:
+            result = self._encoder.encode(path)
+        except BaseException as exc:
+            with self._lock:
+                self._inflight.pop(key, None)
+            leader_fut.set_exception(exc)
+            raise
+
+        # TOCTOU re-stat: skip cache if file changed between key computation and encode.
+        rekey = _reference_path_cache_key(path)
+        stored = result.detach().to("cpu", dtype=torch.int32)
+        with self._lock:
+            if rekey == key:
+                self._cache.put(key, stored)
+            self._inflight.pop(key, None)
+        leader_fut.set_result(stored)
+        # Return the original tensor (miss path == cache-off path, bit-identical).
+        return result
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "hits": self._hits,
+                "misses": self._misses,
+                "merged": self._merged,
+                "entries": len(self._cache._cache),
+                "bytes": self._cache.current_bytes,
+            }
 
 
 def create_preprocessing_executor(

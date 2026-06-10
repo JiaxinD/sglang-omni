@@ -565,6 +565,330 @@ def test_batched_reference_encoder_coalesces_and_isolates_errors():
     assert any(len(c) > 1 for c in calls) or len(calls) >= 3
 
 
+# ---------------------------------------------------------------------------
+# CachedReferenceEncoder  (T3–T9)
+# ---------------------------------------------------------------------------
+
+
+def test_cached_reference_encoder_on_off_hit_bit_identical(tmp_path):
+    """T5: OFF / ON-miss / ON-hit produce bit-identical prompt_rows and input_ids_list.
+
+    Uses int32 boundary value 1023 to verify lossless round-trip through storage.
+    ON-hit encode counter must stay at 1 (no second encode issued).
+    """
+    from sglang_omni.models.moss_tts_local.request_builders import (
+        _prepare_moss_tts_local_request,
+    )
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    ref_file = tmp_path / "ref.wav"
+    ref_file.write_bytes(b"fake wav bytes for T5")
+    encode_count = 0
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            nonlocal encode_count
+            encode_count += 1
+            # Boundary value 1023 exercises int32 round-trip; varies by path length.
+            codes = torch.full((10, N_VQ), 1023, dtype=torch.long)
+            codes[0, 0] = len(path) % 1024
+            return codes
+
+    class _RefAwareProcessor:
+        """Folds reference tensor sum into rows so bit-identity is non-trivial."""
+
+        @staticmethod
+        def build_user_message(**kwargs):
+            return dict(kwargs, role="user")
+
+        def __call__(self, conversations, mode):
+            assert mode == "generation"
+            msg = conversations[0][0]
+            ref = msg.get("reference") or []
+            ref_val = (
+                int(ref[0].sum().item()) % 1024
+                if ref and isinstance(ref[0], torch.Tensor)
+                else 0
+            )
+            seq = 8
+            rows = torch.full((1, seq, N_VQ + 1), ref_val, dtype=torch.long)
+            rows[0, :, 0] = torch.arange(seq)
+            rows[0, -1, 0] = 151669
+            return {"input_ids": rows}
+
+    def _ref_payload(rid: str) -> StagePayload:
+        return StagePayload(
+            request_id=rid,
+            request=OmniRequest(
+                inputs={"text": "hello", "references": [{"audio": str(ref_file)}]},
+                params={},
+                metadata={},
+            ),
+            data={},
+        )
+
+    processor = _RefAwareProcessor()
+    fake_batched = _FakeBatched()
+
+    # OFF: raw encoder, no cache wrapper
+    prepared_off = _prepare_moss_tts_local_request(
+        _ref_payload("t5-off"), processor=processor, reference_encoder=fake_batched
+    )
+    assert encode_count == 1
+
+    # ON-miss: first call to CachedReferenceEncoder (cache empty)
+    cached_enc = CachedReferenceEncoder(fake_batched, max_items=256, max_bytes=64 << 20)
+    encode_count = 0
+    prepared_miss = _prepare_moss_tts_local_request(
+        _ref_payload("t5-miss"), processor=processor, reference_encoder=cached_enc
+    )
+    assert encode_count == 1, "ON-miss must call underlying encode exactly once"
+
+    # ON-hit: second call, same file — cache must serve without re-encoding
+    prepared_hit = _prepare_moss_tts_local_request(
+        _ref_payload("t5-hit"), processor=processor, reference_encoder=cached_enc
+    )
+    assert encode_count == 1, "ON-hit must NOT call underlying encode again"
+
+    # Hard gate: all three paths produce identical prompt_rows and input_ids_list
+    assert torch.equal(prepared_off.prompt_rows, prepared_miss.prompt_rows)
+    assert torch.equal(prepared_off.prompt_rows, prepared_hit.prompt_rows)
+    assert prepared_off.input_ids_list == prepared_miss.input_ids_list
+    assert prepared_off.input_ids_list == prepared_hit.input_ids_list
+
+    stats = cached_enc.stats()
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+    assert stats["merged"] == 0
+
+
+def test_cached_reference_encoder_lru_eviction(tmp_path):
+    """T3: LRU eviction by item count and by byte budget."""
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    encode_log = []
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            encode_log.append(path)
+            return torch.full((2, N_VQ), ord(path[-1]), dtype=torch.long)
+
+    # --- item-count eviction: max_items=2, insert 3 ---
+    enc = CachedReferenceEncoder(_FakeBatched(), max_items=2, max_bytes=64 << 20)
+    files = [tmp_path / f"{c}.wav" for c in "abc"]
+    for i, f in enumerate(files):
+        f.write_bytes(bytes([i + 1]) * 16)  # distinct content → distinct cache keys
+    for f in files:
+        enc.encode(str(f))
+    encode_log.clear()
+    # 'a' was evicted (LRU); 'b' and 'c' are still cached
+    enc.encode(str(files[1]))  # b — should hit
+    enc.encode(str(files[2]))  # c — should hit
+    assert encode_log == [], "b and c should be cached (not re-encoded)"
+    enc.encode(str(files[0]))  # a — must re-encode
+    assert len(encode_log) == 1 and str(files[0]) in encode_log[0]
+
+    # --- byte-budget eviction: each entry is 2*12*4=96 bytes as int32 ---
+    entry_bytes = 2 * N_VQ * 4  # int32
+    enc2 = CachedReferenceEncoder(_FakeBatched(), max_items=1000, max_bytes=entry_bytes)
+    f1, f2 = tmp_path / "d.wav", tmp_path / "e.wav"
+    f1.write_bytes(b"y" * 16)
+    f2.write_bytes(b"z" * 16)
+    encode_log.clear()
+    enc2.encode(str(f1))
+    enc2.encode(str(f2))  # f1 evicted by byte budget
+    encode_log.clear()
+    enc2.encode(str(f2))  # e — should hit
+    assert encode_log == [], "f2 should be cached"
+    enc2.encode(str(f1))  # d — must re-encode
+    assert len(encode_log) == 1
+
+    # --- oversized entry is gracefully rejected, does not crash ---
+    enc3 = CachedReferenceEncoder(_FakeBatched(), max_items=10, max_bytes=1)
+    f3 = tmp_path / "big.wav"
+    f3.write_bytes(b"big" * 16)
+    result = enc3.encode(str(f3))
+    assert result is not None  # still returns a value
+
+
+def test_cached_reference_encoder_true_concurrency_dedup(tmp_path):
+    """T4: concurrent same-key requests — exactly 1 encode, all results torch.equal,
+    data_ptr pairwise distinct (each caller gets an independent clone).
+    """
+    import threading as _threading
+
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"concurrent test")
+
+    gate = _threading.Event()
+    call_count = 0
+
+    class _GatedBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            nonlocal call_count
+            gate.wait()  # stall until all threads have registered
+            call_count += 1
+            return torch.full((5, N_VQ), 42, dtype=torch.long)
+
+    N = 8
+    enc = CachedReferenceEncoder(_GatedBatched(), max_items=256, max_bytes=64 << 20)
+    results = [None] * N
+    errors = []
+
+    def worker(idx):
+        try:
+            results[idx] = enc.encode(str(ref))
+        except Exception as e:
+            errors.append(e)
+
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(N)]
+    for t in threads:
+        t.start()
+    # Give threads time to block inside encode() before releasing gate
+    import time
+
+    time.sleep(0.05)
+    gate.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"unexpected errors: {errors}"
+    assert call_count == 1, f"expected 1 encode call, got {call_count}"
+    assert all(r is not None for r in results)
+    ref_tensor = results[0]
+    for r in results[1:]:
+        assert torch.equal(ref_tensor, r), "results not bit-identical"
+    ptrs = [r.data_ptr() for r in results]
+    assert len(set(ptrs)) == len(ptrs), "data_ptr not pairwise distinct (shared tensor)"
+
+    stats = enc.stats()
+    assert stats["misses"] == 1
+    assert stats["merged"] == N - 1
+    assert stats["hits"] == 0
+
+
+def test_cached_reference_encoder_failure_does_not_poison(tmp_path):
+    """T6: leader failure fans out independent exception instances; cache stays clean;
+    third request becomes new leader and succeeds.
+    """
+    import threading as _threading
+
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    ref = tmp_path / "flaky.wav"
+    ref.write_bytes(b"flaky")
+
+    gate = _threading.Event()
+    call_count = 0
+
+    class _FlakyBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            nonlocal call_count
+            call_count += 1
+            gate.wait()
+            if call_count == 1:
+                raise RuntimeError("transient encode failure")
+            return torch.full((3, N_VQ), 7, dtype=torch.long)
+
+    enc = CachedReferenceEncoder(_FlakyBatched(), max_items=256, max_bytes=64 << 20)
+    exc_results = [None, None]
+
+    def fail_worker(idx):
+        try:
+            enc.encode(str(ref))
+        except Exception as e:
+            exc_results[idx] = e
+
+    t0 = _threading.Thread(target=fail_worker, args=(0,))
+    t1 = _threading.Thread(target=fail_worker, args=(1,))
+    t0.start()
+    t1.start()
+    import time
+
+    time.sleep(0.05)
+    gate.set()
+    t0.join(timeout=10)
+    t1.join(timeout=10)
+
+    # Both threads got an exception
+    assert exc_results[0] is not None
+    assert exc_results[1] is not None
+    # Each gets an independent instance (not the same object)
+    assert exc_results[0] is not exc_results[1]
+    # Cache not poisoned
+    assert enc.stats()["entries"] == 0
+    # inflight cleared
+    assert len(enc._inflight) == 0
+
+    # Third request succeeds (new leader)
+    gate.clear()
+    gate.set()
+    result = enc.encode(str(ref))
+    assert result is not None
+    assert torch.equal(result, torch.full((3, N_VQ), 7, dtype=torch.long))
+
+
+def test_cached_reference_encoder_return_value_isolation(tmp_path):
+    """T7: mutating the returned tensor does not corrupt the cached copy."""
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    ref = tmp_path / "iso.wav"
+    ref.write_bytes(b"isolation test")
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            return torch.full((4, N_VQ), 99, dtype=torch.long)
+
+    enc = CachedReferenceEncoder(_FakeBatched(), max_items=256, max_bytes=64 << 20)
+    enc.encode(str(ref))  # miss — populates cache
+
+    hit1 = enc.encode(str(ref))  # first hit
+    hit1.fill_(-1)  # mutate in place
+
+    hit2 = enc.encode(str(ref))  # second hit — must still be 99
+    assert torch.all(hit2 == 99), "cache was corrupted by mutation of first hit result"
+
+
+def test_cached_reference_encoder_duration_gate(tmp_path, monkeypatch):
+    """T8: references over 100 s are rejected before touching the cache."""
+    import torchaudio
+
+    from sglang_omni.models.moss_tts_local.stages import (
+        CachedReferenceEncoder,
+        _BatchedReferenceEncoder,
+    )
+
+    ref = tmp_path / "long.wav"
+    ref.write_bytes(b"fake long audio")
+    encode_count = 0
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            nonlocal encode_count
+            encode_count += 1
+            return torch.zeros((5, N_VQ), dtype=torch.long)
+
+    # Patch torchaudio.info to report a 200-second file
+    class _FakeInfo:
+        num_frames = 200 * 48000
+        sample_rate = 48000
+
+    monkeypatch.setattr(torchaudio, "info", lambda path: _FakeInfo(), raising=False)
+
+    enc = CachedReferenceEncoder(_FakeBatched(), max_items=256, max_bytes=64 << 20)
+
+    # _BatchedReferenceEncoder.encode checks duration before enqueuing; CachedReferenceEncoder
+    # calls through to the underlying encoder so the duration check still fires.
+    with pytest.raises(ValueError, match="100"):
+        enc.encode(str(ref))
+
+    assert encode_count == 0, "oversized reference must not reach the codec"
+    assert enc.stats()["entries"] == 0
+    assert len(enc._inflight) == 0
+
+
 def test_branchless_sampler_matches_eager_sampler():
     """The CUDA-graphable sampler must reproduce the eager path exactly."""
     pytest.importorskip("sglang")
