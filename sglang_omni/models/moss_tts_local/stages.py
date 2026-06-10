@@ -264,7 +264,10 @@ class CachedReferenceEncoder:
         path = str(path)
         # Duration gate first: >100 s must never enter the cache or inflight dict.
         _BatchedReferenceEncoder._check_reference_duration(path)
-        key = _reference_path_cache_key(path)
+        # trust_stat: skip the sentinel byte-read on memo hits — the codes cache
+        # lookup needs the key on every request, so the stat-only fast path saves
+        # an 8-24 KB read on the hot fixed-speaker path (idea from #740).
+        key = _reference_path_cache_key(path, trust_stat=True)
         if key is None:
             # Uncacheable (URL, missing file, etc.) — bypass entirely.
             return self._encoder.encode(path)
@@ -311,7 +314,7 @@ class CachedReferenceEncoder:
             raise
 
         # TOCTOU re-stat: skip cache if file changed between key computation and encode.
-        rekey = _reference_path_cache_key(path)
+        rekey = _reference_path_cache_key(path, trust_stat=True)
         stored = result.detach().to("cpu", dtype=torch.int32)
         with self._lock:
             if rekey == key:

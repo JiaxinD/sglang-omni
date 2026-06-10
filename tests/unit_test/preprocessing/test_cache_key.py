@@ -58,3 +58,66 @@ def test_reference_path_cache_key_memoizes_stable_file_hash(
 
     assert first_key == second_key
     assert read_calls == 1
+
+
+def test_reference_path_cache_key_trust_stat_skips_sentinel_on_hit(
+    monkeypatch, tmp_path
+) -> None:
+    # The opt-in trust_stat fast path (absorbed from #740) trusts the
+    # (size, mtime_ns, ctime_ns) stat tuple as content identity and skips the
+    # sentinel byte-read on memo hits. Co-authored idea: GaokaiZhang (#740).
+    ref_audio = tmp_path / "ref.wav"
+    ref_audio.write_bytes(b"fake wav bytes")
+    cache_key._REF_PATH_HASH_MEMO.clear()
+
+    sentinel_calls = 0
+    original_sentinel = cache_key._reference_path_sentinel
+
+    def counting_sentinel(path, file_size):
+        nonlocal sentinel_calls
+        sentinel_calls += 1
+        return original_sentinel(path, file_size)
+
+    monkeypatch.setattr(cache_key, "_reference_path_sentinel", counting_sentinel)
+
+    # First call (memo miss) must still compute the sentinel once so the memo
+    # entry stays valid for default (trust_stat=False) callers like Higgs.
+    first = cache_key.reference_path_cache_key(ref_audio, trust_stat=True)
+    assert sentinel_calls == 1
+    # Second call (memo hit) takes the fast path: no further sentinel read.
+    second = cache_key.reference_path_cache_key(ref_audio, trust_stat=True)
+    assert sentinel_calls == 1
+    assert first == second
+
+
+def test_reference_path_cache_key_trust_stat_keyspace_matches_default(
+    tmp_path,
+) -> None:
+    # trust_stat must produce a byte-identical key to the default path for the
+    # same content, so both callers share one keyspace.
+    ref_audio = tmp_path / "ref.wav"
+    ref_audio.write_bytes(b"shared content bytes")
+
+    cache_key._REF_PATH_HASH_MEMO.clear()
+    key_default = cache_key.reference_path_cache_key(ref_audio)
+    cache_key._REF_PATH_HASH_MEMO.clear()
+    key_trust = cache_key.reference_path_cache_key(ref_audio, trust_stat=True)
+
+    assert key_default is not None and key_default.startswith("file:")
+    assert key_default == key_trust
+
+
+def test_reference_path_cache_key_trust_stat_invalidates_on_stat_change(
+    tmp_path,
+) -> None:
+    # A real content replacement that changes the stat tuple still invalidates.
+    ref_audio = tmp_path / "ref.wav"
+    ref_audio.write_bytes(b"a" * 64)
+    cache_key._REF_PATH_HASH_MEMO.clear()
+    key_a = cache_key.reference_path_cache_key(ref_audio, trust_stat=True)
+
+    ref_audio.write_bytes(b"b" * 128)  # different size -> stat tuple changes
+    key_b = cache_key.reference_path_cache_key(ref_audio, trust_stat=True)
+
+    assert key_a is not None and key_b is not None
+    assert key_a != key_b
