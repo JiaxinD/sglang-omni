@@ -7,6 +7,7 @@ import concurrent.futures
 import logging
 import queue
 import threading
+import time
 from typing import Any
 
 import torch
@@ -257,6 +258,7 @@ class CachedReferenceEncoder:
         self._hits = 0
         self._misses = 0
         self._merged = 0
+        self._last_log_time: float = 0.0
 
     def encode(self, path: str) -> torch.Tensor:
         path = str(path)
@@ -317,7 +319,28 @@ class CachedReferenceEncoder:
             self._inflight.pop(key, None)
         leader_fut.set_result(stored)
         # Return the original tensor (miss path == cache-off path, bit-identical).
+        self._maybe_log()
         return result
+
+    def _maybe_log(self) -> None:
+        now = time.monotonic()
+        if now - self._last_log_time < 60.0:
+            return
+        with self._lock:
+            if now - self._last_log_time < 60.0:
+                return
+            self._last_log_time = now
+            snapshot = (
+                self._hits,
+                self._misses,
+                self._merged,
+                len(self._cache._cache),
+                self._cache.current_bytes,
+            )
+        logger.info(
+            "MOSS-TTS Local ref cache: hits=%d misses=%d merged=%d entries=%d bytes=%d",
+            *snapshot,
+        )
 
     def stats(self) -> dict:
         with self._lock:
@@ -338,14 +361,23 @@ def create_preprocessing_executor(
     max_concurrency: int = 16,
     encode_batch_size: int = 8,
     encode_batch_wait_ms: int = 4,
+    ref_audio_cache: bool = True,
+    ref_audio_cache_max_items: int = 256,
+    ref_audio_cache_max_bytes: int = 64 * 1024 * 1024,
 ) -> SimpleScheduler:
     device = _resolve_codec_device(device, gpu_id)
     processor = _load_moss_tts_local_processor(model_path, device=device)
-    reference_encoder = _BatchedReferenceEncoder(
+    reference_encoder: Any = _BatchedReferenceEncoder(
         processor,
         max_batch_size=encode_batch_size,
         max_batch_wait_ms=encode_batch_wait_ms,
     )
+    if ref_audio_cache:
+        reference_encoder = CachedReferenceEncoder(
+            reference_encoder,
+            max_items=ref_audio_cache_max_items,
+            max_bytes=ref_audio_cache_max_bytes,
+        )
     set_moss_tts_local_preprocessing_context(
         processor=processor, reference_encoder=reference_encoder
     )
