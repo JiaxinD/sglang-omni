@@ -889,6 +889,134 @@ def test_cached_reference_encoder_duration_gate(tmp_path, monkeypatch):
     assert len(enc._inflight) == 0
 
 
+# ---------------------------------------------------------------------------
+# Data-URI path (commit 4): bytes: keyspace + duration check
+# ---------------------------------------------------------------------------
+
+
+def _make_wav_data_uri(
+    n_samples: int = 100, sample_rate: int = 16000
+) -> tuple[str, bytes]:
+    """Minimal 16-bit mono PCM WAV wrapped as a data URI."""
+    import base64
+
+    samples = b"\x00\x00" * n_samples
+    data_size = len(samples)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate,
+        sample_rate * 2,
+        2,
+        16,
+        b"data",
+        data_size,
+    )
+    raw = header + samples
+    return f"data:audio/wav;base64,{base64.b64encode(raw).decode()}", raw
+
+
+def test_cached_reference_encoder_data_uri_hit_miss(tmp_path):
+    """bytes: keyspace: same data-URI encoded twice → 1 encode_audios_from_wav call."""
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    data_uri, _ = _make_wav_data_uri()
+    wav_call_count = 0
+
+    class _FakeProc:
+        def encode_audios_from_wav(self, wavs, sample_rate):
+            nonlocal wav_call_count
+            wav_call_count += 1
+            return [torch.full((5, N_VQ), 42, dtype=torch.long)]
+
+    enc = CachedReferenceEncoder(
+        None, max_items=256, max_bytes=64 << 20  # type: ignore[arg-type]
+    )
+    proc = _FakeProc()
+    enc.encode_data_uri(data_uri, processor=proc)
+    assert wav_call_count == 1, "first call must encode"
+
+    result2 = enc.encode_data_uri(data_uri, processor=proc)
+    assert wav_call_count == 1, "second call must hit cache"
+    assert torch.equal(result2, torch.full((5, N_VQ), 42, dtype=torch.long))
+
+    stats = enc.stats()
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+
+
+def test_cached_reference_encoder_file_bytes_keyspaces_do_not_collide(tmp_path):
+    """file: and bytes: keys are independent; same-content file ≠ data-URI in cache."""
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    data_uri, raw = _make_wav_data_uri()
+
+    # Write the same raw bytes as a file
+    ref_file = tmp_path / "ref.wav"
+    ref_file.write_bytes(raw)
+
+    encode_count = 0
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            nonlocal encode_count
+            encode_count += 1
+            return torch.full((5, N_VQ), 7, dtype=torch.long)
+
+    class _FakeProc:
+        def encode_audios_from_wav(self, wavs, sample_rate):
+            return [torch.full((5, N_VQ), 7, dtype=torch.long)]
+
+    enc = CachedReferenceEncoder(_FakeBatched(), max_items=256, max_bytes=64 << 20)
+    enc.encode(str(ref_file))  # populates file: key
+    enc.encode_data_uri(data_uri, processor=_FakeProc())  # must NOT hit file: entry
+
+    assert (
+        enc.stats()["misses"] == 2
+    ), "file: and bytes: are independent keyspaces; data-URI must be a fresh miss"
+
+
+def test_cached_reference_encoder_data_uri_duration_gate():
+    """data-URI references over 100 s are rejected."""
+    import base64
+    import io
+
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    pytest.importorskip("soundfile")
+    import soundfile as sf
+
+    # Build a 200-second silent WAV (at 8 kHz to keep size small)
+    sample_rate = 8000
+    n_samples = 200 * sample_rate
+    buf = io.BytesIO()
+    import numpy as np
+
+    sf.write(buf, np.zeros(n_samples, dtype=np.float32), sample_rate, format="WAV")
+    raw = buf.getvalue()
+    uri = f"data:audio/wav;base64,{base64.b64encode(raw).decode()}"
+
+    enc = CachedReferenceEncoder(
+        None, max_items=256, max_bytes=64 << 20  # type: ignore[arg-type]
+    )
+
+    class _FakeProc:
+        def encode_audios_from_wav(self, wavs, sr):
+            return [torch.zeros((5, N_VQ), dtype=torch.long)]
+
+    with pytest.raises(ValueError, match="100"):
+        enc.encode_data_uri(uri, processor=_FakeProc())
+
+    assert enc.stats()["entries"] == 0
+    assert len(enc._inflight) == 0
+
+
 def test_branchless_sampler_matches_eager_sampler():
     """The CUDA-graphable sampler must reproduce the eager path exactly."""
     pytest.importorskip("sglang")

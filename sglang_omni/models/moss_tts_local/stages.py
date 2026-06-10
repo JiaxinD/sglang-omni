@@ -342,6 +342,87 @@ class CachedReferenceEncoder:
             *snapshot,
         )
 
+    def encode_data_uri(self, ref_audio: str, *, processor: Any) -> torch.Tensor:
+        """Cache-aware encode for data-URI references (bytes: keyspace).
+
+        Adds the duration check that _reference_for_processor lacks, and routes
+        through the same LRU + single-flight machinery as file-path references.
+        file: and bytes: keys never collide because the encode chains differ.
+        """
+        import base64
+        import io
+
+        from sglang_omni.models.moss_tts.request_builders import _DATA_URI_RE
+        from sglang_omni.preprocessing.cache_key import hash_bytes as _hash_bytes
+
+        match = _DATA_URI_RE.match(ref_audio)
+        if match is None:
+            raise ValueError(f"encode_data_uri: not a data URI ({ref_audio[:40]!r}...)")
+
+        raw = base64.b64decode(match.group("data"))
+        key = f"bytes:{_hash_bytes(raw)}"
+
+        leader_fut: concurrent.futures.Future | None = None
+        follower_fut: concurrent.futures.Future | None = None
+
+        with self._lock:
+            stored = self._cache.get(key)
+            if stored is not None:
+                self._hits += 1
+                out = stored.clone().to(torch.long)
+            elif key in self._inflight:
+                self._merged += 1
+                follower_fut = self._inflight[key]
+            else:
+                self._misses += 1
+                leader_fut = concurrent.futures.Future()
+                self._inflight[key] = leader_fut
+
+        if stored is not None:
+            self._maybe_log()
+            return out  # type: ignore[return-value]
+
+        if follower_fut is not None:
+            timeout = _BatchedReferenceEncoder.ENCODE_TIMEOUT_S + 10
+            try:
+                stored = follower_fut.result(timeout=timeout)
+            except Exception as cause:
+                raise RuntimeError(
+                    f"reference encode failed (data-URI, merged): {cause}"
+                ) from cause
+            self._maybe_log()
+            return stored.clone().to(torch.long)
+
+        # Leader: decode audio, check duration, encode.
+        assert leader_fut is not None
+        try:
+            import soundfile as sf
+
+            audio, sample_rate = sf.read(
+                io.BytesIO(raw), dtype="float32", always_2d=True
+            )
+            duration = audio.shape[0] / max(int(sample_rate), 1)
+            if duration > _BatchedReferenceEncoder.MAX_REFERENCE_SECONDS:
+                raise ValueError(
+                    f"reference audio is {duration:.1f}s long; the limit is "
+                    f"{_BatchedReferenceEncoder.MAX_REFERENCE_SECONDS:.0f}s"
+                )
+            wav = torch.from_numpy(audio.T)
+            result = processor.encode_audios_from_wav([wav], int(sample_rate))[0]
+        except BaseException as exc:
+            with self._lock:
+                self._inflight.pop(key, None)
+            leader_fut.set_exception(exc)
+            raise
+
+        stored = result.detach().to("cpu", dtype=torch.int32)
+        with self._lock:
+            self._cache.put(key, stored)
+            self._inflight.pop(key, None)
+        leader_fut.set_result(stored)
+        self._maybe_log()
+        return result
+
     def stats(self) -> dict:
         with self._lock:
             return {
