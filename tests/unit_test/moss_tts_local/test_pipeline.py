@@ -734,6 +734,22 @@ def test_cached_reference_encoder_lru_eviction(tmp_path):
     assert result is not None  # still returns a value
 
 
+def test_cached_reference_encoder_rejects_nonpositive_capacity():
+    """Negative/zero capacities fail fast at construction (P3, review)."""
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
+
+    class _FakeBatched:
+        def encode(self, path: str) -> torch.Tensor:
+            return torch.zeros((2, N_VQ), dtype=torch.long)
+
+    with pytest.raises(ValueError, match="max_items"):
+        CachedReferenceEncoder(_FakeBatched(), max_items=-1)
+    with pytest.raises(ValueError, match="max_items"):
+        CachedReferenceEncoder(_FakeBatched(), max_items=0)
+    with pytest.raises(ValueError, match="max_bytes"):
+        CachedReferenceEncoder(_FakeBatched(), max_bytes=0)
+
+
 def test_cached_reference_encoder_true_concurrency_dedup(tmp_path):
     """T4: concurrent same-key requests — exactly 1 encode, all results torch.equal,
     data_ptr pairwise distinct (each caller gets an independent clone).

@@ -241,6 +241,9 @@ class CachedReferenceEncoder:
     Stores codes as int32 on CPU (lossless for codebook values in [0, 1023]).
     """
 
+    # Cadence for the periodic stats log; class attr so it is easy to tune.
+    LOG_INTERVAL_S = 60.0
+
     def __init__(
         self,
         encoder: _BatchedReferenceEncoder,
@@ -248,6 +251,12 @@ class CachedReferenceEncoder:
         max_items: int = 256,
         max_bytes: int = 64 * 1024 * 1024,
     ) -> None:
+        # Fail fast on non-positive capacities: a negative max_items makes
+        # StageOutputCache evict from an empty dict and KeyError at request time.
+        if max_items < 1:
+            raise ValueError(f"ref_audio_cache_max_items must be >= 1, got {max_items}")
+        if max_bytes < 1:
+            raise ValueError(f"ref_audio_cache_max_bytes must be >= 1, got {max_bytes}")
         self._encoder = encoder
         self._cache = StageOutputCache(
             max_size=max_items,
@@ -266,12 +275,29 @@ class CachedReferenceEncoder:
         # Note(Jiaxin): duration gate runs first — a >100 s ref must never reach
         # the cache or the inflight dict.
         _BatchedReferenceEncoder._check_reference_duration(path)
-        # trust_stat: stat-only fast path; the codes lookup needs the key on every
-        # request (see reference_path_cache_key).
-        key = _reference_path_cache_key(path, trust_stat=True)
+        # trust_stat left False (review feedback): keep the sentinel byte-read so a
+        # same-size+mtime+ctime overwrite cannot stale-hit. The flag stays available
+        # in reference_path_cache_key for deployments that guarantee immutable refs.
+        key = _reference_path_cache_key(path)
         if key is None:
             return self._encoder.encode(path)  # uncacheable (URL/missing) -> bypass
+        return self._cached_encode(
+            key,
+            lambda: self._encoder.encode(path),
+            desc=repr(path),
+            # TOCTOU re-stat: skip the put if the file changed during the encode.
+            revalidate=lambda: _reference_path_cache_key(path) == key,
+        )
 
+    def _cached_encode(
+        self, key: str, encode_fn, *, desc: str, revalidate=None
+    ) -> torch.Tensor:
+        """Single-flight skeleton shared by encode() and encode_data_uri().
+
+        Hit -> independent .clone().to(long). Miss leader runs encode_fn and returns
+        its tensor unchanged (bit-identical to cache-off). revalidate(), if given, is
+        evaluated outside the lock and gates the put (TOCTOU guard for file paths).
+        """
         leader_fut: concurrent.futures.Future | None = None
         follower_fut: concurrent.futures.Future | None = None
 
@@ -279,15 +305,18 @@ class CachedReferenceEncoder:
             stored = self._cache.get(key)
             if stored is not None:
                 self._hits += 1
-                # Note(Jiaxin): clone on hit so callers can't mutate the shared entry.
-                return stored.clone().to(torch.long)
-            if key in self._inflight:
+            elif key in self._inflight:
                 self._merged += 1
                 follower_fut = self._inflight[key]
             else:
                 self._misses += 1
                 leader_fut = concurrent.futures.Future()
                 self._inflight[key] = leader_fut
+
+        if stored is not None:
+            # Note(Jiaxin): clone on hit so callers can't mutate the shared entry.
+            self._maybe_log()
+            return stored.clone().to(torch.long)
 
         if follower_fut is not None:
             # Note(Jiaxin): each follower raises a FRESH RuntimeError — sharing one
@@ -298,24 +327,23 @@ class CachedReferenceEncoder:
                 stored = follower_fut.result(timeout=timeout)
             except Exception as cause:
                 raise RuntimeError(
-                    f"reference encode failed for {path!r}: {cause}"
+                    f"reference encode failed for {desc}: {cause}"
                 ) from cause
             return stored.clone().to(torch.long)
 
         assert leader_fut is not None
         try:
-            result = self._encoder.encode(path)
+            result = encode_fn()
         except BaseException as exc:
             with self._lock:
                 self._inflight.pop(key, None)
             leader_fut.set_exception(exc)
             raise
 
-        # TOCTOU re-stat: skip the put if the file changed during the encode.
-        rekey = _reference_path_cache_key(path, trust_stat=True)
+        do_put = revalidate() if revalidate is not None else True
         stored = result.detach().to("cpu", dtype=torch.int32)
         with self._lock:
-            if rekey == key:
+            if do_put:
                 self._cache.put(key, stored)
             self._inflight.pop(key, None)
         leader_fut.set_result(stored)
@@ -327,7 +355,7 @@ class CachedReferenceEncoder:
         if now - self._last_log_time < 60.0:
             return
         with self._lock:
-            if now - self._last_log_time < 60.0:
+            if now - self._last_log_time < self.LOG_INTERVAL_S:
                 return
             self._last_log_time = now
             snapshot = (
@@ -362,44 +390,15 @@ class CachedReferenceEncoder:
         raw = base64.b64decode(match.group("data"))
         key = f"bytes:{_hash_bytes(raw)}"
 
-        leader_fut: concurrent.futures.Future | None = None
-        follower_fut: concurrent.futures.Future | None = None
-
-        with self._lock:
-            stored = self._cache.get(key)
-            if stored is not None:
-                self._hits += 1
-                out = stored.clone().to(torch.long)
-            elif key in self._inflight:
-                self._merged += 1
-                follower_fut = self._inflight[key]
-            else:
-                self._misses += 1
-                leader_fut = concurrent.futures.Future()
-                self._inflight[key] = leader_fut
-
-        if stored is not None:
-            self._maybe_log()
-            return out  # type: ignore[return-value]
-
-        if follower_fut is not None:
-            timeout = _BatchedReferenceEncoder.ENCODE_TIMEOUT_S + 10
-            try:
-                stored = follower_fut.result(timeout=timeout)
-            except Exception as cause:
-                raise RuntimeError(
-                    f"reference encode failed (data-URI, merged): {cause}"
-                ) from cause
-            self._maybe_log()
-            return stored.clone().to(torch.long)
-
-        assert leader_fut is not None
-        try:
+        def _encode() -> torch.Tensor:
             import soundfile as sf
 
             audio, sample_rate = sf.read(
                 io.BytesIO(raw), dtype="float32", always_2d=True
             )
+            # Note(Jiaxin): the duration check runs inside the leader (not before
+            # inflight registration like the file path) so concurrent same-payload
+            # requests share one sf.read of a potentially large decoded buffer.
             duration = audio.shape[0] / max(int(sample_rate), 1)
             if duration > _BatchedReferenceEncoder.MAX_REFERENCE_SECONDS:
                 raise ValueError(
@@ -407,20 +406,9 @@ class CachedReferenceEncoder:
                     f"{_BatchedReferenceEncoder.MAX_REFERENCE_SECONDS:.0f}s"
                 )
             wav = torch.from_numpy(audio.T)
-            result = processor.encode_audios_from_wav([wav], int(sample_rate))[0]
-        except BaseException as exc:
-            with self._lock:
-                self._inflight.pop(key, None)
-            leader_fut.set_exception(exc)
-            raise
+            return processor.encode_audios_from_wav([wav], int(sample_rate))[0]
 
-        stored = result.detach().to("cpu", dtype=torch.int32)
-        with self._lock:
-            self._cache.put(key, stored)
-            self._inflight.pop(key, None)
-        leader_fut.set_result(stored)
-        self._maybe_log()
-        return result
+        return self._cached_encode(key, _encode, desc="data-URI")
 
     def stats(self) -> dict:
         with self._lock:
