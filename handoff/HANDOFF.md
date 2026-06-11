@@ -1,8 +1,24 @@
 # HANDOFF — PR #745 (feat/moss-local-state-pool)
 
-Session on `sgl-project/sglang-omni` PR #745. PR head was `7ee050b`; I pushed
-`2f33b06` (category-a) to the live PR, and staged `2024b80` (Phase 2) on the
-fork branch `origin/claude/friendly-keller-tv8t5e` pending your go.
+Session on `sgl-project/sglang-omni` PR #745.
+
+**LIVE PR HEAD = `090c9cf8`.** Timeline this session:
+`7ee050b` → `2f33b06` (category-a, pushed by me) → `e670f4b` (YOUR merge of main
+via GitHub UI — `CachedReferenceEncoder`/`cache_key`; touches stages/config/
+request_builders/cache_key/test_pipeline, **not** model_runner/state_pool) →
+`090c9cf8` (Phase 2 GPU radix hash, pushed by me on top of your merge).
+
+> Phase 2 was landed via the **GitHub API (push_files)** because the git proxy
+> to `sgl-project` went down mid-session (the fork/`origin` proxy still works).
+> The API path is footer-safe (verified). The functional diff is exactly the
+> intended change (verified via the commit patch). **One cosmetic artifact:**
+> the manual API inline turned two em-dashes (`—`→`--`) in two `model_runner.py`
+> docstrings (4 lines, functionally inert). To tidy with a clean `git` edit when
+> the `sgl-project` proxy is back; squash-merge erases it regardless.
+>
+> My local/fork branch (`8f92a46`) still holds the pre-merge `2024b80`; it has
+> diverged from the live PR (no `e670f4b`). Reconcile (fetch + reset) when the
+> proxy returns — the live PR is the source of truth.
 
 > **Reality vs the brief:** most of the brief was already done on the branch
 > before this session. Phase 1 (`reset_for_refill` pool API + retraction wiring
@@ -49,10 +65,11 @@ Issue comments: Ccyest "fix lint" → lint is **green** now (done). edwingao28
 | SHA | Where | Summary |
 |---|---|---|
 | `2f33b06` | **on live PR** | docs: trim review-flagged comments, drop PR-A/PR-B codename (category-a, threads 9/10/11/16/18) |
-| `2024b80` | **fork only (staged)** | perf: capture-safe GPU radix hash for generated rows (Phase 2, thread 8) |
+| `e670f4b` | **on live PR (yours)** | merge main → CachedReferenceEncoder / cache_key (no model_runner/state_pool/radix changes) |
+| `090c9cf8` | **on live PR** | perf: capture-safe GPU radix hash for generated rows (Phase 2, thread 8) — em-dash cosmetic artifact noted above |
 
-Patches in `handoff/patches/`. To land Phase 2 on the live PR:
-`git push upstream 2024b80:feat/moss-local-state-pool` (access confirmed).
+Local-commit patches in `handoff/patches/` (pre-merge SHAs). Phase 2 is already
+on the live PR; the `2024b80` patch is the same change for reference only.
 
 ---
 
@@ -82,7 +99,9 @@ Resolves and code pushes are footer-free and continue normally.
 
 ## 5. Decisions waiting on you — see DECISIONS-PENDING.md
 
-- **D0** push Phase 2 (`2024b80`) to the live PR? (go/no-go)
+- **D0** ✅ DONE — Phase 2 landed on the live PR (`090c9cf8`). The 11b reply to
+  gaoyang07's thread is **still a draft** (footer rule) in `REVIEW-REPLIES.md` →
+  you post it; do not resolve that thread until the GPU output-layer rerun.
 - **D1** c1 chunked `generation_steps` — investigated; recommend Approach **B1**
   (`_finalize` subclass skip-set hook). Files/shapes/tests written up.
 - **D2** c2 remove gate script / parity harness? (they're the S0 output-layer)
