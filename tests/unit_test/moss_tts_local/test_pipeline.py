@@ -299,6 +299,29 @@ def _payload(text: str = "hello") -> StagePayload:
     )
 
 
+def test_create_preprocessing_executor_env_toggle(monkeypatch):
+    from sglang_omni.models.moss_tts_local import request_builders as rb
+    from sglang_omni.models.moss_tts_local import stages
+
+    monkeypatch.setattr(
+        stages, "_load_moss_tts_local_processor", lambda *a, **k: _FakeProcessor()
+    )
+
+    # MOSS_REF_AUDIO_CACHE=0 disables the wrapper at startup (kill switch).
+    monkeypatch.setenv("MOSS_REF_AUDIO_CACHE", "0")
+    stages.create_preprocessing_executor("model", device="cpu")
+    assert not isinstance(
+        rb._PREPROCESSING_CONTEXT.reference_encoder, stages.CachedReferenceEncoder
+    )
+
+    # Unset -> kwarg default (True) -> wrapped.
+    monkeypatch.delenv("MOSS_REF_AUDIO_CACHE")
+    stages.create_preprocessing_executor("model", device="cpu")
+    assert isinstance(
+        rb._PREPROCESSING_CONTEXT.reference_encoder, stages.CachedReferenceEncoder
+    )
+
+
 def test_preprocess_and_result_adapter():
     set_moss_tts_local_preprocessing_context(processor=_FakeProcessor())
     try:

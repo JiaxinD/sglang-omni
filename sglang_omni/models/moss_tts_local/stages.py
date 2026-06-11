@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import queue
 import threading
 import time
@@ -449,6 +450,17 @@ def create_preprocessing_executor(
     ref_audio_cache_max_items: int = 256,
     ref_audio_cache_max_bytes: int = 64 * 1024 * 1024,
 ) -> SimpleScheduler:
+    # Runtime kill switch / A-B toggle: MOSS_REF_AUDIO_CACHE=0 disables the cache
+    # without a config edit (the design's "线上回退" lever). Unset => kwarg default.
+    env_toggle = os.environ.get("MOSS_REF_AUDIO_CACHE")
+    if env_toggle is not None:
+        ref_audio_cache = env_toggle.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        )
     device = _resolve_codec_device(device, gpu_id)
     processor = _load_moss_tts_local_processor(model_path, device=device)
     reference_encoder: Any = _BatchedReferenceEncoder(
