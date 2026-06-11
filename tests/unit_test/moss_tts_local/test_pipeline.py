@@ -878,10 +878,7 @@ def test_cached_reference_encoder_duration_gate(tmp_path, monkeypatch):
     """T8: references over 100 s are rejected before touching the cache."""
     import torchaudio
 
-    from sglang_omni.models.moss_tts_local.stages import (
-        CachedReferenceEncoder,
-        _BatchedReferenceEncoder,
-    )
+    from sglang_omni.models.moss_tts_local.stages import CachedReferenceEncoder
 
     ref = tmp_path / "long.wav"
     ref.write_bytes(b"fake long audio")
