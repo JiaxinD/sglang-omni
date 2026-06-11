@@ -2,23 +2,23 @@
 
 Session on `sgl-project/sglang-omni` PR #745.
 
-**LIVE PR HEAD = `090c9cf8`.** Timeline this session:
+**LIVE PR HEAD = `a203d07`.** Timeline this session:
 `7ee050b` → `2f33b06` (category-a, pushed by me) → `e670f4b` (YOUR merge of main
 via GitHub UI — `CachedReferenceEncoder`/`cache_key`; touches stages/config/
 request_builders/cache_key/test_pipeline, **not** model_runner/state_pool) →
-`090c9cf8` (Phase 2 GPU radix hash, pushed by me on top of your merge).
+`090c9cf8` (Phase 2 GPU radix hash, pushed by me) → `a203d07` (em-dash fixup).
 
-> Phase 2 was landed via the **GitHub API (push_files)** because the git proxy
-> to `sgl-project` went down mid-session (the fork/`origin` proxy still works).
-> The API path is footer-safe (verified). The functional diff is exactly the
-> intended change (verified via the commit patch). **One cosmetic artifact:**
-> the manual API inline turned two em-dashes (`—`→`--`) in two `model_runner.py`
-> docstrings (4 lines, functionally inert). To tidy with a clean `git` edit when
-> the `sgl-project` proxy is back; squash-merge erases it regardless.
+> Phase 2 was landed via the **GitHub API (push_files)** because my `upstream`
+> git remote had a stale proxy port mid-session (the proxy restarted
+> `38739→44169`; the harness updates `origin` but not a manually-added
+> `upstream`). API path is footer-safe (verified). The functional diff is exactly
+> the intended change (verified via the commit patch). The API inline introduced
+> 4 cosmetic `—`→`--` chars in two model_runner docstrings; **fixed cleanly in
+> `a203d07`** once I corrected the remote URL. The live PR is now pristine.
 >
-> My local/fork branch (`8f92a46`) still holds the pre-merge `2024b80`; it has
-> diverged from the live PR (no `e670f4b`). Reconcile (fetch + reset) when the
-> proxy returns — the live PR is the source of truth.
+> My local/fork branch (`claude/friendly-keller-tv8t5e`) holds the pre-merge
+> staging history; it diverged from the live PR (no `e670f4b`). The **live PR is
+> the source of truth**; `handoff/patches/` are pre-merge references only.
 
 > **Reality vs the brief:** most of the brief was already done on the branch
 > before this session. Phase 1 (`reset_for_refill` pool API + retraction wiring
@@ -66,7 +66,8 @@ Issue comments: Ccyest "fix lint" → lint is **green** now (done). edwingao28
 |---|---|---|
 | `2f33b06` | **on live PR** | docs: trim review-flagged comments, drop PR-A/PR-B codename (category-a, threads 9/10/11/16/18) |
 | `e670f4b` | **on live PR (yours)** | merge main → CachedReferenceEncoder / cache_key (no model_runner/state_pool/radix changes) |
-| `090c9cf8` | **on live PR** | perf: capture-safe GPU radix hash for generated rows (Phase 2, thread 8) — em-dash cosmetic artifact noted above |
+| `090c9cf8` | **on live PR** | perf: capture-safe GPU radix hash for generated rows (Phase 2, thread 8) |
+| `a203d07` | **on live PR** | style: restore em-dashes in model_runner docstrings (fixes the API-inline artifact) |
 
 Local-commit patches in `handoff/patches/` (pre-merge SHAs). Phase 2 is already
 on the live PR; the `2024b80` patch is the same change for reference only.
