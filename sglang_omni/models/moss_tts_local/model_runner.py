@@ -9,6 +9,7 @@ import torch
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
+from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
 from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
 from sglang_omni.scheduling.types import RequestOutput
 
@@ -316,15 +317,13 @@ class MossTTSLocalModelRunner(ModelRunner):
         scheduler finishes any request whose generated id crosses the vocab
         boundary (``Req._check_vocab_boundary_finish``); the stop decision
         keeps the raw audio_end id so eos detection still fires.
-        """
-        from sglang_omni.models.moss_tts.request_builders import build_row_cache_key_ids
 
-        # <|endoftext|> 151643 opens the special/control id band.
-        hash_space = 151643
-        hashed = torch.tensor(
-            build_row_cache_key_ids(rows), dtype=torch.long, device=rows.device
-        )
-        return torch.where(next_text == end_id, next_text, hashed % hash_space)
+        Unlike the prompt path (``build_row_cache_key_ids``'s host-side
+        blake2b), this runs every decode step on a device tensor, so it uses
+        the capture-safe tensor-native polynomial hash in :mod:`radix_hash` —
+        no GPU->CPU sync. See ``docs/design/gpu_radix_hash.md``.
+        """
+        return gpu_radix_row_hash(rows, next_text, end_id)
 
     @staticmethod
     def _gather_rep_histories(
