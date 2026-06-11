@@ -1,0 +1,410 @@
+From 2024b808044dcdefa2f7eeb11840a68559edf830 Mon Sep 17 00:00:00 2001
+From: JiaxinD <djx2048@gmail.com>
+Date: Thu, 11 Jun 2026 20:51:58 +0000
+Subject: [PATCH 2/2] perf: capture-safe GPU radix hash for generated rows (per
+ @gaoyang07 review)
+
+The generated-row radix key reused the prompt-path blake2b helper
+(build_row_cache_key_ids), which moves the row tensor to host (.numpy())
+and hashes per frame. On the decode hot path that is a GPU->CPU sync every
+frame, blocking CUDA-graph capture / async-decode (#734/#736).
+
+- new radix_hash.py: fixed-coefficient int64 Horner hash, folds < 151643,
+  EOS rows keep the raw audio_end id; pure tensor ops (no .cpu()/.item()/
+  numpy), CUDA-graph capturable, no int64 overflow.
+- model_runner._row_radix_token_ids delegates to it; the prompt-path
+  blake2b (build_row_cache_key_ids) is intentionally unchanged.
+- CPU key-layer tests: determinism, collision, EOS, domain, dtype/device.
+- docs/design/gpu_radix_hash.md: capture-safety + collision analysis +
+  two-layer verification (GPU output-layer rerun is PENDING).
+---
+ docs/design/gpu_radix_hash.md                 |  98 ++++++++++++
+ .../models/moss_tts_local/model_runner.py     |  15 +-
+ .../models/moss_tts_local/radix_hash.py       |  87 +++++++++++
+ .../moss_tts_local/test_radix_hash.py         | 141 ++++++++++++++++++
+ 4 files changed, 333 insertions(+), 8 deletions(-)
+ create mode 100644 docs/design/gpu_radix_hash.md
+ create mode 100644 sglang_omni/models/moss_tts_local/radix_hash.py
+ create mode 100644 tests/unit_test/moss_tts_local/test_radix_hash.py
+
+diff --git a/docs/design/gpu_radix_hash.md b/docs/design/gpu_radix_hash.md
+new file mode 100644
+index 0000000..7743350
+--- /dev/null
++++ b/docs/design/gpu_radix_hash.md
+@@ -0,0 +1,98 @@
++# Capture-safe GPU radix hash (MOSS-TTS Local generated rows)
++
++## Problem
++
++Every decoded frame on the Local v1.5 path appends one radix-cache token id to
++the request's KV chain; the radix tree keys on those ids. Because the text
++channel alone is the same assistant-slot id for every continuing frame, the key
++must hash the **full** 13-channel row (text + 12 RVQ codes) so that a radix
++prefix match implies identical audio content (otherwise a re-prefill after
++retraction could falsely prefix-match into another identical-prompt request's
++cached generated region).
++
++The previous generated-row key reused the prompt-path helper
++`moss_tts.request_builders.build_row_cache_key_ids`, which moves the row tensor
++to host (`row.numpy().tobytes()`) and hashes with blake2b. On the prompt path
++that is fine — it runs once, before decode, outside any CUDA-graph capture
++region. On the **generated**-row path it runs every decode step on a tensor the
++local-frame decode just produced on device, so it forces a
++GPU→CPU sync + host hashing + CPU→GPU upload of `next_token_ids` **per frame**.
++That host sync blocks CUDA-graph capture and the async-decode lookahead
++(#734 / #736), which this PR is preparing the path for.
++
++## Approach
++
++`sglang_omni/models/moss_tts_local/radix_hash.py` computes the generated-row key
++entirely in int64 torch ops — a fixed-coefficient polynomial (Horner) hash:
++
++```
++acc = 0
++for channel in range(C):                       # C = 13, static
++    acc = (acc * BASE + row[:, channel]) % MOD
++key = acc % HASH_SPACE                          # continuing frames
++key = audio_end_id                              # EOS rows (torch.where)
++```
++
++* `MOD = 2**31 - 1` (Mersenne prime M31), `BASE = 1_000_000_007` (prime < MOD).
++* `HASH_SPACE = 151643` — `<|endoftext|>` opens the special/control id band.
++  Continuing keys fold strictly below it; EOS rows keep the raw `audio_end` id
++  (in the band) so `Req._check_vocab_boundary_finish` still fires eos.
++
++The prompt path is **unchanged**: `build_row_cache_key_ids` (blake2b) stays for
++prompt preprocessing. Only `model_runner._row_radix_token_ids`'s generated-row
++path is swapped to the GPU hash. This boundary is deliberate — the prompt hash
++is not on the decode hot path and never enters a capture region.
++
++## Capture-safety argument
++
++The hash uses only elementwise int64 ops (`mul`, `add`, `remainder`,
++`where`) over a **static** channel count, on the input tensor's device. There is
++no `.cpu()`, `.item()`, `.tolist()`, numpy round-trip, data-dependent control
++flow, or dynamic shape. The Python `for` over `range(13)` unrolls into a fixed
++op sequence at trace/capture time. Therefore the function introduces no host
++sync and is CUDA-graph capturable / async-decode safe.
++
++### No int64 overflow
++
++With `acc < MOD` and each channel value reduced `< MOD` (both `< 2**31`) and
++`BASE < MOD`, every Horner step `acc * BASE + v < 2**31 * 2**31 = 2**62`, well
++inside signed int64 (`< 2**63`). So the arithmetic is exact and bit-reproducible
++on CPU and GPU — no implementation-defined wraparound. This is asserted in
++`test_matches_python_reference` against a pure-Python bignum reference.
++
++## Collision analysis
++
++The key only drives radix cache hit/miss; it never changes sampled output (see
++two-layer verification below). A clash matters only when two **distinct** audio
++rows produce the same key **and** sit on top of an otherwise identical full
++prefix — the same risk profile the prior blake2b-then-fold key already carried.
++
++* Raw polynomial space is `MOD ≈ 2.1e9`. Horner is order-sensitive (a channel
++  permutation changes the key) and spreads neighbours (a single-channel ±1
++  shifts the key by a power of `BASE mod MOD`), so structurally similar rows do
++  not cluster. Raw-hash injectivity on a constructed adjacent/permuted/random
++  batch is asserted in `test_no_collisions_on_adjacent_and_permuted_rows`.
++* The fold to `HASH_SPACE = 151643` is the operative space (identical to the
++  prior key's fold). Expected folded clashes for `n` co-resident generated rows
++  on a shared prefix are `~ n^2 / (2 * 151643)` — e.g. < 0.02 for n = 75. A fold
++  clash degrades to a single-position radix false-match (~1/151643) that only
++  takes effect atop an identical full prefix; it cannot corrupt output, only
++  cache locality.
++
++## Two-layer verification rubric
++
++Replacing the key algorithm means the old "both sides run the same blake2b"
++parity assumption no longer holds, so verification splits into two independent
++layers:
++
++1. **Output layer (bit-identity).** `audio_codes` / `output_ids` are produced by
++   sampling, which does **not** depend on the radix key value. The fixed-seed S0
++   gate (`scripts/gate_s0_sync_parity.py`) and the graph-vs-eager sentinel
++   assert bit-identical decoded output before vs after this change. **Status:
++   PENDING-GPU** (requires a CUDA device; see PENDING-GPU in the handoff).
++2. **Key layer (algorithm properties).** Determinism, collision behaviour, EOS
++   preservation, output domain, and dtype/device-follow are covered as CPU unit
++   tests in `tests/unit_test/moss_tts_local/test_radix_hash.py` (green on CPU).
++
++The output layer is the behaviour-neutrality guarantee; the key layer pins the
++hash's own contract independent of any GPU run.
+diff --git a/sglang_omni/models/moss_tts_local/model_runner.py b/sglang_omni/models/moss_tts_local/model_runner.py
+index 17b916a..fcc79e8 100644
+--- a/sglang_omni/models/moss_tts_local/model_runner.py
++++ b/sglang_omni/models/moss_tts_local/model_runner.py
+@@ -9,6 +9,7 @@ import torch
+ 
+ from sglang_omni.model_runner.base import ModelRunner
+ from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
++from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
+ from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
+ from sglang_omni.scheduling.types import RequestOutput
+ 
+@@ -316,15 +317,13 @@ class MossTTSLocalModelRunner(ModelRunner):
+         scheduler finishes any request whose generated id crosses the vocab
+         boundary (``Req._check_vocab_boundary_finish``); the stop decision
+         keeps the raw audio_end id so eos detection still fires.
+-        """
+-        from sglang_omni.models.moss_tts.request_builders import build_row_cache_key_ids
+ 
+-        # <|endoftext|> 151643 opens the special/control id band.
+-        hash_space = 151643
+-        hashed = torch.tensor(
+-            build_row_cache_key_ids(rows), dtype=torch.long, device=rows.device
+-        )
+-        return torch.where(next_text == end_id, next_text, hashed % hash_space)
++        Unlike the prompt path (``build_row_cache_key_ids``'s host-side
++        blake2b), this runs every decode step on a device tensor, so it uses
++        the capture-safe tensor-native polynomial hash in :mod:`radix_hash` —
++        no GPU->CPU sync. See ``docs/design/gpu_radix_hash.md``.
++        """
++        return gpu_radix_row_hash(rows, next_text, end_id)
+ 
+     @staticmethod
+     def _gather_rep_histories(
+diff --git a/sglang_omni/models/moss_tts_local/radix_hash.py b/sglang_omni/models/moss_tts_local/radix_hash.py
+new file mode 100644
+index 0000000..4825f33
+--- /dev/null
++++ b/sglang_omni/models/moss_tts_local/radix_hash.py
+@@ -0,0 +1,87 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Capture-safe GPU radix-key hash for MOSS-TTS Local generated frames.
++
++The scheduler appends one radix-cache token id per generated frame to a
++request's KV chain, and the radix tree keys on those ids. The text channel
++alone is the same assistant-slot id for every continuing frame, so the key
++must hash the full multi-channel row (text + RVQ codes) to keep a radix match
++implying identical audio content.
++
++Prompt rows are hashed once, off the decode hot path, by
++``moss_tts.request_builders.build_row_cache_key_ids`` (host-side blake2b); that
++call is fine to keep — it never runs inside a CUDA-graph capture region. The
++*generated*-row key, by contrast, is computed every decode step on a tensor
++that the local-frame decode just produced on device. Hashing it host-side
++forces a GPU->CPU sync (``.cpu()``/``numpy``) every frame, which blocks
++CUDA-graph capture and the async-decode lookahead (#734/#736). This module
++hashes the row tensor with a fixed-coefficient polynomial entirely in int64
++torch ops, so it stays on-device and is graph-capturable.
++
++See ``docs/design/gpu_radix_hash.md`` for the capture-safety argument, the
++collision analysis, and the two-layer verification rubric.
++"""
++
++from __future__ import annotations
++
++import torch
++
++# <|endoftext|> = 151643 opens the special/control id band. Generated radix
++# keys fold strictly below it; the scheduler finishes any request whose
++# generated id crosses this boundary (``Req._check_vocab_boundary_finish``), so
++# a real (continuing) audio frame must never land in or above the band.
++RADIX_HASH_SPACE = 151643
++
++# Polynomial-hash constants.
++#
++# _MOD is the Mersenne prime 2**31 - 1. With the accumulator and every channel
++# value reduced below _MOD (< 2**31) and _BASE < _MOD, each Horner step
++# ``acc * _BASE + v`` stays below 2**31 * 2**31 = 2**62, comfortably inside
++# signed int64 (max 2**63 - 1). So the int64 ops never overflow and the result
++# is bit-reproducible on CPU and GPU — no implementation-defined wraparound.
++#
++# _BASE is a large prime well below _MOD. Folding each channel in as a power of
++# _BASE (Horner) makes the hash order-sensitive (a channel permutation changes
++# the key) and spreads neighbours (a single-channel +/-1 changes the key by a
++# power of _BASE mod _MOD). Both constants are arbitrary fixed primes chosen
++# only for these size/spread properties; the generated-row key space is private
++# to the radix cache, so the exact values carry no on-disk/ABI contract.
++_MOD = 2147483647  # 2**31 - 1, Mersenne prime M31
++_BASE = 1000000007  # 1e9 + 7, prime, < _MOD
++
++
++def poly_row_hash(rows: torch.Tensor) -> torch.Tensor:
++    """Fixed-coefficient polynomial hash of each row, in ``[0, _MOD)``.
++
++    ``rows`` is ``[B, C]`` integer. Returns ``[B]`` int64 on ``rows.device``.
++    Pure elementwise int64 torch ops (mul / add / remainder) over a static
++    channel count — no host sync, CUDA-graph capturable.
++    """
++    if rows.ndim != 2:
++        raise ValueError(f"rows must be 2-D [B, C], got shape {tuple(rows.shape)}")
++    work = rows.to(torch.int64)
++    acc = torch.zeros(work.shape[0], dtype=torch.int64, device=work.device)
++    # Static trip count (one frame = a fixed number of channels): the loop
++    # unrolls into a fixed op sequence at capture time.
++    for channel in range(work.shape[1]):
++        # Reduce defensively in case a caller passes a raw id >= _MOD.
++        value = torch.remainder(work[:, channel], _MOD)
++        acc = torch.remainder(acc * _BASE + value, _MOD)
++    return acc
++
++
++def gpu_radix_row_hash(
++    rows: torch.Tensor,
++    next_text: torch.Tensor,
++    end_id: int,
++    *,
++    hash_space: int = RADIX_HASH_SPACE,
++) -> torch.Tensor:
++    """Capture-safe radix token ids for a batch of generated frames.
++
++    ``rows`` is ``[B, C]`` int64 (text channel + RVQ codes); ``next_text`` is
++    ``[B]`` (the text-channel id, ``end_id`` for a stop frame). Continuing
++    frames get a key in ``[0, hash_space)``; EOS rows keep the raw ``end_id``
++    so the existing eos detection still fires. device/dtype follow ``rows``.
++    """
++    folded = torch.remainder(poly_row_hash(rows), hash_space)
++    return torch.where(next_text == end_id, next_text.to(torch.int64), folded)
+diff --git a/tests/unit_test/moss_tts_local/test_radix_hash.py b/tests/unit_test/moss_tts_local/test_radix_hash.py
+new file mode 100644
+index 0000000..3079c58
+--- /dev/null
++++ b/tests/unit_test/moss_tts_local/test_radix_hash.py
+@@ -0,0 +1,141 @@
++# SPDX-License-Identifier: Apache-2.0
++"""CPU unit tests for the capture-safe generated-row radix hash.
++
++Imports only ``torch`` and the ``radix_hash`` module (no model/runtime deps),
++so the whole file runs on CPU. These cover the *key layer* of the two-layer
++verification rubric in ``docs/design/gpu_radix_hash.md``; the GPU bit-identity
++*output layer* rerun is tracked separately (PENDING-GPU).
++"""
++
++from __future__ import annotations
++
++import torch
++
++from sglang_omni.models.moss_tts_local.radix_hash import (
++    RADIX_HASH_SPACE,
++    _BASE,
++    _MOD,
++    gpu_radix_row_hash,
++    poly_row_hash,
++)
++
++_N_CHANNELS = 13  # text channel + 12 RVQ codes (n_vq = 12)
++_END_ID = 151670  # audio_end_token_id: in the special band (>= RADIX_HASH_SPACE)
++_SLOT_ID = 151646  # audio_assistant_slot_token_id: text channel of a continuing frame
++
++
++def _continuing_rows(codes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++    """[B, 13] rows: slot id in channel 0, ``codes`` in channels 1..12."""
++    b = codes.shape[0]
++    rows = torch.empty((b, _N_CHANNELS), dtype=torch.long)
++    rows[:, 0] = _SLOT_ID
++    rows[:, 1:] = codes
++    next_text = torch.full((b,), _SLOT_ID, dtype=torch.long)
++    return rows, next_text
++
++
++def _ref_poly(values: list[int]) -> int:
++    """Pure-Python bignum reference for the Horner hash (no int64 overflow)."""
++    acc = 0
++    for v in values:
++        acc = (acc * _BASE + (v % _MOD)) % _MOD
++    return acc
++
++
++def test_matches_python_reference():
++    """The int64 torch hash equals an exact bignum reference (no overflow)."""
++    codes = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]], dtype=torch.long)
++    rows, next_text = _continuing_rows(codes)
++    raw = int(poly_row_hash(rows)[0])
++    ref = _ref_poly([_SLOT_ID, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
++    assert raw == ref
++    folded = int(gpu_radix_row_hash(rows, next_text, _END_ID)[0])
++    assert folded == ref % RADIX_HASH_SPACE
++
++
++def test_deterministic_across_repeats():
++    """Same input hashed N times is identical (determinism / property ①)."""
++    torch.manual_seed(0)
++    codes = torch.randint(0, 1024, (32, 12))
++    rows, next_text = _continuing_rows(codes)
++    first = gpu_radix_row_hash(rows, next_text, _END_ID)
++    for _ in range(8):
++        again = gpu_radix_row_hash(rows.clone(), next_text.clone(), _END_ID)
++        assert torch.equal(first, again)
++
++
++def test_no_collisions_on_adjacent_and_permuted_rows():
++    """Adjacent (+/-1) and permuted rows hash distinctly (property ②)."""
++    base = torch.arange(10, 130, 10, dtype=torch.long)  # 12 distinct codes
++    variants = [base.clone()]
++    for c in range(12):  # single-channel neighbours
++        up = base.clone()
++        up[c] += 1
++        variants.append(up)
++        dn = base.clone()
++        dn[c] -= 1
++        variants.append(dn)
++    torch.manual_seed(1)
++    for _ in range(8):  # permutations of the same codes (order sensitivity)
++        variants.append(base[torch.randperm(12)])
++    variants.extend(torch.randint(0, 2048, (40, 12)))  # distinct random block
++    codes = torch.stack(variants, dim=0)
++    rows, next_text = _continuing_rows(codes)
++
++    # Test real collisions only: dedup identical rows (same input is not a clash).
++    rows = torch.unique(rows, dim=0)
++    next_text = torch.full((rows.shape[0],), _SLOT_ID, dtype=torch.long)
++
++    raw = poly_row_hash(rows)
++    folded = gpu_radix_row_hash(rows, next_text, _END_ID)
++    assert torch.unique(raw).numel() == raw.numel(), "raw poly hash collided"
++    assert torch.unique(folded).numel() == folded.numel(), "folded key collided"
++
++
++def test_eos_rows_keep_audio_end_id():
++    """EOS rows return the raw audio_end id; others fold below the band (③)."""
++    torch.manual_seed(3)
++    codes = torch.randint(0, 1024, (5, 12))
++    rows, next_text = _continuing_rows(codes)
++    for i in (1, 3):
++        next_text[i] = _END_ID
++        rows[i, 0] = _END_ID
++    keys = gpu_radix_row_hash(rows, next_text, _END_ID)
++    assert int(keys[1]) == _END_ID
++    assert int(keys[3]) == _END_ID
++    for i in (0, 2, 4):
++        assert 0 <= int(keys[i]) < RADIX_HASH_SPACE
++
++
++def test_continuing_keys_within_hash_space():
++    """Continuing-frame keys are in [0, RADIX_HASH_SPACE) (domain / ④)."""
++    torch.manual_seed(2)
++    codes = torch.randint(0, 4096, (256, 12))
++    rows, next_text = _continuing_rows(codes)
++    keys = gpu_radix_row_hash(rows, next_text, _END_ID)
++    assert int(keys.min()) >= 0
++    assert int(keys.max()) < RADIX_HASH_SPACE
++
++
++def test_output_dtype_and_device_follow_input():
++    """dtype is int64 and device follows the input rows (⑤)."""
++    codes = torch.randint(0, 1024, (4, 12))
++    rows, next_text = _continuing_rows(codes)
++    keys = gpu_radix_row_hash(rows, next_text, _END_ID)
++    assert keys.dtype == torch.int64
++    assert keys.device == rows.device
++    raw = poly_row_hash(rows)
++    assert raw.dtype == torch.int64
++    assert raw.device == rows.device
++
++
++def test_accepts_non_int64_input_dtype():
++    """int32 rows are handled (the hash casts to int64 internally)."""
++    codes = torch.randint(0, 1024, (4, 12), dtype=torch.int32)
++    rows = torch.empty((4, _N_CHANNELS), dtype=torch.int32)
++    rows[:, 0] = _SLOT_ID
++    rows[:, 1:] = codes
++    next_text = torch.full((4,), _SLOT_ID, dtype=torch.int32)
++    keys = gpu_radix_row_hash(rows, next_text, _END_ID)
++    assert keys.dtype == torch.int64
++    assert int(keys.min()) >= 0 and int(keys.max()) < RADIX_HASH_SPACE
+-- 
+2.43.0
+

@@ -1,0 +1,96 @@
+From 2f33b0695c34730109457b14e2bb495da6ce7cdb Mon Sep 17 00:00:00 2001
+From: JiaxinD <djx2048@gmail.com>
+Date: Thu, 11 Jun 2026 20:39:42 +0000
+Subject: [PATCH 1/2] docs: trim review-flagged comments, drop internal
+ PR-A/PR-B codename
+
+Address @Ratish1 review nits on the v1.5 decode-state pool:
+- state_pool journal docstring: PR-B -> #734 (async-decode path)
+- condense the module/padding_row and feedback bf16 comments
+- trim the abort_request rationale comment in stages.py
+- drop the redundant section banner in test_pipeline.py
+
+Comment/docstring only; no behavior or execution-path change.
+---
+ sglang_omni/models/moss_tts_local/stages.py     |  5 ++---
+ sglang_omni/models/moss_tts_local/state_pool.py | 17 +++++++----------
+ tests/unit_test/moss_tts_local/test_pipeline.py |  5 -----
+ 3 files changed, 9 insertions(+), 18 deletions(-)
+
+diff --git a/sglang_omni/models/moss_tts_local/stages.py b/sglang_omni/models/moss_tts_local/stages.py
+index 1b97a26..a8d984c 100644
+--- a/sglang_omni/models/moss_tts_local/stages.py
++++ b/sglang_omni/models/moss_tts_local/stages.py
+@@ -345,9 +345,8 @@ def create_sglang_tts_engine_executor(
+     )
+ 
+     def abort_request(request_id: str) -> None:
+-        # An aborted request may be mid-preprocessing (drop its prepared
+-        # handoff) and/or hold a decode-state pool row (release it); both
+-        # legs are idempotent no-ops when the request never reached them.
++        # Drop any prepared handoff and release any held pool row; both are
++        # idempotent no-ops if the request never reached them.
+         cleanup_prepared_moss_tts_local_request(request_id)
+         model.reset_request(request_id)
+ 
+diff --git a/sglang_omni/models/moss_tts_local/state_pool.py b/sglang_omni/models/moss_tts_local/state_pool.py
+index e136901..d1f9e79 100644
+--- a/sglang_omni/models/moss_tts_local/state_pool.py
++++ b/sglang_omni/models/moss_tts_local/state_pool.py
+@@ -6,12 +6,10 @@ embedding and the request-static sampling parameters/seed) lives in stable,
+ process-lifetime GPU buffers indexed by a per-request row. Output-only frame
+ collection moves to a per-step :class:`MossTTSLocalDecodeJournal`.
+ 
+-The layout mirrors the Higgs ``HiggsBatchedSamplerState`` row pool and the
+-Delay-path ``MossDecodeStatePool`` (#719): ``P = max_running_requests + 1``
+-rows, with the last row (``padding_row = P - 1``) reserved — never acquired,
+-never request-owned — so a future CUDA-graph that must route non-real/done
+-rows somewhere has a stable target (#736). The buffer addresses are fixed for
+-the process lifetime; adding a field is ABI-additive.
++``P = max_running_requests + 1`` rows indexed by a per-request row. The last
++row (``padding_row = P - 1``) is reserved — never acquired — as a stable
++routing target for non-real/done rows under a future CUDA graph (#736). Buffer
++addresses are fixed for the process lifetime.
+ """
+ 
+ from __future__ import annotations
+@@ -39,9 +37,8 @@ class MossTTSLocalDecodeStatePool:
+         self.device = weight.device
+         self.dtype = weight.dtype
+ 
+-        # Feedback embedding for the next decode step (one row per request);
+-        # bf16 to match the staging table dtype so before_decode's gather is a
+-        # plain copy and the future zero-copy aliasing (#736) is a drop-in.
++        # Feedback embedding for the next decode step; bf16 matches the staging
++        # table dtype so before_decode's gather is a plain copy (#736).
+         self.feedback_embeds = torch.zeros(
+             self.num_rows,
+             self.hidden_size,
+@@ -163,7 +160,7 @@ class MossTTSLocalDecodeJournal:
+     carry the "consume one step later" output data. The journal pins the
+     per-step ``rows`` tensor together with the request ids (for an alignment
+     assertion at apply time) and the pool rows the step touched; it is attached
+-    to the step's ``batch_result`` so the async-decode lookahead window (PR-B)
++    to the step's ``batch_result`` so the async-decode lookahead window (#734)
+     keeps it alive until resolve.
+     """
+ 
+diff --git a/tests/unit_test/moss_tts_local/test_pipeline.py b/tests/unit_test/moss_tts_local/test_pipeline.py
+index bd71c0d..5ce9cda 100644
+--- a/tests/unit_test/moss_tts_local/test_pipeline.py
++++ b/tests/unit_test/moss_tts_local/test_pipeline.py
+@@ -645,11 +645,6 @@ def test_encode_audio_stereo_wav_and_mono_fallback():
+     assert struct.unpack("<H", mono_blob[22:24])[0] == 1
+ 
+ 
+-# ---------------------------------------------------------------------------
+-# is_chunked guard in post_process_outputs (bugfix)
+-# ---------------------------------------------------------------------------
+-
+-
+ def test_post_process_outputs_skips_chunked_rows():
+     """Chunked-prefill rows must not be appended to output_rows."""
+     pytest.importorskip("sglang")
+-- 
+2.43.0
+
