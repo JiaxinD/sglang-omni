@@ -105,8 +105,7 @@ def _get_reference_path_hash(memo_key: str, sentinel: str) -> str | None:
 
 
 def _get_reference_path_hash_by_memo_key(memo_key: str) -> str | None:
-    # Fast-path lookup: trust the stat tuple in memo_key and skip the sentinel
-    # byte-read. Used only by trust_stat=True callers.
+    # Memo lookup ignoring the sentinel; trust_stat=True callers only.
     with _REF_PATH_HASH_MEMO_LOCK:
         cached = _REF_PATH_HASH_MEMO.get(memo_key)
         if cached is None:
@@ -126,16 +125,11 @@ def _put_reference_path_hash(memo_key: str, sentinel: str, digest: str) -> None:
 def reference_path_cache_key(
     path_like: str | Path, *, trust_stat: bool = False
 ) -> str | None:
-    # Memoized full-content hash. The stat tuple avoids rereading stable local
-    # refs while still invalidating normal and rapid same-size replacements.
-    #
-    # trust_stat (opt-in, absorbed from #740, co-authored idea: GaokaiZhang):
-    # treat the (size, mtime_ns, ctime_ns) stat tuple as content identity and
-    # skip the sentinel byte-read on memo hits. This trades the sentinel's
-    # narrow protection (same size+mtime+ctime, different content — only
-    # reachable by clock rollback during a write) for a zero-I/O hot path.
-    # Default False keeps the sentinel-validated behavior for Higgs, which
-    # shares this helper; the produced key is byte-identical in both modes.
+    # Memoized full-content hash; the stat tuple skips rereads of stable files.
+    # Note(Jiaxin): trust_stat (opt-in, from #740) trusts the (size,mtime,ctime)
+    # stat tuple and skips the sentinel byte-read on memo hits; the accepted gap
+    # is same-size+mtime+ctime-with-different-content (reachable only by clock
+    # rollback). Default False keeps Higgs's sentinel path; keys are identical.
     path = Path(str(path_like)).expanduser()
     memo = _reference_path_hash_memo_key(path)
     if memo is None:

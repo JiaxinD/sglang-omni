@@ -251,12 +251,10 @@ def _build_processor_message(
     ref_audio = state.ref_audio
     if reference_encoder is not None and isinstance(ref_audio, str):
         if _DATA_URI_RE.match(ref_audio) is None:
-            # File-path references encode through the shared coalescer so
-            # concurrent requests share one batched codec forward instead of
-            # serializing ~0.25 GPU-seconds each.
+            # File-path refs share one batched codec forward via the coalescer.
             reference = [reference_encoder.encode(ref_audio)]
         elif hasattr(reference_encoder, "encode_data_uri"):
-            # Data-URI references through the same LRU cache (bytes: keyspace).
+            # Data-URI refs through the same LRU (bytes: keyspace).
             reference = [
                 reference_encoder.encode_data_uri(ref_audio, processor=processor)
             ]

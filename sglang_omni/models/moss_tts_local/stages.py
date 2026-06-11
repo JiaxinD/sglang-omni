@@ -263,15 +263,14 @@ class CachedReferenceEncoder:
 
     def encode(self, path: str) -> torch.Tensor:
         path = str(path)
-        # Duration gate first: >100 s must never enter the cache or inflight dict.
+        # Note(Jiaxin): duration gate runs first — a >100 s ref must never reach
+        # the cache or the inflight dict.
         _BatchedReferenceEncoder._check_reference_duration(path)
-        # trust_stat: skip the sentinel byte-read on memo hits — the codes cache
-        # lookup needs the key on every request, so the stat-only fast path saves
-        # an 8-24 KB read on the hot fixed-speaker path (idea from #740).
+        # trust_stat: stat-only fast path; the codes lookup needs the key on every
+        # request (see reference_path_cache_key).
         key = _reference_path_cache_key(path, trust_stat=True)
         if key is None:
-            # Uncacheable (URL, missing file, etc.) — bypass entirely.
-            return self._encoder.encode(path)
+            return self._encoder.encode(path)  # uncacheable (URL/missing) -> bypass
 
         leader_fut: concurrent.futures.Future | None = None
         follower_fut: concurrent.futures.Future | None = None
@@ -280,6 +279,7 @@ class CachedReferenceEncoder:
             stored = self._cache.get(key)
             if stored is not None:
                 self._hits += 1
+                # Note(Jiaxin): clone on hit so callers can't mutate the shared entry.
                 return stored.clone().to(torch.long)
             if key in self._inflight:
                 self._merged += 1
@@ -290,11 +290,9 @@ class CachedReferenceEncoder:
                 self._inflight[key] = leader_fut
 
         if follower_fut is not None:
-            # Follower: wait for leader, return independent clone.
-            # Wrap any exception in a fresh instance so each waiter gets an
-            # independent object (a shared instance mutated by concurrent
-            # re-raises would corrupt all tracebacks — same issue as in
-            # _BatchedReferenceEncoder._worker, L216-221 of the original).
+            # Note(Jiaxin): each follower raises a FRESH RuntimeError — sharing one
+            # exception instance lets concurrent re-raises corrupt its traceback
+            # (same lesson as _BatchedReferenceEncoder._worker).
             timeout = _BatchedReferenceEncoder.ENCODE_TIMEOUT_S + 10
             try:
                 stored = follower_fut.result(timeout=timeout)
@@ -304,7 +302,6 @@ class CachedReferenceEncoder:
                 ) from cause
             return stored.clone().to(torch.long)
 
-        # Leader: encode then cache.
         assert leader_fut is not None
         try:
             result = self._encoder.encode(path)
@@ -314,7 +311,7 @@ class CachedReferenceEncoder:
             leader_fut.set_exception(exc)
             raise
 
-        # TOCTOU re-stat: skip cache if file changed between key computation and encode.
+        # TOCTOU re-stat: skip the put if the file changed during the encode.
         rekey = _reference_path_cache_key(path, trust_stat=True)
         stored = result.detach().to("cpu", dtype=torch.int32)
         with self._lock:
@@ -322,9 +319,8 @@ class CachedReferenceEncoder:
                 self._cache.put(key, stored)
             self._inflight.pop(key, None)
         leader_fut.set_result(stored)
-        # Return the original tensor (miss path == cache-off path, bit-identical).
         self._maybe_log()
-        return result
+        return result  # original tensor: miss path stays bit-identical to cache-off
 
     def _maybe_log(self) -> None:
         now = time.monotonic()
@@ -347,11 +343,11 @@ class CachedReferenceEncoder:
         )
 
     def encode_data_uri(self, ref_audio: str, *, processor: Any) -> torch.Tensor:
-        """Cache-aware encode for data-URI references (bytes: keyspace).
+        """Cache-aware encode for data-URI refs through the same LRU + single-flight
+        as file paths (adds the duration check _reference_for_processor lacks).
 
-        Adds the duration check that _reference_for_processor lacks, and routes
-        through the same LRU + single-flight machinery as file-path references.
-        file: and bytes: keys never collide because the encode chains differ.
+        Note(Jiaxin): file: and bytes: keyspaces never collide — the two decode
+        chains differ, so codes aren't guaranteed identical for the "same" audio.
         """
         import base64
         import io
@@ -397,7 +393,6 @@ class CachedReferenceEncoder:
             self._maybe_log()
             return stored.clone().to(torch.long)
 
-        # Leader: decode audio, check duration, encode.
         assert leader_fut is not None
         try:
             import soundfile as sf
@@ -450,8 +445,8 @@ def create_preprocessing_executor(
     ref_audio_cache_max_items: int = 256,
     ref_audio_cache_max_bytes: int = 64 * 1024 * 1024,
 ) -> SimpleScheduler:
-    # Runtime kill switch / A-B toggle: MOSS_REF_AUDIO_CACHE=0 disables the cache
-    # without a config edit (the design's "线上回退" lever). Unset => kwarg default.
+    # MOSS_REF_AUDIO_CACHE=0 disables the cache at startup (ops kill switch / A-B
+    # toggle) without a config edit; unset => kwarg default.
     env_toggle = os.environ.get("MOSS_REF_AUDIO_CACHE")
     if env_toggle is not None:
         ref_audio_cache = env_toggle.strip().lower() not in (
