@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """S0 gate: fixed-seed sync parity check for MOSS-TTS Local v1.5.
 
-Runs the v1.5 frame-decode graph twice with identical fixed-seed inputs at
-each concurrency level and asserts bit-identical outputs. Must pass before
-and after every PR-A commit to confirm behavior-neutrality.
+Regression sentinel (lives under tests/regression/, not a scratch script): the
+reproducer for this PR's bit-identity claim (the S0 gate cited in the PR's
+Verification section), reused directly as #734's sync-parity hard gate.
+
+Runs the v1.5 frame-decode graph twice with identical fixed-seed inputs at each
+concurrency level and asserts bit-identical outputs. Must pass before and after
+any behavior-neutral change on this path.
 
 Usage (inside sglang-omni-jiaxind container on novita-h100):
-    CUDA_VISIBLE_DEVICES=3 python scripts/gate_s0_sync_parity.py
-    CUDA_VISIBLE_DEVICES=3 python scripts/gate_s0_sync_parity.py --batch-sizes 1 4 16
-    CUDA_VISIBLE_DEVICES=3 python scripts/gate_s0_sync_parity.py --frames 50 --seed 12345
+    CUDA_VISIBLE_DEVICES=3 python tests/regression/gate_s0_sync_parity.py
+    CUDA_VISIBLE_DEVICES=3 python tests/regression/gate_s0_sync_parity.py --batch-sizes 1 4 16
+    CUDA_VISIBLE_DEVICES=3 python tests/regression/gate_s0_sync_parity.py --frames 50 --seed 12345
 
 Exit code: 0 = all checks passed, 1 = any divergence detected.
 """

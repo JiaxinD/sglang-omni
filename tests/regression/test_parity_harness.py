@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fixed-seed sync parity harness: gate scaffold for PR-A bit-identity.
+"""Fixed-seed sync parity harness for MOSS-TTS Local v1.5 bit-identity.
 
-CPU tests exercise the comparison fixtures and the apply-result data flow.
-The GPU test (skipped without CUDA) verifies the frame-decode graph is
-deterministic and serves as the S0 gate baseline; it must not be modified
-after initial commit.
+Regression sentinel (lives under tests/regression/, not a stray unit test): the
+reproducer for this PR's bit-identity claim, paired with gate_s0_sync_parity.py
+and reused by #734's sync-parity hard gate. CPU tests exercise the comparison
+fixtures and the apply-result data flow; the GPU test (skipped without CUDA)
+verifies the frame-decode graph is deterministic and pins the S0 baseline. The
+GPU baseline test must not be modified after initial commit.
 """
 
 from __future__ import annotations

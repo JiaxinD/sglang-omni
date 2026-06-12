@@ -87,9 +87,10 @@ layers:
 
 1. **Output layer (bit-identity).** `audio_codes` / `output_ids` are produced by
    sampling, which does **not** depend on the radix key value. The fixed-seed S0
-   gate (`scripts/gate_s0_sync_parity.py`) and the graph-vs-eager sentinel
-   assert bit-identical decoded output before vs after this change. **Status:
-   PENDING-GPU** (requires a CUDA device; see PENDING-GPU in the handoff).
+   gate (`tests/regression/gate_s0_sync_parity.py`) and the graph-vs-eager
+   sentinel assert bit-identical decoded output before vs after this change.
+   **Status: PASS** (H100 at `ab0dd3c`: S0 3/3, graph-vs-eager sentinel, and the
+   75-test on-GPU `moss_tts_local` suite).
 2. **Key layer (algorithm properties).** Determinism, collision behaviour, EOS
    preservation, output domain, and dtype/device-follow are covered as CPU unit
    tests in `tests/unit_test/moss_tts_local/test_radix_hash.py` (green on CPU).
