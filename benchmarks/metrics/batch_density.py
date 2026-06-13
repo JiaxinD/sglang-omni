@@ -61,3 +61,19 @@ def overload_signal(
     if _inflight_rising(inflight_trajectory):
         reasons.append("inflight_rising")
     return {"overloaded": bool(reasons), "reasons": reasons}
+
+
+def crosscheck_frames(server_decode_frames_total: int, results) -> dict:
+    """Independent integrity check of the server frame counter.
+
+    Every committed frame is one row in some request's output_rows, so the server
+    decode_frames_total must equal the sum of client completion_tokens over successful
+    requests. This catches a missed or double-counted decode branch, which the
+    self-referential sum(bs_histogram)==decode_frames_total check cannot.
+    """
+    client = sum(r.completion_tokens for r in results if r.is_success)
+    return {
+        "match": server_decode_frames_total == client,
+        "server_decode_frames_total": server_decode_frames_total,
+        "client_completion_tokens": client,
+    }

@@ -3,7 +3,25 @@
 
 from __future__ import annotations
 
-from benchmarks.metrics.batch_density import overload_signal, windowed_batch_density
+from benchmarks.benchmarker.data import RequestResult
+from benchmarks.metrics.batch_density import (
+    crosscheck_frames,
+    overload_signal,
+    windowed_batch_density,
+)
+
+
+def test_crosscheck_matches_server_frames_to_client_completion_tokens() -> None:
+    # Strong invariant: every committed frame is one output row, so the server frame
+    # total equals the sum of client completion_tokens over SUCCESSFUL requests.
+    results = [
+        RequestResult(is_success=True, completion_tokens=100),
+        RequestResult(is_success=True, completion_tokens=150),
+        RequestResult(is_success=False, completion_tokens=999),  # failed: excluded
+    ]
+    assert crosscheck_frames(250, results)["match"] is True
+    assert crosscheck_frames(250, results)["client_completion_tokens"] == 250
+    assert crosscheck_frames(251, results)["match"] is False
 
 
 def test_windowed_density_is_end_minus_start_per_bucket() -> None:
