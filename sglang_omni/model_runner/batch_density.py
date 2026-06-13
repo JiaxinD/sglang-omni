@@ -15,12 +15,17 @@ while the decode batch had shrunk to a single request.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable
 
 # Opt-in at server launch (MOSS_BATCH_DENSITY=1). Off by default so production serving
 # and other benchmarks are untouched; the experiment server sets it explicitly.
 _ENABLED = os.environ.get("MOSS_BATCH_DENSITY", "0").lower() not in ("0", "", "false")
+# Surfacing: the worker periodically dumps the cumulative snapshot to this path; the
+# same-host benchmark reads it at window start/end and diffs (no cross-process IPC).
+_DUMP_PATH = os.environ.get("MOSS_BATCH_DENSITY_DUMP", "/tmp/moss_batch_density.json")
+_DUMP_EVERY = 16
 
 
 def enabled() -> bool:
@@ -43,6 +48,7 @@ class BatchDensityRecorder:
     def __init__(self) -> None:
         self.decode_frames_total = 0
         self.bs_histogram: dict[int, int] = {}
+        self._since_dump = 0
 
     def record_step(self, effective_bs: int) -> None:
         """Record one decode step that committed ``effective_bs`` frames."""
@@ -66,6 +72,20 @@ class BatchDensityRecorder:
             "bs_histogram": dict(self.bs_histogram),
             "bs1_frame_ratio": self.bs1_frame_ratio,
         }
+
+    def dump(self, path: str) -> None:
+        """Atomically write the cumulative snapshot to ``path`` (tmp + replace)."""
+        tmp = path + ".tmp"
+        with open(tmp, "w") as handle:
+            json.dump(self.snapshot(), handle)
+        os.replace(tmp, path)
+
+    def maybe_dump(self, path: str | None = None, every: int = _DUMP_EVERY) -> None:
+        """Dump once every ``every`` steps to bound hot-path file I/O."""
+        self._since_dump += 1
+        if self._since_dump >= every:
+            self._since_dump = 0
+            self.dump(path or _DUMP_PATH)
 
 
 # Worker-process-global recorder. _finalize records into it; the per-request result

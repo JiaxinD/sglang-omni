@@ -164,6 +164,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -172,6 +173,7 @@ from pathlib import Path
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig
 from benchmarks.benchmarker.utils import managed_omni_server
 from benchmarks.dataset.seedtts import load_seedtts_samples
+from benchmarks.metrics.batch_density import crosscheck_frames, windowed_batch_density
 from benchmarks.metrics.performance import (
     build_speed_results,
     compute_speed_metrics,
@@ -237,6 +239,7 @@ class TtsSeedttsBenchmarkConfig:
     load_mode: str = "closed_loop"
     arrival_seed: int = 0
     max_inflight_guard: int | None = None
+    batch_density_dump: str = "/tmp/moss_batch_density.json"
     stream: bool = False
     stream_format: str = "sse"
     initial_codec_chunk_frames: int | None = None
@@ -266,6 +269,14 @@ def _build_generation_kwargs(config: TtsSeedttsBenchmarkConfig) -> dict:
     if config.seed is not None:
         generation_kwargs["seed"] = config.seed
     return generation_kwargs
+
+
+def _read_density_snapshot(path: str) -> dict | None:
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
 
 
 def _build_results_config(
@@ -343,12 +354,20 @@ async def run_tts_seedtts_benchmark(
             max_inflight_guard=config.max_inflight_guard,
         )
     )
+    snap_start = _read_density_snapshot(config.batch_density_dump)
     outputs = await runner.run(samples, send_fn)
+    snap_end = _read_density_snapshot(config.batch_density_dump)
 
     metrics = compute_speed_metrics(outputs, wall_clock_s=runner.wall_clock_s)
     results_config = _build_results_config(config, base_url=base_url)
     if runner.dispatch_meta:
         results_config["dispatch_meta"] = runner.dispatch_meta
+    if snap_start is not None and snap_end is not None:
+        windowed = windowed_batch_density(snap_start, snap_end)
+        results_config["batch_density"] = windowed
+        results_config["batch_density_crosscheck"] = crosscheck_frames(
+            windowed["decode_frames_total"], outputs
+        )
     benchmark_results = build_speed_results(outputs, metrics, results_config)
     save_speed_results(outputs, metrics, results_config, config.output_dir)
     save_generated_audio_metadata(outputs, samples, config.output_dir)
@@ -432,6 +451,7 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         load_mode=args.load_mode,
         arrival_seed=args.arrival_seed,
         max_inflight_guard=args.max_inflight_guard,
+        batch_density_dump=args.batch_density_dump,
         stream=args.stream,
         stream_format=args.stream_format,
         initial_codec_chunk_frames=args.initial_codec_chunk_frames,
@@ -600,6 +620,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Open-loop hard backstop: abort and flag the run invalid if in-flight "
             "requests reach this ceiling (never waits for a slot)."
         ),
+    )
+    parser.add_argument(
+        "--batch-density-dump",
+        default="/tmp/moss_batch_density.json",
+        help="Path the server dumps its cumulative batch-density snapshot to.",
     )
     parser.add_argument(
         "--stream",

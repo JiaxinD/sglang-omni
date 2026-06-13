@@ -3,10 +3,39 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 from sglang_omni.model_runner.batch_density import (
     BatchDensityRecorder,
     effective_decode_bs,
 )
+
+
+def test_dump_writes_snapshot_json(tmp_path) -> None:
+    recorder = BatchDensityRecorder()
+    for bs in [1, 2, 2, 1]:
+        recorder.record_step(bs)
+    path = str(tmp_path / "bd.json")
+    recorder.dump(path)
+    loaded = json.loads(open(path).read())
+    # JSON object keys are strings; the windowing consumer re-ints them.
+    assert loaded["decode_frames_total"] == recorder.decode_frames_total == 6
+    assert loaded["bs_histogram"] == {"1": 2, "2": 4}
+    assert loaded["bs1_frame_ratio"] == recorder.bs1_frame_ratio
+
+
+def test_maybe_dump_is_throttled(tmp_path) -> None:
+    recorder = BatchDensityRecorder()
+    path = str(tmp_path / "bd.json")
+    for _ in range(3):
+        recorder.record_step(1)
+        recorder.maybe_dump(path, every=5)
+    assert not os.path.exists(path)  # below threshold, not written yet
+    for _ in range(2):
+        recorder.record_step(1)
+        recorder.maybe_dump(path, every=5)
+    assert os.path.exists(path)  # threshold reached, dumped
 
 
 def test_effective_bs_is_count_of_non_skipped_requests() -> None:
