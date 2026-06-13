@@ -15,6 +15,27 @@ while the decode batch had shrunk to a single request.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterable
+
+# Opt-in at server launch (MOSS_BATCH_DENSITY=1). Off by default so production serving
+# and other benchmarks are untouched; the experiment server sets it explicitly.
+_ENABLED = os.environ.get("MOSS_BATCH_DENSITY", "0").lower() not in ("0", "", "false")
+
+
+def enabled() -> bool:
+    return _ENABLED
+
+
+def effective_decode_bs(request_ids: Iterable[str], skip_rids: set[str]) -> int:
+    """Effective batch size at ``_finalize``: requests that committed a frame this step.
+
+    A request is skipped (no frame) when it is finished, retracted, or an overrun row
+    in a lagged async-resolve batch. The rest each commit one frame, so the count is
+    the per-step batch size for the bs histogram.
+    """
+    return sum(1 for rid in request_ids if rid not in skip_rids)
+
 
 class BatchDensityRecorder:
     """Accumulate decode-frame counts keyed by the batch size that produced them."""
@@ -45,3 +66,14 @@ class BatchDensityRecorder:
             "bs_histogram": dict(self.bs_histogram),
             "bs1_frame_ratio": self.bs1_frame_ratio,
         }
+
+
+# Worker-process-global recorder. _finalize records into it; the per-request result
+# adapter reads its snapshot onto the outgoing result dict (same worker process). The
+# benchmark client windows by diffing the warmup-end and dispatch-end snapshots, so the
+# cumulative counter is never reset in-process.
+_RECORDER = BatchDensityRecorder()
+
+
+def get_recorder() -> BatchDensityRecorder:
+    return _RECORDER
