@@ -4,6 +4,7 @@
 Handles: ForwardBatch construction, phase-aware pre/post hooks, forward
 pass, sampling, logit post-processing, and output extraction.
 """
+
 from __future__ import annotations
 
 import logging
@@ -12,6 +13,11 @@ from typing import Any
 
 import torch
 
+from sglang_omni.model_runner.batch_density import (
+    effective_decode_bs,
+    enabled as batch_density_enabled,
+    get_recorder,
+)
 from sglang_omni.scheduling.types import ModelRunnerOutput, RequestOutput
 
 logger = logging.getLogger(__name__)
@@ -362,6 +368,11 @@ class ModelRunner:
             if isinstance(extra, dict) and extra:
                 data.extra_model_outputs.update(extra)
         req_ids = [req.request_id for req in scheduler_output.requests]
+        # Open-loop batch-composition study: count one frame per non-skipped request
+        # this step. Producer-agnostic (covers sync + async-resolve + prefill first
+        # frame). Validated on a real run by decode_frames_total == sum(completion_tokens).
+        if batch_density_enabled():
+            get_recorder().record_step(effective_decode_bs(req_ids, skip_rids))
         req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
         return ModelRunnerOutput(

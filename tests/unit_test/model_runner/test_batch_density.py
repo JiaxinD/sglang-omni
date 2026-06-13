@@ -3,7 +3,19 @@
 
 from __future__ import annotations
 
-from sglang_omni.model_runner.batch_density import BatchDensityRecorder
+from sglang_omni.model_runner.batch_density import (
+    BatchDensityRecorder,
+    effective_decode_bs,
+)
+
+
+def test_effective_bs_is_count_of_non_skipped_requests() -> None:
+    # The effective batch size at _finalize is how many requests committed a frame
+    # this step, i.e. the batch minus the skipped (finished/retracted/overrun) rids.
+    assert effective_decode_bs(["a", "b", "c"], {"b"}) == 2
+    assert effective_decode_bs(["a", "b"], set()) == 2
+    assert effective_decode_bs(["a", "b", "c"], {"a", "b", "c"}) == 0
+    assert effective_decode_bs([], {"x"}) == 0
 
 
 def test_frames_are_weighted_by_batch_size() -> None:

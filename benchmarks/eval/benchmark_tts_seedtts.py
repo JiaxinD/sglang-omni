@@ -233,6 +233,10 @@ class TtsSeedttsBenchmarkConfig:
     warmup: int = 1
     concurrency: int = DEFAULT_TTS_BENCHMARK_CONCURRENCY
     request_rate: float = float("inf")
+    # Open-loop load. Default closed_loop keeps the historical semaphore-gated behavior.
+    load_mode: str = "closed_loop"
+    arrival_seed: int = 0
+    max_inflight_guard: int | None = None
     stream: bool = False
     stream_format: str = "sse"
     initial_codec_chunk_frames: int | None = None
@@ -287,6 +291,9 @@ def _build_results_config(
         "warmup": config.warmup,
         "concurrency": config.concurrency,
         "request_rate": config.request_rate,
+        "load_mode": config.load_mode,
+        "arrival_seed": config.arrival_seed,
+        "max_inflight_guard": config.max_inflight_guard,
         "stream_format": config.stream_format if config.stream else None,
         "initial_codec_chunk_frames": config.initial_codec_chunk_frames,
     }
@@ -331,12 +338,17 @@ async def run_tts_seedtts_benchmark(
             request_rate=config.request_rate,
             warmup=config.warmup,
             disable_tqdm=config.disable_tqdm,
+            load_mode=config.load_mode,
+            arrival_seed=config.arrival_seed,
+            max_inflight_guard=config.max_inflight_guard,
         )
     )
     outputs = await runner.run(samples, send_fn)
 
     metrics = compute_speed_metrics(outputs, wall_clock_s=runner.wall_clock_s)
     results_config = _build_results_config(config, base_url=base_url)
+    if runner.dispatch_meta:
+        results_config["dispatch_meta"] = runner.dispatch_meta
     benchmark_results = build_speed_results(outputs, metrics, results_config)
     save_speed_results(outputs, metrics, results_config, config.output_dir)
     save_generated_audio_metadata(outputs, samples, config.output_dir)
@@ -417,6 +429,9 @@ def _config_from_args(args: argparse.Namespace) -> TtsSeedttsBenchmarkConfig:
         warmup=args.warmup,
         concurrency=args.concurrency,
         request_rate=args.request_rate,
+        load_mode=args.load_mode,
+        arrival_seed=args.arrival_seed,
+        max_inflight_guard=args.max_inflight_guard,
         stream=args.stream,
         stream_format=args.stream_format,
         initial_codec_chunk_frames=args.initial_codec_chunk_frames,
@@ -561,6 +576,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=float("inf"),
         help="Requests per second (inf = send all at once).",
+    )
+    parser.add_argument(
+        "--load-mode",
+        choices=["closed_loop", "openloop_poisson", "openloop_fixed"],
+        default="closed_loop",
+        help=(
+            "Load generation mode. closed_loop (default) gates on completions via the "
+            "semaphore; openloop_* launch on a planned arrival schedule (no semaphore)."
+        ),
+    )
+    parser.add_argument(
+        "--arrival-seed",
+        type=int,
+        default=0,
+        help="Seed for the open-loop Poisson arrival schedule (run reproducibility).",
+    )
+    parser.add_argument(
+        "--max-inflight-guard",
+        type=int,
+        default=None,
+        help=(
+            "Open-loop hard backstop: abort and flag the run invalid if in-flight "
+            "requests reach this ceiling (never waits for a slot)."
+        ),
     )
     parser.add_argument(
         "--stream",
