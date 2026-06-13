@@ -48,6 +48,10 @@ class BatchDensityRecorder:
     def __init__(self) -> None:
         self.decode_frames_total = 0
         self.bs_histogram: dict[int, int] = {}
+        # Per decode iteration, split by whether the waiting queue had backlog. Sizes the
+        # addressable admission opportunity (see record_iteration / bs1_addressable_fraction).
+        self.iter_bs_waiting_empty: dict[int, int] = {}
+        self.iter_bs_waiting_nonempty: dict[int, int] = {}
         self._since_dump = 0
 
     def record_step(self, effective_bs: int) -> None:
@@ -59,11 +63,30 @@ class BatchDensityRecorder:
             self.bs_histogram.get(effective_bs, 0) + effective_bs
         )
 
+    def record_iteration(self, effective_bs: int, waiting_len: int) -> None:
+        """Record one decode iteration, split by whether a backlog was waiting.
+
+        At low bs this sizes the admission opportunity: waiting_len > 0 means a request was
+        queued but not admitted (addressable); waiting_len == 0 means nothing to batch with.
+        """
+        if effective_bs <= 0:
+            return
+        hist = self.iter_bs_waiting_empty if waiting_len == 0 else self.iter_bs_waiting_nonempty
+        hist[effective_bs] = hist.get(effective_bs, 0) + 1
+
     @property
     def bs1_frame_ratio(self) -> float:
         if self.decode_frames_total == 0:
             return 0.0
         return self.bs_histogram.get(1, 0) / self.decode_frames_total
+
+    @property
+    def bs1_addressable_fraction(self) -> float:
+        """Fraction of bs=1 decode iterations that had a non-empty waiting queue."""
+        empty = self.iter_bs_waiting_empty.get(1, 0)
+        nonempty = self.iter_bs_waiting_nonempty.get(1, 0)
+        total = empty + nonempty
+        return (nonempty / total) if total else 0.0
 
     def snapshot(self) -> dict:
         """Cumulative snapshot for surfacing; the client windows by diffing two of these."""
@@ -71,6 +94,8 @@ class BatchDensityRecorder:
             "decode_frames_total": self.decode_frames_total,
             "bs_histogram": dict(self.bs_histogram),
             "bs1_frame_ratio": self.bs1_frame_ratio,
+            "iter_bs_waiting_empty": dict(self.iter_bs_waiting_empty),
+            "iter_bs_waiting_nonempty": dict(self.iter_bs_waiting_nonempty),
         }
 
     def dump(self, path: str) -> None:

@@ -30,6 +30,10 @@ from sglang.srt.managers.scheduler import validate_input_length
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.utils import broadcast_pyobj
 
+from sglang_omni.model_runner.batch_density import (
+    enabled as batch_density_enabled,
+    get_recorder,
+)
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto.admin import (
     ADMIN_CONTINUE_GENERATION,
@@ -1451,6 +1455,15 @@ class OmniScheduler:
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+
+            # Sizing-only: per decode iteration, record (bs, waiting-queue backlog) to size
+            # the addressable admission opportunity. Gated off by default; no behavior change.
+            if (
+                batch_density_enabled()
+                and batch is not None
+                and self._batch_is_decode(batch)
+            ):
+                get_recorder().record_iteration(len(batch.reqs), len(self.waiting_queue))
 
             # Route through sync when the runner's collect has a sync-only
             # fallback (default True for runners not overriding lookahead_eligible).

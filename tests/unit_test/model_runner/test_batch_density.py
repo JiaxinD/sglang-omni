@@ -79,4 +79,22 @@ def test_snapshot_reports_cumulative_counters() -> None:
         "decode_frames_total": 5,
         "bs_histogram": {1: 2, 3: 3},
         "bs1_frame_ratio": 2 / 5,
+        "iter_bs_waiting_empty": {},
+        "iter_bs_waiting_nonempty": {},
     }
+
+
+def test_records_decode_iteration_waiting_split() -> None:
+    # Per decode iteration, split by whether the waiting queue had backlog. At bs=1 this
+    # sizes the addressable admission opportunity: waiting>0 (a request was queued but not
+    # admitted) is addressable; waiting==0 (nothing to batch with) is not.
+    recorder = BatchDensityRecorder()
+    recorder.record_iteration(1, waiting_len=0)  # bs=1, empty queue: unaddressable
+    recorder.record_iteration(1, waiting_len=3)  # bs=1, backlog present: addressable
+    recorder.record_iteration(1, waiting_len=0)
+    recorder.record_iteration(4, waiting_len=0)
+    recorder.record_iteration(0, waiting_len=2)  # no frame committed: ignored
+    snap = recorder.snapshot()
+    assert snap["iter_bs_waiting_empty"] == {1: 2, 4: 1}
+    assert snap["iter_bs_waiting_nonempty"] == {1: 1}
+    assert recorder.bs1_addressable_fraction == 1 / 3  # 1 of 3 bs=1 iters had backlog
