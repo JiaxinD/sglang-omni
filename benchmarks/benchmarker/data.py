@@ -25,3 +25,8 @@ class RequestResult:
     text_ttft_s: float | None = None
     audio_chunk_count: int = 0
     first_audio_payload_bytes: int = 0
+    # Open-loop launch metadata (None under closed loop).
+    planned_start_s: float | None = None
+    actual_start_s: float | None = None
+    start_delay_s: float | None = None
+    inflight_at_launch: int | None = None
