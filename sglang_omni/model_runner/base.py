@@ -372,7 +372,9 @@ class ModelRunner:
         # this step. Producer-agnostic (covers sync + async-resolve + prefill first
         # frame). Validated on a real run by decode_frames_total == sum(completion_tokens).
         if batch_density_enabled():
-            get_recorder().record_step(effective_decode_bs(req_ids, skip_rids))
+            recorder = get_recorder()
+            recorder.record_step(effective_decode_bs(req_ids, skip_rids))
+            recorder.maybe_dump()
         req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
         return ModelRunnerOutput(
