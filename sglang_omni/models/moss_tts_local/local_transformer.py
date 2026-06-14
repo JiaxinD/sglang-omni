@@ -52,7 +52,15 @@ def sample_seeded_branchless(
     # Note:(Chenchen Hong, Xuesong) post1's multinomial_with_seed is Gumbel-max and
     # wants logits, not probs: softmax maps the top-k/top-p -inf to 0, so gumbel can
     # pick a masked token. Match eager.
-    sampled = multinomial_with_seed(scores, seeds, positions).view(-1)
+    from sglang_omni.models.moss_tts_local.fused_sampler import (
+        enabled as _fused_enabled,
+        fused_multinomial_with_seed,
+    )
+
+    if _fused_enabled():
+        sampled = fused_multinomial_with_seed(scores, seeds, positions).view(-1)
+    else:
+        sampled = multinomial_with_seed(scores, seeds, positions).view(-1)
     fallback = (~do_sample) | (probs.sum(dim=-1) <= 0)
     return torch.where(fallback, torch.argmax(logits, dim=-1), sampled)
 
