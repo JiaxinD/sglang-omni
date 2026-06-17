@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 
@@ -38,7 +36,6 @@ def _codebook_size(codec) -> int:
 def session_bundle():
     # Load the codec DIRECTLY (the sglang processor pulls librosa/soxr audio deps absent in this
     # serving container; the codec modeling file is self-contained). streaming_vocoder imports clean.
-    os.environ["MOSS_VOCODER_CUDA_GRAPH"] = "1"
     import glob
 
     from transformers import AutoModel
@@ -188,29 +185,22 @@ def test_replay_failure_disables_runner_and_serves_eager_bit_identical(session_b
 @pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + real codec")
 def test_vram_guard_skips_capture_and_falls_back_to_eager(session_bundle):
     """Below the configured VRAM headroom, warmup skips capture (empty graph set, serving uses eager);
-    forced via an absurd threshold."""
+    forced via an absurd min_free_gb."""
     from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
         MossVocoderCudaGraphRunner,
     )
 
     session, n_vq, vocab, captured = session_bundle
-    old = os.environ.get("MOSS_VOCODER_CUDA_GRAPH_MIN_FREE_GB")
-    os.environ["MOSS_VOCODER_CUDA_GRAPH_MIN_FREE_GB"] = (
-        "100000"  # 100 TB headroom -> always trips
+    guarded = MossVocoderCudaGraphRunner(
+        session._codec,
+        batch_size=STREAM_SLOTS + OFFLINE_SLOTS,
+        n_vq=n_vq,
+        min_free_gb=100000.0,  # 100 TB headroom -> always trips
     )
-    try:
-        guarded = MossVocoderCudaGraphRunner(
-            session._codec, batch_size=STREAM_SLOTS + OFFLINE_SLOTS, n_vq=n_vq
-        )
-        guarded.warmup([5, 25])
-        assert (
-            guarded.captured_frames() == []
-        ), "VRAM guard must skip all captures under insufficient headroom"
-    finally:
-        if old is None:
-            os.environ.pop("MOSS_VOCODER_CUDA_GRAPH_MIN_FREE_GB", None)
-        else:
-            os.environ["MOSS_VOCODER_CUDA_GRAPH_MIN_FREE_GB"] = old
+    guarded.warmup([5, 25])
+    assert (
+        guarded.captured_frames() == []
+    ), "VRAM guard must skip all captures under insufficient headroom"
 
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + real codec")
@@ -234,26 +224,6 @@ def test_capture_failure_falls_back_to_eager(session_bundle):
         runner.captured_frames() == []
     ), "capture failures must be caught per-T -> no graphs -> eager"
     assert runner._sealed, "runner must still seal after capture failures"
-
-
-def test_cuda_graph_default_is_on():
-    """The vocoder CUDA graph is ON by default; opt out with MOSS_VOCODER_CUDA_GRAPH=0."""
-    from sglang_omni.models.moss_tts_local import streaming_vocoder as sv
-
-    old = os.environ.pop("MOSS_VOCODER_CUDA_GRAPH", None)
-    try:
-        assert (
-            sv._vocoder_cuda_graph_enabled() is True
-        ), "default must be ON (env unset -> enabled)"
-        os.environ["MOSS_VOCODER_CUDA_GRAPH"] = "0"
-        assert (
-            sv._vocoder_cuda_graph_enabled() is False
-        ), "MOSS_VOCODER_CUDA_GRAPH=0 must opt out to eager"
-    finally:
-        if old is None:
-            os.environ.pop("MOSS_VOCODER_CUDA_GRAPH", None)
-        else:
-            os.environ["MOSS_VOCODER_CUDA_GRAPH"] = old
 
 
 if __name__ == "__main__":

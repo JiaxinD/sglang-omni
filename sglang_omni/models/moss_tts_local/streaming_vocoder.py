@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -31,18 +30,6 @@ from sglang_omni.utils.audio_payload import audio_waveform_payload
 logger = logging.getLogger(__name__)
 
 _SOURCE_HINT = "MOSS-TTS Local"
-
-
-def _vocoder_cuda_graph_enabled() -> bool:
-    """True unless ``MOSS_VOCODER_CUDA_GRAPH`` is 0/false/no/off (default ON; every failure path
-    degrades to eager, so default-on never crashes)."""
-    return os.environ.get("MOSS_VOCODER_CUDA_GRAPH", "1").strip().lower() not in (
-        "",
-        "0",
-        "false",
-        "no",
-        "off",
-    )
 
 
 def _resolve_sample_rate(processor: Any) -> int:
@@ -85,6 +72,8 @@ class _CodecStreamSession:
         self._free_stream_slots = list(range(self._stream_slots))
         self._closed = False
         self._cg_runner: Any | None = None
+        # Capture is attempted at most once per session; a low-VRAM skip must not re-probe per step.
+        self.warmup_attempted = False
         # Per-T graph-vs-eager step counts for capture-hit-rate reporting (host-side, no GPU sync).
         self._cg_graph_t: Counter = Counter()
         self._cg_eager_t: Counter = Counter()
@@ -95,10 +84,11 @@ class _CodecStreamSession:
         with torch.no_grad():
             self._exit_stack.enter_context(codec.streaming(self._batch_size))
 
-    def warmup_cuda_graph(self, frames) -> list[int]:
-        """Capture per-T graphs at startup then reset all slots; returns the captured T list (rest
-        fall back to eager). No-op if disabled. Never captures during ``step``."""
-        if self._closed or not _vocoder_cuda_graph_enabled():
+    def warmup_cuda_graph(self, frames, *, min_free_gb: float = 3.0) -> list[int]:
+        """Capture per-T graphs then reset all slots; returns the captured T list (rest fall back to
+        eager). Attempted at most once per session; never captures during ``step``."""
+        self.warmup_attempted = True
+        if self._closed:
             return []
         from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
             MossVocoderCudaGraphRunner,
@@ -116,8 +106,14 @@ class _CodecStreamSession:
                 batch_size=self._batch_size,
                 n_vq=self._n_vq,
                 max_frames=max(frames) if frames else 1,
+                min_free_gb=min_free_gb,
             )
-        self._cg_runner.warmup(frames)
+        try:
+            self._cg_runner.warmup(frames)
+        except Exception:
+            # Drop a half-built runner on probe failure so serving stays on the eager path.
+            self._cg_runner = None
+            raise
         self._reset_slots(list(range(self._batch_size)))
         captured = self._cg_runner.captured_frames()
         if not captured:
@@ -129,6 +125,9 @@ class _CodecStreamSession:
     def has_cuda_graph_runner(self) -> bool:
         # True only if the runner exists AND captured at least one graph.
         return bool(self._cg_runner and self._cg_runner.captured_frames())
+
+    def captured_frames(self) -> list[int]:
+        return self._cg_runner.captured_frames() if self._cg_runner else []
 
     def acquire(self) -> int | None:
         if not self._free_stream_slots:
@@ -208,9 +207,7 @@ class _CodecStreamSession:
             with torch.no_grad():
                 if self._cg_runner is not None:
                     try:
-                        graphed = self._cg_runner.decode_step(
-                            codes_step, codes_lengths, exec_mask
-                        )
+                        graphed = self._cg_runner.decode_step(codes_step, exec_mask)
                     except Exception:
                         graph_failed = True
                         raise
@@ -309,6 +306,9 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         max_step_frames: int = 100,
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 2,
+        cuda_graph: bool = True,
+        cuda_graph_frames: list[int] | None = None,
+        cuda_graph_min_free_gb: float = 3.0,
     ) -> None:
         if stream_slots < 1:
             raise ValueError(f"stream_slots must be >= 1, got {stream_slots}")
@@ -345,6 +345,11 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         self._sample_rate = _resolve_sample_rate(processor)
         self._session: _CodecStreamSession | None = None
         self._session_used_by_streaming = False
+        self._cuda_graph = bool(cuda_graph)
+        self._cuda_graph_frames = (
+            [int(t) for t in cuda_graph_frames] if cuda_graph_frames else None
+        )
+        self._cuda_graph_min_free_gb = float(cuda_graph_min_free_gb)
         self._stream_states: dict[str, _LocalStreamState] = {}
         super().__init__(
             self._vocode,
@@ -354,32 +359,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         )
 
     def start(self) -> None:
+        # Graphs are captured in the factory (warmup_now) before this serving loop runs.
         try:
-            # Note: (Jiaxin Deng) capture graphs ONCE here -- codec loaded, GPU quiescent, before the
-            # serving loop (never capture mid-serve). default on, opt out with MOSS_VOCODER_CUDA_GRAPH=0; best-effort -> eager.
-            if _vocoder_cuda_graph_enabled():
-                captured: list[int] = []
-                try:
-                    captured = self.warmup_cuda_graph()
-                    logger.info(
-                        "MOSS vocoder CUDA graphs captured at startup: T=%s", captured
-                    )
-                except Exception:
-                    logger.exception(
-                        "MOSS vocoder CUDA-graph warmup failed; serving with eager vocoder"
-                    )
-                # Warmed graphs live on self._session; the serving loop reuses it, relying on
-                # super().start() being blocking. The assert + warning below pin that.
-                if captured:
-                    assert (
-                        self._session is not None
-                    ), "vocoder warmup captured graphs but left no session for the (blocking) serving loop"
-                    if not self._session.has_cuda_graph_runner():
-                        logger.warning(
-                            "MOSS vocoder CUDA graphs warmed (T=%s) but the serving session has no runner "
-                            "attached; graphs will go unused -- check session lifecycle in start()/_ensure_session",
-                            captured,
-                        )
             super().start()
         finally:
             self._close_streaming_session()
@@ -451,12 +432,12 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             codes = torch.stack(state.pending, dim=1)
             state.pending = []
             audio_parts.extend(
-                self._ensure_session().decode_offline(
+                self._ensure_session_graphed().decode_offline(
                     [codes], max_step_frames=self._max_step_frames
                 )
             )
         elif state.slot is not None:
-            session = self._ensure_session()
+            session = self._ensure_session_graphed()
             while state.pending:
                 step_t = min(len(state.pending), self._max_step_frames)
                 codes = torch.stack(state.pending[:step_t], dim=1)
@@ -524,10 +505,10 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             self._session = None
 
     def _cuda_graph_capture_frames(self) -> list[int]:
-        """Step lengths T to capture; ``MOSS_VOCODER_CUDA_GRAPH_FRAMES`` (comma/space ints) overrides. Default is a data-driven broad-exact set (see below); uncaptured T fall back to eager."""
-        override = os.environ.get("MOSS_VOCODER_CUDA_GRAPH_FRAMES", "").strip()
-        if override:
-            frames = [int(x) for x in override.replace(",", " ").split()]
+        """Step lengths T to capture (config ``cuda_graph_frames`` overrides). Default is a
+        data-driven broad-exact set (see below); uncaptured T fall back to eager."""
+        if self._cuda_graph_frames:
+            frames = list(self._cuda_graph_frames)
         else:
             # Broad-exact small-T set (measured per-T serving frequency). The T=max_step_frames cap is
             # excluded (biggest single graph, only ~1.04x offline-lane) to shrink the warmup VRAM peak.
@@ -554,17 +535,56 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             ]
         return sorted({t for t in frames if 1 <= t <= self._max_step_frames})
 
-    def warmup_cuda_graph(self) -> list[int]:
-        """Pre-capture the codec-decode graphs at startup (no-op if disabled); returns the captured T list, uncaptured fall back to eager. Call once before serving, never in the decode loop."""
+    def _codec_on_cuda(self) -> bool:
+        try:
+            return next(self._codec.parameters()).device.type == "cuda"
+        except StopIteration:
+            return False
+
+    def _ensure_session_graphed(self) -> _CodecStreamSession:
+        """Live session with CUDA graphs captured (at most once). Streaming paths call this instead
+        of _ensure_session so a session created after non-streaming traffic closed the graphed
+        startup session is re-captured; a low-VRAM skip is remembered (no per-step re-probe).
+        """
         with self._state_lock:
-            return self._ensure_session().warmup_cuda_graph(
-                self._cuda_graph_capture_frames()
+            session = self._ensure_session()
+            if (
+                self._cuda_graph
+                and not session.warmup_attempted
+                and self._codec_on_cuda()
+            ):
+                try:
+                    session.warmup_cuda_graph(
+                        self._cuda_graph_capture_frames(),
+                        min_free_gb=self._cuda_graph_min_free_gb,
+                    )
+                except Exception:
+                    logger.exception(
+                        "MOSS vocoder CUDA-graph capture failed; serving eager from this session"
+                    )
+            return session
+
+    def warmup_now(self) -> None:
+        """Capture the codec-decode graphs at factory-build time: codec loaded, GPU quiescent, and
+        before the stage process is marked ready, so the serving loop never races a half-captured
+        graph. No-op without a CUDA codec; best-effort, degrades to eager."""
+        if not self._cuda_graph or not self._codec_on_cuda():
+            return
+        session = self._ensure_session_graphed()
+        if session.has_cuda_graph_runner():
+            logger.info(
+                "MOSS vocoder CUDA graphs captured at startup: T=%s",
+                session.captured_frames(),
+            )
+        else:
+            logger.warning(
+                "MOSS vocoder CUDA graphs did not seal at startup (low VRAM); eager vocoder"
             )
 
     def _ensure_slot(self, state: _LocalStreamState) -> None:
         if state.slot is None:
             self._session_used_by_streaming = True
-            state.slot = self._ensure_session().acquire()
+            state.slot = self._ensure_session_graphed().acquire()
 
     def _latch_stream_metadata(
         self,
@@ -705,7 +725,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             return None
         codes = rows[:, : self._n_vq].transpose(0, 1).contiguous()
         self._session_used_by_streaming = True
-        return self._ensure_session().decode_offline(
+        return self._ensure_session_graphed().decode_offline(
             [codes], max_step_frames=self._max_step_frames
         )[0]
 

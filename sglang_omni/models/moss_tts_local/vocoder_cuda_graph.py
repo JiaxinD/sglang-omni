@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterable
 from types import MethodType
 
@@ -84,6 +83,7 @@ class MossVocoderCudaGraphRunner:
         max_frames: int = 128,
         max_graphs: int = 160,
         warmup_iters: int = 3,
+        min_free_gb: float = 3.0,
     ) -> None:
         self._codec = codec
         self._batch_size = int(batch_size)
@@ -93,11 +93,8 @@ class MossVocoderCudaGraphRunner:
         self._max_graphs = int(max_graphs)
         self._warmup_iters = int(warmup_iters)
         # Min free VRAM to attempt a capture (each graph is multi-GB); below it we skip -> eager,
-        # so a VRAM-tight box degrades gracefully instead of OOM-ing. Env-configurable.
-        self._min_free_bytes = int(
-            float(os.environ.get("MOSS_VOCODER_CUDA_GRAPH_MIN_FREE_GB", "3"))
-            * (1024**3)
-        )
+        # so a VRAM-tight box degrades gracefully instead of OOM-ing.
+        self._min_free_bytes = int(float(min_free_gb) * (1024**3))
         self._graphs: dict[int, tuple] = {}
         self._pool = None
         self._sealed = False
@@ -178,41 +175,49 @@ class MossVocoderCudaGraphRunner:
                 "MossVocoderCudaGraphRunner.warmup called after seal; ignoring"
             )
             return
-        # Note: (Jiaxin Deng) capture LARGEST T first -- the graphs share one mempool; capturing a larger
-        # graph after a smaller one grows the pool and invalidates earlier graphs' addresses (replay segfaults).
-        for t in sorted(dict.fromkeys(int(x) for x in frames), reverse=True):
-            if t in self._graphs:
-                continue
-            if not self._eligible(t):
-                logger.warning(
-                    "skip MOSS vocoder CG T=%d: outside [1, %d]", t, self._max_frames
-                )
-                continue
-            if len(self._graphs) >= self._max_graphs:
-                logger.warning(
-                    "MOSS vocoder CG cap %d reached; skipping rest", self._max_graphs
-                )
-                break
-            # Note: (Jiaxin Deng) VRAM headroom guard -- skip capture (-> eager) rather than risk OOM on
-            # a tight box. Checked per-T because each capture allocates; free only drops through the loop.
-            enough, free = self._enough_free_vram()
-            if not enough:
-                logger.warning(
-                    "MOSS vocoder CG: free VRAM %.1fGB < %.1fGB headroom; skipping T=%d+ (eager)",
-                    free / 1024**3,
-                    self._min_free_bytes / 1024**3,
-                    t,
-                )
-                break
-            try:
-                self._capture_t(t)
-            except Exception as exc:  # best-effort; uncaptured T falls back to eager
-                self._graphs.pop(t, None)
-                logger.warning(
-                    "MOSS vocoder CG capture failed for T=%d: %s; will use eager",
-                    t,
-                    exc,
-                )
+        # Bind capture to the codec's device: the stream/pool/graph use the current device, and
+        # factory-time capture can precede the stage device switch (split puts the codec off cuda:0).
+        with torch.cuda.device(self._device):
+            # Note: (Jiaxin Deng) capture LARGEST T first -- the graphs share one mempool; capturing a larger
+            # graph after a smaller one grows the pool and invalidates earlier graphs' addresses (replay segfaults).
+            for t in sorted(dict.fromkeys(int(x) for x in frames), reverse=True):
+                if t in self._graphs:
+                    continue
+                if not self._eligible(t):
+                    logger.warning(
+                        "skip MOSS vocoder CG T=%d: outside [1, %d]",
+                        t,
+                        self._max_frames,
+                    )
+                    continue
+                if len(self._graphs) >= self._max_graphs:
+                    logger.warning(
+                        "MOSS vocoder CG cap %d reached; skipping rest",
+                        self._max_graphs,
+                    )
+                    break
+                # Note: (Jiaxin Deng) VRAM headroom guard -- skip capture (-> eager) rather than risk OOM on
+                # a tight box. Checked per-T because each capture allocates; free only drops through the loop.
+                enough, free = self._enough_free_vram()
+                if not enough:
+                    logger.warning(
+                        "MOSS vocoder CG: free VRAM %.1fGB < %.1fGB headroom; skipping T=%d+ (eager)",
+                        free / 1024**3,
+                        self._min_free_bytes / 1024**3,
+                        t,
+                    )
+                    break
+                try:
+                    self._capture_t(t)
+                except (
+                    Exception
+                ) as exc:  # best-effort; uncaptured T falls back to eager
+                    self._graphs.pop(t, None)
+                    logger.warning(
+                        "MOSS vocoder CG capture failed for T=%d: %s; will use eager",
+                        t,
+                        exc,
+                    )
         self._sealed = True
         logger.info(
             "MOSS vocoder CUDA graphs sealed: %d T captured %s",
@@ -227,10 +232,13 @@ class MossVocoderCudaGraphRunner:
     def decode_step(
         self,
         codes_step: torch.Tensor,
-        codes_lengths: torch.Tensor,
         exec_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Replay the captured graph for ``[n_vq, B_full, T]`` codes (set live exec_mask, copy codes, replay), else None. Returns the static buffers directly; caller consumes before the next replay."""
+        """Replay the captured graph for ``[n_vq, B_full, T]`` codes (set live exec_mask, copy codes, replay), else None. Returns the static buffers directly; caller consumes before the next replay.
+
+        Per-slot lengths are not needed: every captured graph decodes the full T for all slots and
+        ``exec_mask`` gates which outputs are valid (the eager fallback still uses lengths).
+        """
         if not codes_step.is_cuda:
             return None
         n, b, t = codes_step.shape

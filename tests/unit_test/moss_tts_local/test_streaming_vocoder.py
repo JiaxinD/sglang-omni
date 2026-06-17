@@ -30,6 +30,7 @@ from sglang_omni.models.moss_tts_local.request_builders import (
 )
 from sglang_omni.models.moss_tts_local.streaming_vocoder import (
     MossTTSLocalStreamingVocoderScheduler,
+    _CodecStreamSession,
 )
 from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
@@ -845,3 +846,172 @@ def test_is_streaming_payload(monkeypatch) -> None:
         data={},
     )
     assert not scheduler.is_streaming_payload(non_stream)
+
+
+# --- CUDA-graph config + recapture / factory-capture / anti-storm lifecycle (CPU fakes) ---
+
+
+class _FakeCudaGraphRunner:
+    """Stand-in runner so CPU tests can exercise the capture/recapture lifecycle without a GPU.
+    decode_step returns None, so the session falls through to the correct eager FakeCodec decode.
+    """
+
+    def __init__(self, frames: Any) -> None:
+        self._frames = list(frames)
+
+    def captured_frames(self) -> list:
+        return list(self._frames)
+
+    def decode_step(self, codes_step, exec_mask):
+        return None
+
+
+def _install_fake_capture(monkeypatch, calls: list, *, seal: bool = True) -> None:
+    """Make the scheduler treat the codec as CUDA-resident and swap real graph capture for a fake
+    that records each call (so re-probe is observable) and, when seal=True, attaches a runner.
+    """
+    monkeypatch.setattr(
+        MossTTSLocalStreamingVocoderScheduler, "_codec_on_cuda", lambda self: True
+    )
+
+    def fake_warmup(self, frames, *, min_free_gb: float = 3.0) -> list:
+        self.warmup_attempted = True
+        calls.append(id(self))
+        self._cg_runner = _FakeCudaGraphRunner(frames) if seal else None
+        return self._cg_runner.captured_frames() if seal else []
+
+    monkeypatch.setattr(_CodecStreamSession, "warmup_cuda_graph", fake_warmup)
+
+
+def test_create_vocoder_executor_threads_cuda_graph_config(monkeypatch) -> None:
+    scheduler = _make_scheduler(monkeypatch, FakeProcessor(), cuda_graph=False)
+    assert scheduler._cuda_graph is False
+    scheduler2 = _make_scheduler(
+        monkeypatch,
+        FakeProcessor(),
+        cuda_graph_frames=[5, 25],
+        cuda_graph_min_free_gb=7.0,
+    )
+    assert scheduler2._cuda_graph_frames == [5, 25]
+    assert scheduler2._cuda_graph_min_free_gb == 7.0
+
+
+def test_pipeline_config_injects_cuda_graph_into_vocoder_factory_args() -> None:
+    from sglang_omni.models.moss_tts_local.config import (
+        MossTTSLocalPipelineConfig,
+        MossTTSLocalSplitPipelineConfig,
+    )
+
+    cfg = MossTTSLocalPipelineConfig(model_path="x")
+    voc = next(s for s in cfg.stages if s.factory.endswith("create_vocoder_executor"))
+    assert voc.factory_args["cuda_graph"] is True
+    assert voc.factory_args["cuda_graph_frames"] is None
+    assert voc.factory_args["cuda_graph_min_free_gb"] == 3.0
+
+    cfg2 = MossTTSLocalPipelineConfig(
+        model_path="x",
+        cuda_graph=False,
+        cuda_graph_frames=[5, 25],
+        cuda_graph_min_free_gb=4.5,
+    )
+    voc2 = next(s for s in cfg2.stages if s.factory.endswith("create_vocoder_executor"))
+    assert voc2.factory_args["cuda_graph"] is False
+    assert voc2.factory_args["cuda_graph_frames"] == [5, 25]
+    assert voc2.factory_args["cuda_graph_min_free_gb"] == 4.5
+
+    # The split variant overrides `stages`; the injection must still reach its vocoder.
+    split = MossTTSLocalSplitPipelineConfig(model_path="x", cuda_graph=False)
+    voc3 = next(
+        s for s in split.stages if s.factory.endswith("create_vocoder_executor")
+    )
+    assert voc3.factory_args["cuda_graph"] is False
+
+
+def test_factory_captures_graphs_before_returning(monkeypatch) -> None:
+    """create_vocoder_executor runs warmup_now synchronously, so the scheduler it returns already
+    has graphs captured (the stage process is only marked ready after the factory returns).
+    """
+    calls: list = []
+    _install_fake_capture(monkeypatch, calls, seal=True)
+    scheduler = _make_scheduler(monkeypatch, FakeProcessor())
+    assert calls, "factory must capture before returning"
+    assert scheduler._session is not None
+    assert scheduler._session.has_cuda_graph_runner()
+
+
+@pytest.mark.parametrize("trigger", ["chunk", "slot_starved", "no_chunk_done"])
+def test_streaming_recaptures_graph_after_nonstreaming(monkeypatch, trigger) -> None:
+    """Non-streaming traffic closes the graphed startup session; the next streaming session must be
+    re-captured. Covers all three streaming session-creation paths: a first chunk (_ensure_slot), a
+    slot-starved finish (on_stream_done offline lane), a no-chunk finish (_decode_payload_codes).
+    """
+    calls: list = []
+    _install_fake_capture(monkeypatch, calls, seal=True)
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_slots=1,
+        stream_chunk_frames=4,
+        initial_chunk_frames=2,
+    )
+    assert scheduler._session is not None
+    assert scheduler._session.has_cuda_graph_runner()
+    startup_id = id(scheduler._session)
+
+    # Non-streaming traffic closes the idle startup session.
+    nonstream_rows = _rows(5, seed=1)
+    (result,) = scheduler._vocode_batch([_offline_payload(nonstream_rows, "n1")])
+    assert scheduler._session is None
+    np.testing.assert_array_equal(
+        _decode_audio(result.data), reference_waveform(nonstream_rows[:, 1:]).numpy()
+    )
+
+    if trigger == "chunk":
+        scheduler._on_chunk("s", _stream_item(_rows(6, seed=2)[0], _metadata()))
+    elif trigger == "slot_starved":
+        # "hold" takes the only slot; "starve" buffers without a slot, then finishes offline.
+        for i, row in enumerate(_rows(5, seed=3)):
+            scheduler._on_chunk("hold", _stream_item(row, _metadata(), i))
+        for i, row in enumerate(_rows(6, seed=4)):
+            scheduler._on_chunk("starve", _stream_item(row, _metadata(), 100 + i))
+        scheduler._on_done("starve")
+        scheduler._on_streaming_new_request(
+            "starve", _terminal_payload(_rows(6, seed=4), request_id="starve")
+        )
+    else:  # no_chunk_done: terminal payload replay with no chunks -> _decode_payload_codes
+        scheduler._on_done("nc")
+        scheduler._on_streaming_new_request(
+            "nc", _terminal_payload(_rows(5, seed=5), request_id="nc")
+        )
+
+    assert scheduler._session is not None
+    assert (
+        id(scheduler._session) != startup_id
+    ), "a fresh session must have been created"
+    assert (
+        scheduler._session.has_cuda_graph_runner()
+    ), f"{trigger}: the new streaming session must be re-captured"
+
+
+def test_low_vram_capture_attempted_once_no_reprobe(monkeypatch) -> None:
+    """A capture that seals nothing (low VRAM) sets warmup_attempted, so streaming on that session
+    never re-probes capture per step."""
+    calls: list = []
+    _install_fake_capture(monkeypatch, calls, seal=False)
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch, processor, stream_chunk_frames=4, initial_chunk_frames=2
+    )
+    assert scheduler._session is not None
+    assert not scheduler._session.has_cuda_graph_runner()
+    assert len(calls) == 1
+
+    rows = _rows(20, seed=9)
+    messages = _run_stream(scheduler, rows, request_id="s")
+    assert (
+        len(calls) == 1
+    ), f"re-probe storm: capture attempted {len(calls)}x, expected 1"
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "s"), reference_waveform(rows[:, 1:]).numpy()
+    )
