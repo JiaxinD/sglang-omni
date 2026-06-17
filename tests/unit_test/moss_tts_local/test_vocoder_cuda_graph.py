@@ -205,7 +205,7 @@ def test_vram_guard_skips_capture_and_falls_back_to_eager(session_bundle):
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + real codec")
 def test_capture_failure_falls_back_to_eager(session_bundle):
-    """A capture exception is caught per-T, that T dropped, serving uses eager; forced via _capture_t raising. (A real mid-capture OOM does not wedge the CUDA context, verified empirically.)"""
+    """A capture exception is caught per-T, that T dropped, serving uses eager; forced via _capture_frame_count raising. (A real mid-capture OOM does not wedge the CUDA context, verified empirically.)"""
     from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
         MossVocoderCudaGraphRunner,
     )
@@ -215,10 +215,10 @@ def test_capture_failure_falls_back_to_eager(session_bundle):
         session._codec, batch_size=STREAM_SLOTS + OFFLINE_SLOTS, n_vq=n_vq
     )
 
-    def boom(t):
+    def boom(frame_count):
         raise RuntimeError("simulated capture OOM")
 
-    runner._capture_t = boom
+    runner._capture_frame_count = boom
     runner.warmup([5, 25])
     assert (
         runner.captured_frames() == []

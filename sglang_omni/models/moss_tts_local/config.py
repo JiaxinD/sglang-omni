@@ -105,6 +105,22 @@ class MossTTSLocalPipelineConfig(PipelineConfig):
 
     def model_post_init(self, __context: Any = None) -> None:
         super().model_post_init(__context)
+        if self.cuda_graph_min_free_gb < 0:
+            raise ValueError(
+                "cuda_graph_min_free_gb must be >= 0 (0 disables the VRAM headroom "
+                f"guard); got {self.cuda_graph_min_free_gb}"
+            )
+        if self.cuda_graph_frames is not None:
+            if not self.cuda_graph_frames:
+                raise ValueError(
+                    "cuda_graph_frames must be non-empty; set `cuda_graph: false` to "
+                    "disable graphs, or leave it null to use the default capture set"
+                )
+            invalid = [t for t in self.cuda_graph_frames if t < 1]
+            if invalid:
+                raise ValueError(
+                    f"cuda_graph_frames entries must be positive ints (>= 1); got {invalid}"
+                )
         for stage in self.stages:
             if stage.factory.endswith("create_vocoder_executor"):
                 stage.factory_args.setdefault("cuda_graph", self.cuda_graph)

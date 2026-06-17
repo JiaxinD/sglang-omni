@@ -6,12 +6,23 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from types import MethodType
+from typing import NamedTuple
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 _ATTN_ORIGINAL_UPDATE_CACHE_ATTR = "_sglang_omni_original_update_streaming_cache"
+
+
+class _CapturedVocoderGraph(NamedTuple):
+    """One captured per-T graph and its static replay buffers (named to avoid positional unpack)."""
+
+    graph: torch.cuda.CUDAGraph
+    static_codes: torch.Tensor
+    static_lengths: torch.Tensor
+    static_audio: torch.Tensor
+    static_audio_lengths: torch.Tensor
 
 
 def _decoder_attention_modules(codec) -> list:
@@ -95,7 +106,7 @@ class MossVocoderCudaGraphRunner:
         # Min free VRAM to attempt a capture (each graph is multi-GB); below it we skip -> eager,
         # so a VRAM-tight box degrades gracefully instead of OOM-ing.
         self._min_free_bytes = int(float(min_free_gb) * (1024**3))
-        self._graphs: dict[int, tuple] = {}
+        self._graphs: dict[int, _CapturedVocoderGraph] = {}
         self._pool = None
         self._sealed = False
         # Reused all-active mask for the warmup-only state reset (avoid re-allocating it per captured T).
@@ -103,8 +114,8 @@ class MossVocoderCudaGraphRunner:
             self._batch_size, dtype=torch.bool, device=self._device
         )
 
-    def _eligible(self, t: int) -> bool:
-        return 1 <= t <= self._max_frames
+    def _is_supported_frame_count(self, frame_count: int) -> bool:
+        return 1 <= frame_count <= self._max_frames
 
     def _enough_free_vram(self) -> tuple[bool, int]:
         free, _ = torch.cuda.mem_get_info(self._device)
@@ -123,12 +134,12 @@ class MossVocoderCudaGraphRunner:
         self._codec.apply(_r)
 
     @torch.no_grad()
-    def _capture_t(self, t: int) -> None:
+    def _capture_frame_count(self, frame_count: int) -> None:
         b, n = self._batch_size, self._n_vq
         device = self._device
-        static_codes = torch.zeros(n, b, t, dtype=torch.long, device=device)
+        static_codes = torch.zeros(n, b, frame_count, dtype=torch.long, device=device)
         # Capture all-active; the live exec_mask at replay decides which slots advance.
-        static_lengths = torch.full((b,), t, dtype=torch.long, device=device)
+        static_lengths = torch.full((b,), frame_count, dtype=torch.long, device=device)
         exec_mask = torch.ones(b, dtype=torch.bool, device=device)
         self._codec._set_streaming_exec_mask(exec_mask)
         # Note: (Jiaxin Deng) side-stream warmup forces lazy allocs (conv algo / workspaces) out of the capture.
@@ -151,16 +162,16 @@ class MossVocoderCudaGraphRunner:
             result = self._codec._decode_frame(static_codes, static_lengths)
             static_audio = result.audio
             static_audio_lengths = result.audio_lengths
-        self._graphs[t] = (
-            graph,
-            static_codes,
-            static_lengths,
-            static_audio,
-            static_audio_lengths,
+        self._graphs[frame_count] = _CapturedVocoderGraph(
+            graph=graph,
+            static_codes=static_codes,
+            static_lengths=static_lengths,
+            static_audio=static_audio,
+            static_audio_lengths=static_audio_lengths,
         )
         logger.info(
             "Captured MOSS vocoder CUDA graph T=%d (B=%d) -> audio %s (%d cached)",
-            t,
+            frame_count,
             b,
             tuple(static_audio.shape),
             len(self._graphs),
@@ -183,7 +194,7 @@ class MossVocoderCudaGraphRunner:
             for t in sorted(dict.fromkeys(int(x) for x in frames), reverse=True):
                 if t in self._graphs:
                     continue
-                if not self._eligible(t):
+                if not self._is_supported_frame_count(t):
                     logger.warning(
                         "skip MOSS vocoder CG T=%d: outside [1, %d]",
                         t,
@@ -207,11 +218,10 @@ class MossVocoderCudaGraphRunner:
                         t,
                     )
                     break
+                # best-effort: an uncaptured T falls back to eager
                 try:
-                    self._capture_t(t)
-                except (
-                    Exception
-                ) as exc:  # best-effort; uncaptured T falls back to eager
+                    self._capture_frame_count(t)
+                except Exception as exc:
                     self._graphs.pop(t, None)
                     logger.warning(
                         "MOSS vocoder CG capture failed for T=%d: %s; will use eager",
@@ -247,9 +257,8 @@ class MossVocoderCudaGraphRunner:
         entry = self._graphs.get(int(t))
         if entry is None:
             return None
-        graph, static_codes, static_lengths, static_audio, static_audio_lengths = entry
         # Replicate eager inputs exactly (codes + live exec_mask) so replay is bit-for-bit identical.
         self._codec._set_streaming_exec_mask(exec_mask)
-        static_codes.copy_(codes_step)
-        graph.replay()
-        return static_audio, static_audio_lengths
+        entry.static_codes.copy_(codes_step)
+        entry.graph.replay()
+        return entry.static_audio, entry.static_audio_lengths

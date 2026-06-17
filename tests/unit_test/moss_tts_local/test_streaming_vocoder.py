@@ -927,6 +927,31 @@ def test_pipeline_config_injects_cuda_graph_into_vocoder_factory_args() -> None:
     assert voc3.factory_args["cuda_graph"] is False
 
 
+def test_pipeline_config_rejects_invalid_cuda_graph_settings() -> None:
+    from sglang_omni.models.moss_tts_local.config import MossTTSLocalPipelineConfig
+
+    # [] is ambiguous (cuda_graph: false is the disable switch) -> reject, not "use default".
+    with pytest.raises(ValueError, match="cuda_graph_frames must be non-empty"):
+        MossTTSLocalPipelineConfig(model_path="x", cuda_graph_frames=[])
+    # Non-positive frame counts must error, not be silently filtered.
+    with pytest.raises(ValueError, match="positive ints"):
+        MossTTSLocalPipelineConfig(model_path="x", cuda_graph_frames=[5, 0])
+    with pytest.raises(ValueError, match="positive ints"):
+        MossTTSLocalPipelineConfig(model_path="x", cuda_graph_frames=[-1])
+    # Negative VRAM headroom is nonsensical (would disable the guard); error.
+    with pytest.raises(ValueError, match="cuda_graph_min_free_gb"):
+        MossTTSLocalPipelineConfig(model_path="x", cuda_graph_min_free_gb=-1.0)
+
+
+def test_scheduler_rejects_frame_above_max_step(monkeypatch) -> None:
+    # A configured frame count above max_step_frames is invalid (no such step occurs); fail fast,
+    # do not silently drop it.
+    with pytest.raises(ValueError, match="exceed max_step_frames"):
+        MossTTSLocalStreamingVocoderScheduler(
+            FakeProcessor(), max_step_frames=25, cuda_graph_frames=[5, 100]
+        )
+
+
 def test_factory_captures_graphs_before_returning(monkeypatch) -> None:
     """create_vocoder_executor runs warmup_now synchronously, so the scheduler it returns already
     has graphs captured (the stage process is only marked ready after the factory returns).

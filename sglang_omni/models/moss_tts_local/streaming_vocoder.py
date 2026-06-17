@@ -84,7 +84,9 @@ class _CodecStreamSession:
         with torch.no_grad():
             self._exit_stack.enter_context(codec.streaming(self._batch_size))
 
-    def warmup_cuda_graph(self, frames, *, min_free_gb: float = 3.0) -> list[int]:
+    def warmup_cuda_graph(
+        self, frames: list[int], *, min_free_gb: float = 3.0
+    ) -> list[int]:
         """Capture per-T graphs then reset all slots; returns the captured T list (rest fall back to
         eager). Attempted at most once per session; never captures during ``step``."""
         self.warmup_attempted = True
@@ -350,6 +352,15 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             [int(t) for t in cuda_graph_frames] if cuda_graph_frames else None
         )
         self._cuda_graph_min_free_gb = float(cuda_graph_min_free_gb)
+        if self._cuda_graph_frames is not None:
+            too_large = [
+                t for t in self._cuda_graph_frames if t > self._max_step_frames
+            ]
+            if too_large:
+                raise ValueError(
+                    f"cuda_graph_frames exceed max_step_frames={self._max_step_frames}: "
+                    f"{too_large}"
+                )
         self._stream_states: dict[str, _LocalStreamState] = {}
         super().__init__(
             self._vocode,
@@ -508,31 +519,33 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         """Step lengths T to capture (config ``cuda_graph_frames`` overrides). Default is a
         data-driven broad-exact set (see below); uncaptured T fall back to eager."""
         if self._cuda_graph_frames:
-            frames = list(self._cuda_graph_frames)
-        else:
-            # Broad-exact small-T set (measured per-T serving frequency). The T=max_step_frames cap is
-            # excluded (biggest single graph, only ~1.04x offline-lane) to shrink the warmup VRAM peak.
-            join_floor = max(
-                1,
-                min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames),
-            )
-            frames = [
-                4,
-                5,
-                8,
-                9,
-                10,
-                11,
-                12,
-                13,
-                20,
-                22,
-                24,
-                25,
-                join_floor,
-                self._default_initial_chunk_frames or join_floor,
-                self._stream_chunk_frames,
-            ]
+            # Validated at config (>= 1) and __init__ (<= max_step_frames); use as configured.
+            return sorted(set(self._cuda_graph_frames))
+        # Broad-exact small-T set (measured per-T serving frequency). The T=max_step_frames cap is
+        # excluded (biggest single graph, only ~1.04x offline-lane) to shrink the warmup VRAM peak.
+        join_floor = max(
+            1,
+            min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames),
+        )
+        frames = [
+            4,
+            5,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            20,
+            22,
+            24,
+            25,
+            join_floor,
+            self._default_initial_chunk_frames or join_floor,
+            self._stream_chunk_frames,
+        ]
+        # Clamp the generated default to the supported range (this is the auto-default, not user
+        # input; user-supplied frames are validated and rejected, never silently filtered).
         return sorted({t for t in frames if 1 <= t <= self._max_step_frames})
 
     def _codec_on_cuda(self) -> bool:
