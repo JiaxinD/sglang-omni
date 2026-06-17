@@ -545,6 +545,10 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         """Live session with CUDA graphs captured (at most once). Streaming paths call this instead
         of _ensure_session so a session created after non-streaming traffic closed the graphed
         startup session is re-captured; a low-VRAM skip is remembered (no per-step re-probe).
+
+        That first post-non-streaming streaming request pays a one-time warmup latency (the recapture
+        runs synchronously here, fail-safe to eager on low VRAM); streaming-only traffic uses the
+        factory session and never hits this path.
         """
         with self._state_lock:
             session = self._ensure_session()
