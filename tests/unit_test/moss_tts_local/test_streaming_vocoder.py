@@ -957,12 +957,15 @@ def test_streaming_recaptures_graph_after_nonstreaming(monkeypatch, trigger) -> 
     )
     assert scheduler._session is not None
     assert scheduler._session.has_cuda_graph_runner()
-    startup_id = id(scheduler._session)
+    # Hold the object, not id(): a GC'd session's address can be reused, so an id()
+    # check risks a false negative. `is not` on the retained ref is reliable.
+    startup_session = scheduler._session
 
     # Non-streaming traffic closes the idle startup session.
     nonstream_rows = _rows(5, seed=1)
     (result,) = scheduler._vocode_batch([_offline_payload(nonstream_rows, "n1")])
     assert scheduler._session is None
+    assert startup_session._closed
     np.testing.assert_array_equal(
         _decode_audio(result.data), reference_waveform(nonstream_rows[:, 1:]).numpy()
     )
@@ -987,8 +990,12 @@ def test_streaming_recaptures_graph_after_nonstreaming(monkeypatch, trigger) -> 
 
     assert scheduler._session is not None
     assert (
-        id(scheduler._session) != startup_id
-    ), "a fresh session must have been created"
+        scheduler._session is not startup_session
+    ), "a fresh session must have been created, not the closed startup one"
+    # Factory warmup (1) + this recapture (1): exactly one recapture happened.
+    assert (
+        len(calls) == 2
+    ), f"{trigger}: expected 2 warmups (factory + recapture), got {len(calls)}"
     assert (
         scheduler._session.has_cuda_graph_runner()
     ), f"{trigger}: the new streaming session must be re-captured"
