@@ -16,7 +16,8 @@ Follows from [sglang#16546](https://github.com/sgl-project/sglang/issues/16546).
 8. [Supported Pipelines](#supported-pipelines)
 9. [Adding a New Model](#adding-a-new-model)
 10. [Progress Tracking](#progress-tracking)
-11. [Design Decision History](#design-decision-history)
+11. [TTS Optimization Coverage](#tts-optimization-coverage)
+12. [Design Decision History](#design-decision-history)
 
 ## Architecture
 
@@ -800,7 +801,44 @@ Everything else (`Stage`, `Coordinator`, `OmniScheduler`, `ModelRunner`, relay, 
 
 Following the suggestion in [#188 (comment)](https://github.com/sgl-project/sglang-omni/issues/188#issuecomment-4161198732), we should also track how many files need to be touched and the upper bound of the cost of integrating a new model. Boson's upcoming model will serve as the first concrete data point.
 
-[^q-realtime-streaming]: **Realtime streaming-input semantics.** The `/realtime` endpoint shipped in PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) (merged 2026-05-18) — WebSocket-backed streaming-in audio with SSE-style server events, aligned with OpenAI's realtime interface. Detailed protocol — chunk framing, partial-result emission, cancellation semantics — is documented in #385's session-state-machine implementation rather than mirrored here. Footnote retained as a forward reference. (raised by Huapeng)
+[^q-realtime-streaming]: **Realtime streaming-input semantics.** The `/realtime` endpoint shipped in PR [#385](#2026-05-04--pr-385-openai-realtime-websocket-endpoint-v1-feature) (merged 2026-05-18) — WebSocket-backed streaming-in audio with SSE-style server events, aligned with OpenAI's realtime interface. Detailed protocol — chunk framing, partial-result emission, cancellation semantics — is documented in #385's session-state-machine implementation rather than mirrored here.
+
+---
+
+## TTS Optimization Coverage
+
+The shared TTS serving playbook and where each model stands. When onboarding a new TTS model, read down its column: each row is an optimization with the PR that delivered it for the models that have it, so an empty cell is the work left to do, with the reason noted where it was skipped or deferred. The full rationale for each PR is in the Design Decision History below.
+
+Legend: ✅ merged · 🟡 open PR · ❌ not done · n/a not applicable. Lettered markers point to the notes under the table.
+
+| Optimization | Fish S2-Pro | Qwen3-TTS | Voxtral | Higgs v3 | MOSS-Local |
+| --- | --- | --- | --- | --- | --- |
+| V1 staged onboarding | ✅ #142 / #334 | ✅ #451 | ✅ #248 / #451 | ✅ #428 | ✅ #728 |
+| Shared OmniScheduler | ❌ (d) | ✅ #451 | ✅ #451 | ✅ #476 | ✅ #728 |
+| AR decode CUDA graph | ✅ #153 | ✅ #527 | ✅ #527 | ✅ #503 | ✅ #728 |
+| Async decode (one-step lookahead) | ❌ (a) | ❌ (a) | ❌ (a) | ✅ #590 / #638 | ✅ #758 |
+| Batched vocoder decode | ✅ #614 | ✅ #451 | ❌ (i) | ✅ #574 | ✅ #728 |
+| Streaming vocoder CUDA graph | ❌ (b) | ❌ (b) | ❌ (b) | 🟡 #729 (h) | ✅ #798 |
+| Reference-audio encode cache | ❌ (e) | ❌ (g) | n/a (j) | ✅ #605 / #713 | ✅ #748 |
+| Encoder compile / batch | ❌ (c) | ❌ (c) | n/a (j) | ✅ #612 (l) | ✅ #728 |
+| Streaming output | ✅ #157 / #374 | 🟡 #704 (k) | 🟡 #697 (k) | ✅ #655 | ✅ #753 |
+| Colocated / single-GPU budget | ❌ (f) | ✅ #451 | ✅ #570 | ✅ #428 / #430 | ✅ #810 |
+| Unified sampling seed | ✅ #824 | ✅ #824 | ✅ #824 | ✅ #824 | ✅ #728 / #824 |
+
+**Notes**
+
+- **(a) Async decode** is not wired for Fish, Qwen3-TTS, or Voxtral: the model runner does not implement the `post_decode` launch/resolve hooks, so the one-step-lookahead path (shipped for Higgs #590 / #638 and MOSS-Local #758) stays disabled. Fish also needs the OmniScheduler migration first.
+- **(b) Streaming vocoder CUDA graph**: only MOSS-Local (#798) is merged; Higgs is open (#729). Fish and Qwen3-TTS have no graphed streaming-codec step, and Voxtral's flow-matching head capture is deferred (#599, #520).
+- **(c) Encoder compile / batch**: the compiled DAC encoder (#612) and batched encode (#610) landed for Higgs only. Fish has no separate encoder stage (inline CPU reference encode); Qwen3-TTS has an encoder but no compile or batch PR.
+- **(d) Fish OmniScheduler**: still on the bespoke `FishScheduler`; no Higgs-style migration (#476) exists.
+- **(e) Fish reference cache**: reference audio is encoded inline (no LRU or single-flight); reusable helpers are being extracted in open #809.
+- **(f) Fish colocated budget**: `mem_fraction_static` is hardcoded to 0.85 and not wired to `--mem-fraction-static`, so it OOMs on 24 GB cards (#359); fix PRs #409 / #391 are unmerged.
+- **(g) Qwen3-TTS reference cache**: only a name-keyed LRU (#662), with no content hash or single-flight; the content-keyed attempt #604 was closed.
+- **(h) Higgs streaming vocoder CG**: open #729 (warmup-sealed runner, roughly 2.5x bit-exact, opt-in default-off), not yet merged.
+- **(i) Voxtral batched vocoder**: #718 was closed unmerged; the author wanted a deeper perf pass first.
+- **(j) Voxtral reference cache / encoder**: not applicable. Voxtral uses fixed voice embeddings with no reference-audio path, so there is no ref encode to cache or serving-time audio encoder to optimize.
+- **(k) Streaming output** (Qwen3-TTS #704, Voxtral #697): real incremental SSE streaming is open but not merged; before it, `stream=true` returned a single final payload.
+- **(l) Higgs encoder caveat**: the DAC encoder is compiled (#612), but batched encode was evaluated and deliberately not wired (#610) because it steals GPU cycles from the AR bottleneck.
 
 ---
 
