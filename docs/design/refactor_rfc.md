@@ -944,6 +944,18 @@ Locks in the stage → GPU → process topology mapping as the canonical V1 plac
 
 **Why it matters:** Crystallizes the placement rules that earlier RFCs introduced piecewise. After this PR there is one canonical way to express "where does a stage run" — every subsequent feature (router, realtime, colocation refinements) builds on this topology contract rather than inventing its own.
 
+### [2026-05-20 — PR #496: Topology-aware inter-stage data transport optimization [Perf/Transport]](https://github.com/sgl-project/sglang-omni/pull/496)
+
+_State: MERGED 2026-05-27. Relay stays the fallback path; faster transports only engage where topology is safe._
+
+Adds topology-aware transport selection for inter-stage pipeline data, so colocated stages bypass the default relay path and use cheaper transport where safe.
+
+- **`LOCAL_OBJECT` same-process transport:** direct Python-object dispatch for eligible same-process payload, stream-chunk, and stream-done/error edges; receivers treat passed references as read-only unless the edge gives an isolated projected object
+- **Same-GPU CUDA IPC fast path:** stream chunks carrying CUDA tensors go cross-process via CUDA IPC, keeping them off relay; full-payload CUDA IPC was implemented then reverted as it never triggered on the Qwen3-Omni paths
+- **Control/data plane split:** relay remains the fallback when neither `LOCAL_OBJECT` nor CUDA IPC applies, plus Qwen3-Omni payload projections (`thinker -> decode`, `talker_ar -> code2wav`) drop downstream-unneeded tensors
+
+**Why it matters:** The core data-plane optimization the RFC now documents, turning the relay from a mandatory hop into a fallback and unlocking direct transport for colocated stages (text-only same-process saw -33% mean latency).
+
 ### [2026-05-21 — PR #509: Remove TCP control-plane endpoints [RFC, Feat]](https://github.com/sgl-project/sglang-omni/pull/509)
 
 _State: OPEN as of this writing._
@@ -957,7 +969,41 @@ Removes TCP endpoint support from the pipeline control plane and makes IPC the o
 
 **Why it matters:** Final cleanup of port-based control-plane configuration. Removes a known fragile transport and shrinks the surface area the rest of the framework has to support. The last open-RFC item in this history; expected to land soon.
 
-_The entries below trace the TTS-model thread that ran alongside and after the V1-refactor series above: onboarding the Higgs Audio v3 and MOSS-TTS families and the serving-path optimizations each one drove. They are ordered by PR creation date among themselves._
+### [2026-05-24 — PR #558: Refactor model hooks, payload names, and stage workers [RFC-cleanup]](https://github.com/sgl-project/sglang-omni/pull/558)
+
+_State: MERGED 2026-06-01. Resolves #538 items 1.2 / 1.3 / 1.4 (and 2.3)._
+
+RFC cleanup that sharpens the `ModelRunner` hook contract, de-framework-ifies model payload type names, and consolidates the stage-worker modules.
+
+- **Split pre-forward hooks:** replaces the `prepare_prefill` / `prepare_decode` short-circuit with separate mutation hooks (`before_prefill` / `before_decode`) and explicit custom-forward hooks (`custom_prefill_forward` / `custom_decode_forward`)
+- **Model-scoped payload names:** renames payload/event types to model-prefixed forms (`Qwen3OmniPipelineState` / `Qwen3OmniEvent`, plus Ming-Omni and LLaDA2-Uni) so they no longer read as framework types
+- **Module consolidation:** merges `stage_group.py` and `stage_process.py` into a single `stage_workers.py`
+
+**Why it matters:** Tightens the runner/stage contract surface the RFC depends on, separating per-step state mutation from custom forward execution and giving stage-worker lifecycle code one home.
+
+### [2026-05-26 — PR #589: Add framework-level stage fusion [Feat/Topology]](https://github.com/sgl-project/sglang-omni/pull/589)
+
+_State: MERGED 2026-05-28. Framework-only; first fusion form is conservative (adjacent, ordered, linear, non-TP, one GPU)._
+
+Adds a framework-level `fused_stages` config knob that colocates selected adjacent logical stages into one runtime process when the topology is safe, without introducing a new scheduler path.
+
+- **Fusion as process/topology colocation:** the runtime prep path adds a colocation constraint and the process-topology planner merges the affected process groups; `Stage` keeps owning routing, relay, fan-in, streaming, abort, and terminal completion
+- **Compile-time validation:** conservative fusion groups must be adjacent, ordered, linear, non-TP, and fit on at most one GPU; fused stages then reuse existing same-process local dispatch on eligible edges
+
+**Why it matters:** A topology/placement primitive alongside colocation (#430) and the stage-gpu-process topology (#461), letting operators collapse adjacent stages into one process from config rather than restructuring the pipeline.
+
+### [2026-06-18 — PR #824: Framework-level unified sampling seed [Feat/Sampling]](https://github.com/sgl-project/sglang-omni/pull/824)
+
+_State: MERGED 2026-06-19. Strict no-op when no request in the batch supplies a seed._
+
+Makes a request `seed` honored uniformly across every AR sampling model via a reusable seed hook in the base `ModelRunner`, a prerequisite for reproducible RL rollouts.
+
+- **Base runner seed hook:** `ModelRunner._install_sampling_seeds` builds per-row seeds and installs them onto `forward_batch.sampling_info` before sampling, so the standard SGLang path honors `seed` instead of dropping it; mixed batches give unseeded rows a request-id-derived fallback so TP ranks stay in sync
+- **Per-model wiring:** discrete-TTS custom samplers (Higgs, Fish S2-Pro) move to `multinomial_with_seed` with a `-1` sentinel keeping unseeded draws byte-identical, and the Qwen3-Omni talker unifies onto the shared `resolve_row_seed` scheme
+
+**Why it matters:** Touches the shared sampling/runner contract across all models so seed handling is one framework concern rather than fragmented per-model code, making a full Qwen3-Omni omni rollout end-to-end reproducible.
+
+_The entries below trace the model-onboarding and TTS-optimization thread that ran alongside the V1-refactor and framework series above: onboarding the Ming-Omni, LLaDA2.0-Uni, Qwen3-TTS / Voxtral, Higgs Audio v3, and MOSS-TTS families plus the serving-path optimizations they drove. They are ordered by PR creation date among themselves._
 
 ### [2026-05-11 — PR #428: feat(higgs-tts): add Higgs Audio v3 TTS support [Higgs, Feature]](https://github.com/sgl-project/sglang-omni/pull/428)
 
@@ -970,6 +1016,40 @@ Onboards Higgs Audio v3, a 4B multi-codebook AR TTS model, into the project as a
 - **Scope:** first member of the Higgs-Audio TTS family that all later PRs build on
 
 **Why it matters:** Establishes the Higgs TTS baseline on which the entire scheduler, CUDA-graph, batching, and async-decode optimization series is layered.
+
+### [2026-05-13 — PR #437: Ming-Omni V1 migration [V1/Model]](https://github.com/sgl-project/sglang-omni/pull/437)
+
+_State: MERGED 2026-05-20. Per RFC #429; closes #405._
+
+Ports Ming-Omni off the legacy runner onto `sglang_omni_v1`, the staged multiprocess pipeline (preprocess -> thinker -> talker) already used by Qwen3-Omni and S2-Pro.
+
+- **V1 stage contract:** rewrites the Ming-Omni model package to the V1 stage contract (`bootstrap.py`, `stages.py`, `registration.py`, plus reworked config/preprocessor/encoder/thinker) and adds a Ming-specific thinker model runner wired into the shared worker
+- **Shared serving surface:** runs under the V1 scheduler, the multiprocess stage runner, and the V1 OpenAI-compatible server, with minor scheduler / mp-runner / openai-api adjustments for Ming's stage graph
+
+**Why it matters:** Brings another model onto the common V1 staged runner and server under the same migration discipline tracked for Fish and Qwen, so it shares the pipeline rather than the legacy path.
+
+### [2026-05-15 — PR #446: Initial LLaDA2.0-Uni support [Feature/Model]](https://github.com/sgl-project/sglang-omni/pull/446)
+
+_State: MERGED 2026-05-23. Initial support: text+image -> text only; other modalities are follow-ups._
+
+Onboards LLaDA2.0-Uni, a multimodal diffusion LLM (DLLM), to V1; unlike the existing AR models its parallel-denoising decode needed a dedicated scheduler and data flow.
+
+- **Dedicated DLLM scheduler:** new `dllm_scheduler.py` implementing the Stage inbox/outbox contract plus a dual-queue (waiting + staging) SGLang request manager with chunked-prefill support, dispatched conditionally in `forward_batch_generation()`
+- **4-stage pipeline:** preprocessing (CPU) -> image_encoder (ViT + VQ-VAE, GPU) -> thinker (`LLaDA2MoeModelLM`, a Group-Limited Top-K MoE driven by `DllmScheduler`) -> decode (CPU)
+
+**Why it matters:** Introduces a genuinely new non-AR decode paradigm into the framework, proving the Stage contract can host a parallel-denoising diffusion model alongside the autoregressive ones.
+
+### [2026-05-16 — PR #451: Support Qwen3-TTS and Voxtral-TTS [Feature/TTS]](https://github.com/sgl-project/sglang-omni/pull/451)
+
+_State: MERGED 2026-05-23. Follows the S2-Pro integration pattern; closes #444._
+
+Adds native `/v1/audio/speech` serving for the Qwen3-TTS and Voxtral-TTS families onto the existing S2-Pro-style staged TTS path rather than a separate serving surface.
+
+- **Qwen3-TTS base:** new `models/qwen3_tts` package with preprocessing, voice-clone generation, and tokenizer/vocoder stages, supporting `ref_audio` / `ref_text` and leaving checkpoint sampling defaults intact unless overridden
+- **Voxtral-TTS:** repairs the Voxtral `StageConfig` wiring to serve `Voxtral-4B-TTS-2603` through `/v1/audio/speech`, plus request-mapping, config-resolution, and example/doc plumbing
+- **Scheduler choice:** runs both as regular staged pipelines backed by `SimpleScheduler` callables, deferring a model-specific scheduler as a follow-up
+
+**Why it matters:** Establishes the follow-S2-Pro precedent for onboarding TTS families onto the V1 staged TTS path, a pattern later reused by MOSS.
 
 ### [2026-05-18 — PR #476: refactor(higgs-tts): replace HiggsScheduler with OmniScheduler [Higgs, Refactor]](https://github.com/sgl-project/sglang-omni/pull/476)
 
