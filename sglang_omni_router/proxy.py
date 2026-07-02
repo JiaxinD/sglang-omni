@@ -61,6 +61,14 @@ WORKER_REQUEST_FAILURE_STATUS_CODES = {
     HTTPStatus.GATEWAY_TIMEOUT.value,
 }
 
+# Note (Jiaxin Deng): terminal SSE event injected when an event-stream relay
+# fails mid-body, so the client gets a valid error frame (fields mirror the
+# worker's OpenAI error envelope) instead of a silently truncated stream.
+_SSE_UPSTREAM_ERROR_EVENT = (
+    b'data: {"error": {"message": "upstream stream failed before completion", '
+    b'"type": "upstream_error", "param": null, "code": 502}}\n\n'
+)
+
 
 class PayloadTooLargeError(ValueError):
     pass
@@ -198,9 +206,9 @@ class ProxyHandler:
         metadata: RouteMetadata,
         worker: Worker,
     ) -> Response:
-        # Note (Jiaxin Deng): stream the upstream response through instead of
-        # buffering the whole body; a mid-stream failure after a 2xx now
-        # truncates the response rather than returning 502.
+        # Note (Jiaxin Deng): stream through instead of buffering. A mid-stream
+        # failure after a 2xx cannot become a 502; SSE (text/event-stream) bodies
+        # get a terminal error event, other bodies (audio, JSON) truncate.
         stream = metadata.stream
         start_time = time.perf_counter()
         upstream_request = self._client.build_request(
@@ -256,6 +264,10 @@ class ProxyHandler:
                 error=f"status={upstream.status_code}",
             )
 
+        is_event_stream = (upstream.headers.get("content-type") or "").startswith(
+            "text/event-stream"
+        )
+
         async def iter_bytes():
             outcome = _response_outcome(upstream.status_code)
             try:
@@ -267,6 +279,9 @@ class ProxyHandler:
             except httpx.HTTPError as exc:
                 outcome = "stream_error"
                 record_worker_failure_once(error=type(exc).__name__)
+                if is_event_stream:
+                    yield _SSE_UPSTREAM_ERROR_EVENT
+                    return
                 raise
             finally:
                 await upstream.aclose()
