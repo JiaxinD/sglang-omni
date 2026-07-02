@@ -1125,6 +1125,43 @@ def test_streaming_failure_records_single_worker_failure() -> None:
     assert worker.state == "healthy"
 
 
+def test_streaming_inflight_count_decrements_even_if_aclose_raises() -> None:
+    class AcloseRaisingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"data: chunk\n\n"
+            raise httpx.ReadError("stream boom")
+
+        async def aclose(self) -> None:
+            raise RuntimeError("aclose boom")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                200,
+                stream=AcloseRaisingStream(),
+                headers={"content-type": "text/event-stream"},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "qwen3-omni", "stream": True},
+        ) as response:
+            b"".join(response.iter_bytes())
+
+    # Note (Jiaxin Deng): the in-flight count must decrement even though aclose()
+    # raised, otherwise it leaks and least_request drifts permanently.
+    assert all(worker.active_requests == 0 for worker in app.state.workers)
+
+
 # Streaming-relay semantics for the non-streaming path (Phase 0, #920): the relay
 # no longer buffers the full body, so failures after the status commits truncate,
 # and the response is chunked with a status-code-based worker error string.
