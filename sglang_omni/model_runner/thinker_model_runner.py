@@ -325,26 +325,30 @@ class ThinkerModelRunner(ModelRunner):
         )
 
     def lookahead_eligible(self, batch: Any) -> bool:
-        """Route to sync where the one-step lag would diverge from sync. Speech /
-        hidden-capture batches: the captured-hidden side channel is per-forward, so
-        launch(N) overwrites it before resolve(N-1) reads it and the talker gets
-        mismatched hidden states. Sampling that reads the lagged output history
-        (repetition/presence/frequency penalty, min_new_tokens) or a fixed seed
-        also diverges; logit_bias / custom_params are routed conservatively.
-        return_logprob is routed to sync because the lookahead sampler skips the
-        base logprob-recording path.
+        """Route to sync where the one-step lag would diverge from sync. A request
+        that emits audio captures hidden states for the talker; the per-forward
+        _captured_aux_hidden_states side channel would be overwritten by a lookahead
+        launch(N) before resolve(N-1) collects it, so those requests route to sync
+        per batch. Sampling that reads the lagged output history (repetition /
+        presence / frequency penalty, min_new_tokens), a fixed seed, or
+        return_logprob (the lookahead sampler skips the base logprob path) also
+        diverges; logit_bias / custom_params are routed conservatively.
         """
-        # note (jiaxin deng): hidden-capture (speech/audio-output) batches must not
-        # use the lookahead; the _captured_aux_hidden_states side channel would be
-        # overwritten by launch(N) before resolve(N-1) collects it.
-        if self._text_model.layers_to_capture:
-            return False
+        from sglang_omni.models.qwen3_omni.request_builders import (
+            should_generate_audio_output,
+        )
+
         for req in batch.reqs:
-            # _omni_data is attached per request by OmniScheduler; guard the
-            # attribute access so a request data variant without the flag is
-            # simply treated as not requesting logprobs.
+            # note (jiaxin deng): fail closed if the request data is missing or None
+            # so a hidden-capture batch can never slip onto the async path.
             try:
-                needs_logprob = req._omni_data.return_logprob
+                data = req._omni_data
+            except AttributeError:
+                data = None
+            if data is None or should_generate_audio_output(data.stage_payload):
+                return False
+            try:
+                needs_logprob = data.return_logprob
             except AttributeError:
                 needs_logprob = False
             if needs_logprob:
