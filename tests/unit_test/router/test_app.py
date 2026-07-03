@@ -24,7 +24,7 @@ def _request_netloc(request: httpx.Request) -> str:
 def _router_config(
     policy: str = "round_robin",
     max_payload_size: int = 512 * 1024 * 1024,
-    max_connections: int = 100,
+    max_connections: int | None = None,
     health_failure_threshold: int = 1,
     health_check_timeout_secs: int = 5,
     worker_configs: list[WorkerConfig] | None = None,
@@ -2048,4 +2048,14 @@ def test_max_connections_explicit_below_worker_budget_warns(
     with caplog.at_level(logging.WARNING, logger="sglang_omni_router.config"):
         config = _router_config(max_connections=100)
     assert config.max_connections == 100
+    assert any("under-feed" in record.getMessage() for record in caplog.records)
+
+
+def test_max_connections_auto_at_cap_still_warns_when_pool_outgrows_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workers = [WorkerConfig(url=f"http://worker-{i}:8101") for i in range(70)]
+    with caplog.at_level(logging.WARNING, logger="sglang_omni_router.config"):
+        config = RouterConfig(workers=workers)
+    assert config.max_connections == 4096
     assert any("under-feed" in record.getMessage() for record in caplog.records)

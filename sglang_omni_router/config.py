@@ -195,7 +195,7 @@ class RouterConfig(BaseModel):
             self.max_connections = min(
                 MAX_AUTO_CONNECTIONS, CONNECTIONS_PER_WORKER * len(self.workers)
             )
-        elif self.max_connections < MIN_CONNECTIONS_PER_WORKER * len(self.workers):
+        if self.max_connections < MIN_CONNECTIONS_PER_WORKER * len(self.workers):
             logger.warning(
                 "max_connections=%d is below %d x %d workers; the cap is pool-wide "
                 "(one shared upstream client) and can under-feed the pool at "
