@@ -41,8 +41,8 @@ DEFAULT_CAPABILITIES: set[Capability] = {
 }
 CLOUD_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
 
-# Upstream connection budget: the cap is pool-wide (one shared client), so it must
-# exceed the pool's aggregate in-flight capacity or workers are silently under-fed.
+# Note: (Jiaxin Deng) the cap is pool-wide (one shared client): it must exceed the
+# pool's aggregate in-flight capacity or workers are silently under-fed.
 CONNECTIONS_PER_WORKER = 128
 MAX_AUTO_CONNECTIONS = 4096
 MIN_CONNECTIONS_PER_WORKER = 64

@@ -2027,7 +2027,7 @@ def test_max_connections_auto_sizes_to_worker_count() -> None:
             WorkerConfig(url="http://worker-c:8103"),
         ],
     )
-    # 128 per worker: the cap is pool-wide and must exceed in-flight capacity.
+    # Note: (Jiaxin Deng) 128 per worker: pool-wide cap must exceed in-flight capacity.
     assert config.max_connections == 384
 
 
