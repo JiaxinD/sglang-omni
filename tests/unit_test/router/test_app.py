@@ -1334,6 +1334,48 @@ def test_non_sse_midstream_failure_is_not_injected_with_error_event() -> None:
     assert all(worker.active_requests == 0 for worker in app.state.workers)
 
 
+def test_active_requests_held_across_body_relay_then_released() -> None:
+    # Note (Jiaxin Deng): recording active_requests at each yield proves the
+    # count is held while the body is still relaying (0 if released early), 0 after.
+    app_holder: list[FastAPI] = []
+    observed_during_relay: list[int] = []
+
+    class ObservingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            worker = app_holder[0].state.workers[0]
+            observed_during_relay.append(worker.active_requests)
+            yield b"chunk-1"
+            observed_during_relay.append(worker.active_requests)
+            yield b"chunk-2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"}, request=request)
+        if request.url.path == "/v1/audio/speech":
+            return httpx.Response(
+                200,
+                stream=ObservingStream(),
+                headers={"content-type": "audio/wav"},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        _router_config(worker_configs=[WorkerConfig(url="http://worker-a:8101")]),
+        client=async_client,
+    )
+    app_holder.append(app)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/audio/speech", json={"model": "qwen3-omni"})
+
+    assert response.status_code == 200
+    assert response.content == b"chunk-1chunk-2"
+    assert observed_during_relay == [1, 1]
+    assert all(worker.active_requests == 0 for worker in app.state.workers)
+
+
 def test_least_request_avoids_worker_with_active_stream_load() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
