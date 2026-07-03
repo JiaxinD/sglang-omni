@@ -2017,3 +2017,35 @@ def test_router_admin_update_lock_timeout_returns_503(monkeypatch) -> None:
     assert result.status_code == 503
     body = json.loads(result.body)
     assert "lock" in body["error"]["message"].lower()
+
+
+def test_max_connections_auto_sizes_to_worker_count() -> None:
+    config = RouterConfig(
+        workers=[
+            WorkerConfig(url="http://worker-a:8101"),
+            WorkerConfig(url="http://worker-b:8102"),
+            WorkerConfig(url="http://worker-c:8103"),
+        ],
+    )
+    # 128 per worker: the cap is pool-wide and must exceed in-flight capacity.
+    assert config.max_connections == 384
+
+
+def test_max_connections_auto_caps_at_4096() -> None:
+    workers = [WorkerConfig(url=f"http://worker-{i}:8101") for i in range(40)]
+    config = RouterConfig(workers=workers)
+    assert config.max_connections == 4096
+
+
+def test_max_connections_explicit_value_is_preserved() -> None:
+    config = _router_config(max_connections=512)
+    assert config.max_connections == 512
+
+
+def test_max_connections_explicit_below_worker_budget_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="sglang_omni_router.config"):
+        config = _router_config(max_connections=100)
+    assert config.max_connections == 100
+    assert any("under-feed" in record.getMessage() for record in caplog.records)
