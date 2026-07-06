@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from http import HTTPStatus
 
 import httpx
@@ -70,9 +71,64 @@ _SSE_UPSTREAM_ERROR_EVENT = (
     b'"type": "upstream_error", "param": null, "code": 502}}\n\n'
 )
 
+_OVERLOAD_RETRY_AFTER_SECS = "1"
+
 
 class PayloadTooLargeError(ValueError):
     pass
+
+
+class AdmissionController:
+    """Bounded global in-flight count for the model data plane.
+
+    Runs on uvicorn's single event loop: check-and-increment happens
+    synchronously between awaits, so no locking is needed.
+    """
+
+    def __init__(self, max_inflight: int) -> None:
+        self._max_inflight = max_inflight
+        self._inflight = 0
+        self._peak_inflight = 0
+        self._rejected_total = 0
+
+    @property
+    def inflight(self) -> int:
+        return self._inflight
+
+    def try_acquire(self) -> bool:
+        if self._inflight >= self._max_inflight:
+            self._rejected_total += 1
+            return False
+        self._inflight += 1
+        if self._inflight > self._peak_inflight:
+            self._peak_inflight = self._inflight
+        return True
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "inflight": self._inflight,
+            "max_inflight": self._max_inflight,
+            "peak_inflight": self._peak_inflight,
+            "rejected_total": self._rejected_total,
+        }
+
+    def release(self) -> None:
+        assert self._inflight > 0, "in-flight count cannot be negative"
+        self._inflight -= 1
+
+
+class _ReleaseOnce:
+    """Idempotent release so every response path can call it safely."""
+
+    def __init__(self, admission: AdmissionController) -> None:
+        self._admission = admission
+        self._released = False
+
+    def __call__(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._admission.release()
 
 
 def filter_request_headers(request: Request) -> dict[str, str]:
@@ -116,8 +172,57 @@ class ProxyHandler:
         self._workers = workers
         self._selector = selector
         self._client = client
+        self._admission = AdmissionController(config.effective_max_inflight)
+
+    @property
+    def admission(self) -> AdmissionController:
+        return self._admission
 
     async def forward_model_request(self, request: Request, path: str) -> Response:
+        # Note (Jiaxin Deng): reject before reading the body; past the bound
+        # the relay must shed load, not queue it.
+        if not self._admission.try_acquire():
+            self._log_route_rejection(
+                request=request,
+                path=path,
+                status_code=503,
+                reason="router_overloaded",
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": (
+                            "router overloaded: max in-flight requests reached"
+                        ),
+                        "type": "overloaded_error",
+                        "code": 503,
+                    }
+                },
+                headers={"Retry-After": _OVERLOAD_RETRY_AFTER_SECS},
+            )
+        release = _ReleaseOnce(self._admission)
+        try:
+            response = await self._forward_admitted(request, path, release)
+        except BaseException:
+            release()
+            raise
+        # The streaming relay hands its slot to the response iterator; every
+        # other path is done with it as soon as the response object exists.
+        if not isinstance(response, StreamingResponse):
+            release()
+        else:
+            # Note (Jiaxin Deng): if the ASGI stack drops the response without
+            # ever starting the iterator, GC frees the slot (release is idempotent).
+            weakref.finalize(response, release)
+        return response
+
+    async def _forward_admitted(
+        self,
+        request: Request,
+        path: str,
+        release: _ReleaseOnce,
+    ) -> Response:
         content_length = request.headers.get("content-length")
         if content_length is not None and _exceeds_max_size(
             content_length, self._config.max_payload_size
@@ -197,7 +302,7 @@ class ProxyHandler:
                 content={"error": {"message": "no eligible upstream"}},
             )
 
-        return await self._forward_relay(request, path, body, metadata, worker)
+        return await self._forward_relay(request, path, body, metadata, worker, release)
 
     async def _forward_relay(
         self,
@@ -206,6 +311,7 @@ class ProxyHandler:
         body: bytes,
         metadata: RouteMetadata,
         worker: Worker,
+        release: _ReleaseOnce,
     ) -> Response:
         # Note (Jiaxin Deng): stream through instead of buffering. A mid-stream
         # failure after a 2xx cannot become a 502; SSE (text/event-stream) bodies
@@ -292,6 +398,7 @@ class ProxyHandler:
                     await upstream.aclose()
                 finally:
                     worker.decrement_active()
+                    release()
                     status_code = (
                         upstream.status_code if outcome == "completed" else None
                     )

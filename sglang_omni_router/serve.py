@@ -123,6 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Explicit values below 64 x workers can under-feed the pool."
         ),
     )
+    parser.add_argument(
+        "--max-inflight",
+        type=int,
+        default=None,
+        help=(
+            "Maximum concurrent in-flight model requests before the router "
+            "fast-rejects with 503 (default: the --max-connections value)."
+        ),
+    )
     parser.add_argument("--health-failure-threshold", type=int, default=3)
     parser.add_argument("--health-success-threshold", type=int, default=2)
     parser.add_argument("--health-check-timeout-secs", type=int, default=5)
@@ -198,6 +207,7 @@ def build_config_from_args(
         request_timeout_secs=args.request_timeout_secs,
         max_payload_size=args.max_payload_size,
         max_connections=args.max_connections,
+        max_inflight=args.max_inflight,
         health_failure_threshold=args.health_failure_threshold,
         health_success_threshold=args.health_success_threshold,
         health_check_timeout_secs=args.health_check_timeout_secs,
@@ -251,6 +261,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"policy={config.policy} | "
             f"max_payload_size={config.max_payload_size} | "
             f"max_connections={config.max_connections} | "
+            f"max_inflight={config.effective_max_inflight} | "
             f"health_failure_threshold={config.health_failure_threshold} | "
             f"health_success_threshold={config.health_success_threshold} | "
             f"health_check_endpoint={config.health_check_endpoint} | "

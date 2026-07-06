@@ -1013,3 +1013,38 @@ def test_strict_limits_flag_defaults_off() -> None:
         ["--worker-urls", "http://127.0.0.1:8101", "--strict-limits"]
     )
     assert args.strict_limits is True
+
+
+def test_max_inflight_defaults_to_max_connections() -> None:
+    args = build_parser().parse_args(
+        ["--worker-urls", "http://127.0.0.1:8101", "--max-connections", "256"]
+    )
+    config = build_config_from_args(args)
+
+    assert config.max_inflight is None
+    assert config.effective_max_inflight == 256
+
+
+def test_max_inflight_flag_decouples_from_max_connections() -> None:
+    args = build_parser().parse_args(
+        [
+            "--worker-urls",
+            "http://127.0.0.1:8101",
+            "--max-connections",
+            "256",
+            "--max-inflight",
+            "32",
+        ]
+    )
+    config = build_config_from_args(args)
+
+    assert config.effective_max_inflight == 32
+    assert config.max_connections == 256
+
+
+def test_max_inflight_rejects_non_positive_values() -> None:
+    with pytest.raises(ValidationError):
+        RouterConfig(
+            workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+            max_inflight=0,
+        )
