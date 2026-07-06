@@ -32,6 +32,40 @@ from sglang_omni_router.launcher import (
 
 logger = logging.getLogger("sglang_omni_router.serve")
 
+# Note (Jiaxin Deng): each in-flight request holds a client and an upstream
+# socket; the headroom covers listeners, health checks, and log files.
+_NOFILE_HEADROOM = 64
+
+
+def _read_nofile_soft_limit() -> int | None:
+    try:
+        import resource
+    except ImportError:  # non-POSIX platform, nothing to check
+        return None
+    soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    if soft_limit == resource.RLIM_INFINITY:
+        return None
+    return soft_limit
+
+
+def check_file_descriptor_limit(config: RouterConfig, *, strict: bool = False) -> None:
+    soft_limit = _read_nofile_soft_limit()
+    if soft_limit is None:
+        return
+    required = 2 * config.max_connections + _NOFILE_HEADROOM
+    if soft_limit >= required:
+        return
+    message = (
+        f"nofile soft limit {soft_limit} is below {required} "
+        f"(2 x max_connections={config.max_connections} + "
+        f"{_NOFILE_HEADROOM} headroom); under load the relay exhausts file "
+        f"descriptors and clients see raw connection errors. Raise the limit "
+        f"(ulimit -n {required}) or lower --max-connections."
+    )
+    if strict:
+        raise ValueError(message)
+    logger.warning(message)
+
 
 def normalize_log_level(log_level: str) -> str:
     normalized_level = log_level.upper()
@@ -95,6 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--health-check-interval-secs", type=int, default=10)
     parser.add_argument("--health-check-endpoint", default="/health")
     parser.add_argument("--log-level", default="info")
+    parser.add_argument(
+        "--strict-limits",
+        action="store_true",
+        help=(
+            "Fail startup instead of warning when system limits (nofile soft "
+            "limit) are too low for the configured --max-connections."
+        ),
+    )
     parser.add_argument(
         "--admin-api-key",
         default=None,
@@ -202,6 +244,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         else:
             config = build_config_from_args(args)
 
+        check_file_descriptor_limit(config, strict=args.strict_limits)
         logger.info(f"Starting SGLang-Omni Router on {config.host}:{config.port}")
         logger.info(
             f"Router configuration: workers={len(config.workers)} | "
