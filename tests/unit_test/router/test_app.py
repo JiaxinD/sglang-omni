@@ -1269,6 +1269,115 @@ def test_worker_failure_last_error_uses_status_code_not_body() -> None:
     assert worker.last_error == "status=503"
 
 
+def test_bad_input_500s_do_not_evict_worker() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                500,
+                json={"error": {"message": "deterministic bad input"}},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        _router_config(
+            health_failure_threshold=2,
+            worker_configs=[WorkerConfig(url="http://worker-a:8101")],
+        ),
+        client=async_client,
+    )
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/v1/chat/completions", json={"model": "qwen3-omni", "messages": []}
+            )
+            for _ in range(3)
+        ]
+
+    # Note (Jiaxin Deng): before the fix, two relayed 500s evicted the only
+    # worker and the third request failed with 503 no_eligible_upstream.
+    assert [response.status_code for response in responses] == [500, 500, 500]
+    assert responses[-1].json() == {"error": {"message": "deterministic bad input"}}
+    worker = app.state.workers[0]
+    assert worker.state == "healthy"
+    assert worker.consecutive_failures == 0
+    assert worker.failed_requests == 3
+
+
+def test_transport_errors_still_evict_worker() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            raise httpx.ConnectError("worker down", request=request)
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        _router_config(
+            health_failure_threshold=2,
+            worker_configs=[WorkerConfig(url="http://worker-a:8101")],
+        ),
+        client=async_client,
+    )
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions", json={"model": "qwen3-omni", "messages": []}
+        )
+        second = client.post(
+            "/v1/chat/completions", json={"model": "qwen3-omni", "messages": []}
+        )
+        third = client.post(
+            "/v1/chat/completions", json={"model": "qwen3-omni", "messages": []}
+        )
+
+    assert first.status_code == 502
+    assert second.status_code == 502
+    assert third.status_code == 503
+    assert third.json() == {"error": {"message": "no eligible upstream"}}
+    assert app.state.workers[0].state == "unhealthy"
+
+
+def test_relayed_500_outcome_labeled_upstream_5xx(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                500, json={"error": {"message": "bad input"}}, request=request
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        _router_config(worker_configs=[WorkerConfig(url="http://worker-a:8101")]),
+        client=async_client,
+    )
+
+    with caplog.at_level(logging.INFO, logger="sglang_omni_router.proxy"):
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "qwen3-omni", "messages": []},
+            )
+
+    assert response.status_code == 500
+    route_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "route_completed" in record.getMessage()
+    ]
+    assert len(route_logs) == 1
+    assert "outcome=upstream_5xx" in route_logs[0]
+
+
 def test_relayed_response_has_no_content_length_header() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":

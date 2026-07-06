@@ -52,10 +52,11 @@ RESPONSE_HEADERS_TO_STRIP = HOP_BY_HOP_HEADERS | {
 BUFFERED_RESPONSE_HEADERS_TO_STRIP = RESPONSE_HEADERS_TO_STRIP | {
     "content-encoding",
 }
-WORKER_REQUEST_FAILURE_STATUS_CODES = {
+# Note (Jiaxin Deng): 500 is excluded: workers answer deterministic bad inputs
+# with 500, so counting it toward eviction lets one bad client drain the pool.
+WORKER_EVICTION_STATUS_CODES = {
     HTTPStatus.REQUEST_TIMEOUT.value,
     HTTPStatus.TOO_MANY_REQUESTS.value,
-    HTTPStatus.INTERNAL_SERVER_ERROR.value,
     HTTPStatus.BAD_GATEWAY.value,
     HTTPStatus.SERVICE_UNAVAILABLE.value,
     HTTPStatus.GATEWAY_TIMEOUT.value,
@@ -258,7 +259,7 @@ class ProxyHandler:
                 error=error,
             )
 
-        if upstream.status_code in WORKER_REQUEST_FAILURE_STATUS_CODES:
+        if upstream.status_code in WORKER_EVICTION_STATUS_CODES:
             record_worker_failure_once(
                 status_code=upstream.status_code,
                 error=f"status={upstream.status_code}",
@@ -413,8 +414,10 @@ async def _read_body_with_limit(request: Request, max_size: int) -> bytes:
 
 
 def _response_outcome(status_code: int) -> str:
-    if status_code in WORKER_REQUEST_FAILURE_STATUS_CODES:
+    if status_code in WORKER_EVICTION_STATUS_CODES:
         return "worker_failure_status"
+    if status_code == HTTPStatus.INTERNAL_SERVER_ERROR.value:
+        return "upstream_5xx"
     return "completed"
 
 
