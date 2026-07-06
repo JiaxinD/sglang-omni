@@ -1160,6 +1160,11 @@ def test_streaming_inflight_count_decrements_even_if_aclose_raises() -> None:
     # Note (Jiaxin Deng): the in-flight count must decrement even though aclose()
     # raised, otherwise it leaks and least_request drifts permanently.
     assert all(worker.active_requests == 0 for worker in app.state.workers)
+    # Note (Jiaxin Deng): record_routed_request() runs in the same finally, so the
+    # broken stream is still booked as a routed failure rather than silently
+    # dropped; guards against a future change skipping the completion accounting.
+    assert sum(worker.routed_requests for worker in app.state.workers) == 1
+    assert sum(worker.failed_requests for worker in app.state.workers) == 1
 
 
 # Streaming-relay semantics for the non-streaming path (Phase 0, #920): the relay
