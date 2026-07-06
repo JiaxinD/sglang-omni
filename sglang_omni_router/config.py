@@ -197,12 +197,10 @@ class RouterConfig(BaseModel):
             )
         if self.max_connections < MIN_CONNECTIONS_PER_WORKER * len(self.workers):
             logger.warning(
-                "max_connections=%d is below %d x %d workers; the cap is pool-wide "
-                "(one shared upstream client) and can under-feed the pool at "
-                "saturation",
-                self.max_connections,
-                MIN_CONNECTIONS_PER_WORKER,
-                len(self.workers),
+                f"max_connections={self.max_connections} is below "
+                f"{MIN_CONNECTIONS_PER_WORKER} x {len(self.workers)} workers; "
+                "the cap is pool-wide (one shared upstream client) and can "
+                "under-feed the pool at saturation"
             )
         return self
 

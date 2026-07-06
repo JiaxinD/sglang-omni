@@ -202,12 +202,10 @@ def register_routes(
         workers.append(worker)
         if config.max_connections < MIN_CONNECTIONS_PER_WORKER * len(workers):
             logger.warning(
-                "max_connections=%d is below %d x %d workers after registration; "
-                "the upstream client is sized at startup and can under-feed the "
-                "grown pool",
-                config.max_connections,
-                MIN_CONNECTIONS_PER_WORKER,
-                len(workers),
+                f"max_connections={config.max_connections} is below "
+                f"{MIN_CONNECTIONS_PER_WORKER} x {len(workers)} workers after "
+                "registration; the upstream client is sized at startup and can "
+                "under-feed the grown pool"
             )
         await app.state.health_checker.check_worker_health(worker)
         logger.info(
