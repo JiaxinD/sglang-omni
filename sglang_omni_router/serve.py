@@ -52,12 +52,12 @@ def check_file_descriptor_limit(config: RouterConfig, *, strict: bool = False) -
     soft_limit = _read_nofile_soft_limit()
     if soft_limit is None:
         return
-    required = 2 * config.max_connections + _NOFILE_HEADROOM
+    required = 2 * config.upstream_pool_size + _NOFILE_HEADROOM
     if soft_limit >= required:
         return
     message = (
         f"nofile soft limit {soft_limit} is below {required} "
-        f"(2 x max_connections={config.max_connections} + "
+        f"(2 x upstream_pool_size={config.upstream_pool_size} + "
         f"{_NOFILE_HEADROOM} headroom); under load the relay exhausts file "
         f"descriptors and clients see raw connection errors. Raise the limit "
         f"(ulimit -n {required}) or lower --max-connections."
@@ -118,9 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Pool-wide cap on concurrent upstream connections across all workers "
-            "(one shared client). Default: auto, 128 x workers, capped at 4096. "
-            "Explicit values below 64 x workers can under-feed the pool."
+            "Admission bound: maximum concurrent in-flight model requests "
+            "before the router fast-rejects with 503. Default: auto, "
+            "128 x workers, capped at 4096. The upstream connection pool is "
+            "sized to at least this value, so admitted requests never queue "
+            "inside the pool. Explicit values below 64 x workers can "
+            "under-feed the pool."
         ),
     )
     parser.add_argument(
@@ -128,8 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Maximum concurrent in-flight model requests before the router "
-            "fast-rejects with 503 (default: the --max-connections value)."
+            "Advanced override: decouple the admission bound from "
+            "--max-connections (default: equal to it). The upstream pool is "
+            "sized to the larger of the two."
         ),
     )
     parser.add_argument("--health-failure-threshold", type=int, default=3)
@@ -262,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"max_payload_size={config.max_payload_size} | "
             f"max_connections={config.max_connections} | "
             f"max_inflight={config.effective_max_inflight} | "
+            f"upstream_pool={config.upstream_pool_size} | "
             f"health_failure_threshold={config.health_failure_threshold} | "
             f"health_success_threshold={config.health_success_threshold} | "
             f"health_check_endpoint={config.health_check_endpoint} | "

@@ -186,6 +186,12 @@ class RouterConfig(BaseModel):
             return self.max_inflight
         return self.max_connections
 
+    @property
+    def upstream_pool_size(self) -> int:
+        # Note (Jiaxin Deng): pool >= admission bound, so an admitted request
+        # can never queue inside the httpx pool (the late PoolTimeout 502 mode).
+        return max(self.max_connections, self.effective_max_inflight)
+
     @field_validator("health_check_endpoint")
     @classmethod
     def _validate_health_endpoint(cls, value: str) -> str:

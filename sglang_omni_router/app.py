@@ -59,7 +59,7 @@ def create_app(
     timeout = httpx.Timeout(config.request_timeout_secs)
     owns_client = client is None
     if client is None:
-        limits = httpx.Limits(max_connections=config.max_connections)
+        limits = httpx.Limits(max_connections=config.upstream_pool_size)
         client = httpx.AsyncClient(timeout=timeout, limits=limits)
     owns_health_client = health_client is None and owns_client
     if health_client is None:

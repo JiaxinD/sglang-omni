@@ -1048,3 +1048,44 @@ def test_max_inflight_rejects_non_positive_values() -> None:
             workers=[WorkerConfig(url="http://127.0.0.1:8101")],
             max_inflight=0,
         )
+
+
+def test_upstream_pool_size_covers_admission_bound() -> None:
+    # Default: bound == pool == resolved max_connections (128 x workers).
+    config = RouterConfig(workers=[WorkerConfig(url="http://127.0.0.1:8101")])
+    assert config.upstream_pool_size == config.max_connections == 128
+
+    # Bound below the pool: the pool keeps its connection capacity.
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=256,
+        max_inflight=32,
+    )
+    assert config.upstream_pool_size == 256
+
+    # Note (Jiaxin Deng): failing before: the pool was sized to
+    # max_connections alone, so a bound above it queued admitted requests
+    # inside the pool until PoolTimeout surfaced as a late 502.
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=64,
+        max_inflight=800,
+    )
+    assert config.upstream_pool_size == 800
+
+
+def test_nofile_check_follows_the_upstream_pool_size(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(serve_module, "_read_nofile_soft_limit", lambda: 1024)
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=64,
+        max_inflight=800,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="sglang_omni_router.serve"):
+        serve_module.check_file_descriptor_limit(config)
+
+    assert "nofile soft limit 1024 is below 1664" in caplog.text
