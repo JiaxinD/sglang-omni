@@ -1468,8 +1468,6 @@ def test_higgs_audio_codec_encode_batch_input_normalisation() -> None:
 
 
 def test_higgs_mem_fraction_role_to_stage_targets_tts_engine() -> None:
-    # --mem-fraction-static is only accepted when a pipeline maps a role to a
-    # stage; higgs routes the AR ("talker") role to its sglang tts_engine stage.
     assert HiggsTtsPipelineConfig.mem_fraction_role_to_stage() == {
         "talker": "tts_engine"
     }
@@ -1504,7 +1502,6 @@ def test_higgs_cli_talker_mem_fraction_static_pins_tts_engine() -> None:
 
 
 def test_higgs_cli_rejects_unsupported_thinker_mem_fraction() -> None:
-    # higgs has no thinker stage, so the thinker-scoped flag must still reject.
     config = HiggsTtsPipelineConfig(model_path="fake-model")
 
     with pytest.raises(typer.BadParameter):
