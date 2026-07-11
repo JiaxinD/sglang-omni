@@ -91,6 +91,7 @@ GPU_ID=0
 BUS=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i $GPU_ID)
 BUS=${BUS,,}; BUS=${BUS:4}
 NODE=$(cat /sys/bus/pci/devices/$BUS/numa_node)
+# if this reads -1, set the node explicitly instead of guessing
 numactl -H | grep "node $NODE cpus"     # CPU cores on that node
 ```
 
@@ -161,11 +162,12 @@ done
 ```
 
 `examples/launch_same_gpu_dp.sh` wraps these steps behind a per-run state directory:
-it records replica PIDs/process groups, ports, and log paths in a manifest, launches
+it refuses to start when the ports are taken or another run is recorded on the same
+GPU, records replica PIDs/process groups, ports, and log paths in a manifest, launches
 sequentially behind a bounded health gate, surfaces each replica's KV pool, compares
-expected replica processes against the MPS client list, and tears down only the
-processes recorded for that run. It is a tested example, not a production process
-supervisor.
+expected replica processes against the MPS client list, and on startup failure stops
+only its own processes while keeping the state directory for diagnosis. It is a tested
+example, not a production process supervisor.
 
 ## Drive every replica to saturation
 
@@ -186,8 +188,11 @@ a replica that missed the pipe directory falls back to time-slicing without any 
 
 The launcher compares the two sets for you: it collects each replica's process-group
 members, reads `get_server_list` / `get_client_list` from the run's control daemon,
-fails with a non-zero exit if any replica has no process in the client list, and
-writes the mapping to `mps_attach.txt` in the run's state directory for inspection.
+and fails with a non-zero exit if the control queries fail or any replica has no
+process in the client list. The mapping is written to `mps_attach.txt` in the run's
+state directory: the MPS server PID, every observed client PID with the replica it
+maps to (or `UNMATCHED`), replicas without any attached client, and a final
+`RESULT: PASS`/`FAIL` line.
 
 To inspect and confirm manually:
 
@@ -225,12 +230,16 @@ replica, so signalling the replica's **process group** covers them.
 4. Confirm none of your PIDs remain in the MPS client list
    (`get_client_list <server>`); live MPS clients must be gone before the daemon
    quits, or the MPS server can enter an RPC-failure state that outlasts your run.
-5. Quit the daemon: `echo quit | nvidia-cuda-mps-control` (with your pipe directory).
+   If your clients survive the drain, stop and inspect instead of forcing.
+5. Quit the daemon (`echo quit | nvidia-cuda-mps-control` with your pipe directory)
+   and confirm the control endpoint no longer responds.
 6. Only as a last resort, `SIGKILL` tracked process groups that survived the drain —
    and only PIDs recorded in your own launch state.
 
-`examples/launch_same_gpu_dp.sh down` implements exactly this against its recorded
-state, and refuses to act when no state is found instead of guessing.
+`examples/launch_same_gpu_dp.sh down` follows this order against its recorded state:
+it aborts and keeps the state directory whenever this run's MPS clients are still
+alive, the control queries fail, or the daemon survives `quit`, and it refuses to act
+at all when no state is found instead of guessing.
 
 ## Memory and stability limits
 
