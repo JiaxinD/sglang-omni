@@ -13,6 +13,30 @@ replica cannot keep the GPU busy; it does little or nothing when one replica alr
 saturates GPU compute. Measure your own setup before adopting it (see
 [Measure your own setup](#measure-your-own-setup)).
 
+## Why this can help
+
+In the Higgs setup we tested, a single serving replica does not keep the GPU busy even
+after it is tuned for concurrency, admission limits, and CPU placement: at its
+throughput plateau the GPU still spends much of its time idle. This is consistent with
+a host- and pipeline-limited regime. Per-request host work, including scheduling,
+detokenization, sampling, output synchronization, and stage handoff, can leave the GPU
+waiting between kernels instead of GPU compute being the sole limit.
+
+Running several replicas as separate server processes creates independent host-side
+execution streams. In a host- or pipeline-limited setup, this can keep more GPU work
+ready and reduce gaps between kernels. This is not equivalent to simply increasing one
+replica's batch. Multiple processes also change scheduling, request distribution, and
+long-tail behavior. Without MPS, the CUDA contexts primarily time-slice and recover only
+part of the idle headroom. MPS allows kernels from different processes to execute
+concurrently when resources permit. In our measurements, this provided the main
+additional gain beyond process-level replication.
+
+This is not a universal optimization. If a tuned single replica already saturates GPU
+compute there is no idle to reclaim, and extra replicas only split the same ceiling; do
+not expect a gain there (see the MOSS-TTS-Local counterexample in the case study). The
+same-GPU replica idea first came up in a team discussion and an early experiment by
+Jingwen Gu.
+
 ## When it helps
 
 Consider same-GPU DP when **all** of the following hold:
@@ -257,6 +281,30 @@ at all when no state is found instead of guessing.
   nominal runs with lower latency and simpler operation; treat DP3 as something to
   validate locally, not a default.
 
+## How to evaluate it fairly
+
+Whether same-GPU DP helps is easy to measure wrong, because an under-driven baseline or
+an under-driven replica can move the result either way. Use the same discipline for
+every configuration you compare:
+
+* Tune the single replica to its throughput plateau first, and treat that as the
+  baseline to beat.
+* Hold the total GPU and CPU budget fixed, and only vary how it is split across
+  replicas.
+* Give each replica its own dedicated CPU cores on the GPU's NUMA node.
+* Drive every replica to saturation, not just the pool in aggregate; an under-driven
+  replica makes DP look like a loss.
+* Pin the software version and runtime configuration (model revision, sglang version,
+  admission limits) across all configurations.
+* Report throughput, latency, and failed or degraded runs together, not throughput
+  alone.
+
+Review feedback showed that an early comparison did not drive every configuration
+equally: each DP replica was left below its useful saturation regime, so the pool looked
+slower than one replica. After pinning the environment and saturating each replica, the corrected
+measurements confirmed the gain. The case study below reports the tuned single baseline
+and the DP results together so the comparison can be checked directly.
+
 ## H100 Higgs case study
 
 Setup (pin this to reproduce): one H100 80 GB (driver 580.126.20 / CUDA 13), sglang-omni
@@ -321,3 +369,21 @@ Low SM activity at the tuned single replica's peak may indicate reclaimable comp
 headroom; confirm it with a controlled DP comparison on your own setup before relying
 on it. If SM activity is already near the ceiling, stop here. This recipe is young —
 measurements from other models, GPUs, and workloads are welcome to harden it.
+
+## What comes next
+
+Same-GPU DP with MPS is useful today, and it also makes clearer where the next problems
+are. Two directions are directly connected:
+
+**Router.** Once several replicas share a card, the router has to keep every worker fed
+continuously without becoming the throughput bottleneck again, and it needs predictable
+admission and failure behavior under overload.
+
+**Scheduler and runtime.** This recipe recovers idle GPU time at the process level, but
+it also exposes room in host-side scheduling, request processing, and pipeline feeding.
+Over time we would like to reduce the serial host work inside the runtime and coordinate
+several execution streams, so the runtime can reclaim that headroom more directly,
+without relying solely on process-level replication.
+
+These are ongoing directions, not finished designs, and the recipe stays useful in the
+meantime. Independent measurements and fixes are welcome.
