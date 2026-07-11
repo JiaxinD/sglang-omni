@@ -22,6 +22,7 @@ from benchmarks.eval.benchmark_asr_seedtts import (
     QWEN3_ASR_MODEL_PATH,
     run_asr_seedtts_once,
 )
+from benchmarks.metrics._format import format_benchmark_dataset_label
 from benchmarks.metrics.wer import print_asr_speed_summary, print_asr_wer_summary
 from tests.test_model.omni_router_utils import (
     ManagedRouterHandle,
@@ -34,15 +35,19 @@ QWEN3_ASR_CI_MODEL_PATH = QWEN3_ASR_MODEL_PATH
 QWEN3_ASR_CONCURRENCY = QWEN3_ASR_WER_CONCURRENCY
 QWEN3_ASR_WARMUP_REQUESTS = QWEN3_ASR_CONCURRENCY * 2
 SEEDTTS_ASR_CORRECTNESS_SAMPLES = 1088
+SEEDTTS_ASR_DATASET_LABEL = format_benchmark_dataset_label(
+    dataset="seedtts",
+    repo_id=DATASETS["seedtts"],
+)
 
 # P95 reference values calibrated by tune.py (worst-of-N).
-SEEDTTS_ASR_CORPUS_WER_MAX = 0.0138
-SEEDTTS_ASR_SAMPLE_WER_MAX = 0.2858
-QWEN3_ASR_THROUGHPUT_MIN = 93.506
-QWEN3_ASR_LATENCY_MEAN_MAX_S = 0.34028885086916166
-QWEN3_ASR_LATENCY_P95_MAX_S = 0.455045491317287
-QWEN3_ASR_RTF_MEAN_MAX = 0.0737
-QWEN3_ASR_RTF_P95_MAX = 0.1018
+SEEDTTS_ASR_CORPUS_WER_MAX = 0.0122
+SEEDTTS_ASR_SAMPLE_WER_MAX = 0.1819
+QWEN3_ASR_THROUGHPUT_MIN = 89.15367011738545
+QWEN3_ASR_LATENCY_MEAN_MAX_S = 0.357
+QWEN3_ASR_LATENCY_P95_MAX_S = 0.493352619552752
+QWEN3_ASR_RTF_MEAN_MAX = 0.07720349691994066
+QWEN3_ASR_RTF_P95_MAX = 0.1084
 
 THRESHOLD_SLACK_HIGHER = 0.9
 THRESHOLD_SLACK_LOWER = 1.1
@@ -154,8 +159,12 @@ def test_asr_matches_seedtts_reference_text(
         and sample["wer"] > SEEDTTS_ASR_SAMPLE_WER_THRESHOLD
     ]
 
-    print_asr_wer_summary(summary, QWEN3_ASR_CI_MODEL_PATH)
-    print_asr_speed_summary(speed, QWEN3_ASR_CI_MODEL_PATH)
+    print_asr_wer_summary(
+        summary, QWEN3_ASR_CI_MODEL_PATH, dataset=SEEDTTS_ASR_DATASET_LABEL
+    )
+    print_asr_speed_summary(
+        speed, QWEN3_ASR_CI_MODEL_PATH, dataset=SEEDTTS_ASR_DATASET_LABEL
+    )
 
     results_path = tmp_path_factory.getbasetemp() / "qwen3_asr_results.json"
     results_path.write_text(
