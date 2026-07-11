@@ -227,18 +227,19 @@ replica, so signalling the replica's **process group** covers them.
 1. Stop new traffic.
 2. `SIGTERM` each tracked replica process group (`kill -TERM -- -<pgid>`).
 3. Wait until the tracked processes have exited (`pgrep -g <pgid>` empty per replica).
-4. Confirm none of your PIDs remain in the MPS client list
-   (`get_client_list <server>`); live MPS clients must be gone before the daemon
-   quits, or the MPS server can enter an RPC-failure state that outlasts your run.
-   If your clients survive the drain, stop and inspect instead of forcing.
+4. Confirm the MPS client list is empty (`get_client_list <server>`). The pipe is
+   private to your run, so any remaining client is outstanding work even when its
+   PID no longer matches a tracked process group; live clients must be gone before
+   the daemon quits, or the MPS server can enter an RPC-failure state that outlasts
+   your run. If clients survive the drain, stop and inspect instead of forcing.
 5. Quit the daemon (`echo quit | nvidia-cuda-mps-control` with your pipe directory)
    and confirm the control endpoint no longer responds.
 6. Only as a last resort, `SIGKILL` tracked process groups that survived the drain —
    and only PIDs recorded in your own launch state.
 
 `examples/launch_same_gpu_dp.sh down` follows this order against its recorded state:
-it aborts and keeps the state directory whenever this run's MPS clients are still
-alive, the control queries fail, or the daemon survives `quit`, and it refuses to act
+it aborts and keeps the state directory whenever the daemon still reports any MPS
+client, the control queries fail, or the daemon survives `quit`, and it refuses to act
 at all when no state is found instead of guessing.
 
 ## Memory and stability limits

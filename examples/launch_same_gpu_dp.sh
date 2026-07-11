@@ -189,18 +189,30 @@ teardown_state() {
     [ -z "${live// /}" ] && break
     sleep "$DRAIN_INTERVAL"
   done
-  # Note (jiaxin): live MPS clients belonging to this run must be gone before the
-  # daemon quits; quitting or SIGKILLing around live clients can wedge the MPS
-  # server with RPC failures that outlast this run.
+  # Note (jiaxin): the pipe is private to this run, so ANY client the daemon still
+  # reports is outstanding even if its PID left the tracked groups; quitting around
+  # live clients can wedge the MPS server with RPC failures that outlast this run.
   if mps_alive "$state"; then
     raw=$(mps_clients "$state") || { echo "error: MPS client query failed; state kept at $state" >&2; return 1; }
-    local cl blocked=""
-    for cl in $(echo "$raw" | tr ',:' '  '); do
-      case " $(tracked_pids "$state") " in *" $cl "*) blocked+="$cl ";; esac
+    local entry cl clients="" tracked blocked="" unowned=""
+    for entry in $raw; do
+      clients+=" $(echo "${entry#*:}" | tr ',' ' ')"
+    done
+    tracked=" $(tracked_pids "$state") "
+    for cl in $clients; do
+      case "$tracked" in
+        *" $cl "*) blocked+="$cl " ;;
+        *) unowned+="$cl " ;;
+      esac
     done
     if [ -n "$blocked" ]; then
       echo "error: this run's MPS clients are still alive after TERM+drain: $blocked" >&2
       echo "state kept at $state — inspect (ps -o pid,pgid,cmd -p $blocked), then re-run down" >&2
+      return 1
+    fi
+    if [ -n "$unowned" ]; then
+      echo "error: MPS daemon still reports client(s) outside this run's tracked groups: $unowned" >&2
+      echo "state kept at $state — inspect (ps -o pid,pgid,cmd -p $unowned), then re-run down" >&2
       return 1
     fi
     mps_quit "$state" || { echo "state kept at $state" >&2; return 1; }
