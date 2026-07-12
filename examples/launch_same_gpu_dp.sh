@@ -15,6 +15,8 @@
 #   MF (0.42 for N=2, 0.27 for N=3), BASE_PORT (8801),
 #   CORE_BLOCKS: N non-overlapping CPU blocks on the GPU's NUMA node, required.
 #   NUMA_NODE: explicit override when the PCI-derived NUMA node is unavailable.
+#   MAX_TOTAL_TOKENS: optional positive integer; when set, every replica is launched
+#     with the same --max-total-tokens cap (unset = engine auto/profiled).
 set -euo pipefail
 
 STATE_ROOT=${STATE_ROOT:-/tmp/sglang-omni-same-gpu-dp/$USER}
@@ -252,6 +254,13 @@ up() {
   local blocks=($CORE_BLOCKS)
   [ "${#blocks[@]}" = "$n" ] || die "CORE_BLOCKS must contain exactly $n blocks"
 
+  local extra_args=()
+  if [ -n "${MAX_TOTAL_TOKENS:-}" ]; then
+    [[ "$MAX_TOTAL_TOKENS" =~ ^[1-9][0-9]*$ ]] \
+      || die "MAX_TOTAL_TOKENS must be a positive integer, got '$MAX_TOTAL_TOKENS'"
+    extra_args+=(--max-total-tokens "$MAX_TOTAL_TOKENS")
+  fi
+
   local d
   for d in $(ls -d "$STATE_ROOT/gpu-$gpu"/run-* 2>/dev/null || true); do
     if run_is_active "$d"; then
@@ -279,6 +288,7 @@ up() {
     echo "run_id=$run"; echo "gpu_id=$gpu"; echo "gpu_uuid=$uuid"; echo "numa_node=$node"
     echo "model=$model"; echo "model_name=$model_name"; echo "n=$n"; echo "mf=$mf"
     echo "base_port=$base_port"; echo "core_blocks=$CORE_BLOCKS"
+    echo "max_total_tokens=${MAX_TOTAL_TOKENS:-auto/profiled}"
   } > "$state/manifest"
   : > "$state/replicas.tsv"
 
@@ -302,7 +312,7 @@ up() {
     CUDA_VISIBLE_DEVICES=$gpu \
     setsid numactl --cpunodebind="$node" --membind="$node" -C "${blocks[$i]}" \
       sgl-omni serve --model-path "$model" --model-name "$model_name" \
-        --mem-fraction-static "$mf" \
+        --mem-fraction-static "$mf" "${extra_args[@]}" \
         --host 127.0.0.1 --port "$port" > "$log" 2>&1 < /dev/null &
     pid=$!
     printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$pid" "$pid" "$port" "$log" >> "$state/replicas.tsv"
@@ -335,7 +345,7 @@ up() {
   fi
   up_done=1
   trap - EXIT
-  echo "up: $n replicas on GPU $gpu; state: $state"
+  echo "up: $n replicas on GPU $gpu; token cap ${MAX_TOTAL_TOKENS:-auto/profiled}; state: $state"
   echo "tear down with: bash $0 down $run"
 }
 
