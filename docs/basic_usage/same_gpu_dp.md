@@ -66,9 +66,15 @@ done
 
 【我发现一个非常严肃的问题，就像这里说的，mfs 不是全局 HBM 占比，所以逻辑上，如果我们希望每个 replica 尽量等同的话，先后启动的 replica 的 mfs 应该是递增的。当然，回到另一个问题，如果我们现在直接启用 DP 3，每个都是 0.42 的话，事实上会让这些 replica 的 KV pool 不等价。数学直觉告诉我，最好的 DP 策略就是“ 物理性质等同的 replica”，而不是仅仅功能等同的 replica。一方面，如果我们目前是按顺序启动，且每个 replica 的 mfs 一致，我们需要标注出来，comment 说这不是目前的最优策略，但是即便如此，我们的策略已经带来了恐怖的提升。另一方面，我们应该列个 todo，大概率需要设置一些新的参数，比如 global kv size 之类的，来 overwrite 每个 replica 的 mfs，让其物理等同。这会是一个非常值得研究的事情。或者说，证明最佳的 DP 策略就是“物理等同，每个 replica KV cache 完全一致”。】
 
-4. **Drive every replica to saturation.** Aggregate concurrency is not enough: each replica needs enough traffic to reach its useful batch. With `max_running_requests=64`, a per-replica concurrency of 16 leaves each replica far below its admission capacity, which was the main confound behind an early "single beats DP3" result. Sweep per-replica concurrency, one client stream per replica, until aggregate throughput plateaus, and inspect `#running-req` / `#queue-req`.
+4. **Drive every replica to saturation.** 
 
-5. **Verify MPS attachment.** Four things are easy to conflate: env vars set, daemon running, an MPS server exists, and the replica processes you launched are actually attached as clients. Only the last makes the comparison valid, and a replica that missed the pipe directory falls back to time-slicing without any error. The launcher writes the server-to-client PID mapping to `mps_attach.txt` and fails if any replica has no attached client; to check manually:
+Aggregate concurrency is not enough: each replica needs enough traffic to reach its useful batch. With `max_running_requests=64`, a per-replica concurrency of 16 leaves each replica far below its admission capacity, which was the main confound behind an early "single beats DP3" result. Sweep per-replica concurrency, one client stream per replica, until aggregate throughput plateaus, and inspect `#running-req` / `#queue-req`.
+
+【这一段话写的很奇怪，不要给用户讲我们早期的失败实验，直接说应该如何把每个 replica 都拉到最大，不要解释 which was the main confound behind an early "single beats DP3" result.】
+
+5. **Verify MPS attachment.**
+
+Four things are easy to conflate: env vars set, daemon running, an MPS server exists, and the replica processes you launched are actually attached as clients. Only the last makes the comparison valid, and a replica that missed the pipe directory falls back to time-slicing without any error. The launcher writes the server-to-client PID mapping to `mps_attach.txt` and fails if any replica has no attached client; to check manually:
 
    ```bash
    echo get_server_list | nvidia-cuda-mps-control
@@ -79,22 +85,29 @@ done
    grep -c MpsRpc <your replica logs>      # must total 0
    ```
 
-6. **Route traffic.** For deployment, register each replica endpoint with the [Omni Router](omni_router.md) or another load balancer; colocated replicas are ordinary workers to the router. Keep the router's `--max-connections` at least as large as the total offered concurrency. For performance validation, benchmark the replicas directly first (one client per replica) to isolate the placement and MPS effects, then add the router and measure its overhead separately.
+6. **Route traffic.**
 
-7. **Tear down safely.** On a shared host, only touch processes you launched, and never treat "the GPU is empty" as the success condition. Stop new traffic, then SIGTERM each tracked replica process group (`kill -TERM -- -<pgid>`, which also reaps the `multiprocessing-fork` stage workers) and wait until they exit. Confirm the MPS client list is empty (`get_client_list <server>`): the pipe is private to your run, so any remaining client is outstanding work even when its PID no longer matches a tracked group, and live clients must be gone before the daemon quits, or the MPS server can enter an RPC-failure state that outlasts your run. Only then quit the daemon (`echo quit | nvidia-cuda-mps-control`), and SIGKILL surviving tracked groups only as a last resort. `examples/launch_same_gpu_dp.sh down` follows this order and keeps the state directory whenever cleanup cannot be confirmed.
+For deployment, register each replica endpoint with the [Omni Router](omni_router.md) or another load balancer; colocated replicas are ordinary workers to the router. Keep the router's `--max-connections` at least as large as the total offered concurrency. For performance validation, benchmark the replicas directly first (one client per replica) to isolate the placement and MPS effects, then add the router and measure its overhead separately.
 
-【好奇，这个相当于是详细的解释如何用对吧，然后 examples/launch_same_gpu_dp.sh 就是傻瓜式的一键启动脚本？我们这里其实没有区分 H100 or H200，我反而觉得是应该写清楚的，上方的例子应该是 H100，H200 需要将 xxx 改为 yyy】
+7. **Tear down safely.**
+
+On a shared host, only touch processes you launched, and never treat "the GPU is empty" as the success condition. Stop new traffic, then SIGTERM each tracked replica process group (`kill -TERM -- -<pgid>`, which also reaps the `multiprocessing-fork` stage workers) and wait until they exit. Confirm the MPS client list is empty (`get_client_list <server>`): the pipe is private to your run, so any remaining client is outstanding work even when its PID no longer matches a tracked group, and live clients must be gone before the daemon quits, or the MPS server can enter an RPC-failure state that outlasts your run. Only then quit the daemon (`echo quit | nvidia-cuda-mps-control`), and SIGKILL surviving tracked groups only as a last resort. `examples/launch_same_gpu_dp.sh down` follows this order and keeps the state directory whenever cleanup cannot be confirmed.
+
+【这里 补充一段，就说虽然 CUDA MPS 的方案确实设置起来和关停都非常复杂，但是其带来的性能提升极其显著。然后留下下面这张表：】
 
 
-## Why it works: how we found this
+| Configuration | Nominal throughput | Relative to single |
+|---|---:|---:|
+| Single c96 | 21.7 to 22.1 qps | 1.0x |
+| DP2 + MPS, 2 x c64 | 31.5 to 37.7 qps | 1.4 to 1.7x |
+| DP3 + MPS, 3 x c64 | 39.9 to 46.9 qps | 1.8 to 2.1x |
 
-We tend to believe the best DP pratice is to use one GPU per replica. But as we found in [issue 907](https://github.com/sgl-project/sglang-omni/issues/907), using multiple replicas on the same GPU can achieve even better throughput, up to a scary +134% throughput gain on H100.
+【我们这里其实没有区分 H100 or H200，我反而觉得是应该写清楚的，上方的例子应该是 H100，H200 需要将 xxx 改为 yyy】
 
-In this sense, we share this conclusion with the SGLang Omni community, and make temperate adjustments in this recipe to provide best practices in powering up same-GPU DP for the best ever throughput. We are still diving deep into router and SGLang Omni Scheduler refactor to further explore the best practices of prodcuting serving of TTS models. Please reach out to us if you are also interested in this topic.
+
+## How We Found This
 
 As we said, this recipe grew out of the serving profiling in [#907](https://github.com/sgl-project/sglang-omni/issues/907), which found that several omni serving workloads are limited by host-side dispatch rather than GPU compute. From there we ran same-GPU DP experiments on [Higgs](https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html) and [Moss](https://sgl-project.github.io/sglang-omni/cookbook/moss_tts_local.html) TTS models.
-
-The evidence for when replication helps is a spectrum, not a single proof:
 
 | Experiment | GPU signal | Controlled observation | Result | Interpretation |
 |---|---|---|---|---|
@@ -105,7 +118,11 @@ The evidence for when replication helps is a spectrum, not a single proof:
 
 ASR is the strongest host-bound evidence. Higgs started as a gray zone but clearly leaves GPU headroom at a tuned single replica. Running several replicas as separate processes changes host execution, scheduling, and long-tail behavior, and it is not the same as enlarging one replica's batch. Without MPS the CUDA contexts mostly time-slice and recover only part of the idle; MPS lets kernels from different processes run concurrently when resources permit, which is where the main extra gain came from.
 
-## Prepare the baseline
+## Reproduce the results
+
+We release our early experiments results and guidance for reproduce. We are still diving deep into router and SGLang Omni Scheduler refactor to further explore the best practices of prodcuting serving of TTS models. Please reach out to us if you are also interested in this topic.
+
+### Prepare the baseline
 
 The single-replica baseline decides whether same-GPU DP is worth it, and an under-driven baseline makes DP look better than it is. Tune and measure one replica first, then treat its throughput, latency, and GPU utilization as the number every DP configuration has to beat.
 
@@ -115,9 +132,9 @@ The single-replica baseline decides whether same-GPU DP is worth it, and an unde
 * **Prerequisites.** NVIDIA CUDA MPS available with GPU compute mode `Default`, so a per-user daemon needs no root; enough GPU memory for every replica, each sized with `--mem-fraction-static` plus a roughly fixed per-replica overhead (weights, codec, MPS context); non-overlapping CPU core blocks, one per replica, on the GPU's NUMA node (on SMT machines logical CPUs `N` and `N + ncores` are often the same physical core, so check `lscpu -e=CPU,CORE,NODE`); and enough offered concurrency to saturate each replica, not just the pool.
 
 
-## Evaluate
+### Evaluate
 
-Whether same-GPU DP helps is easy to measure wrong, so hold the comparison to the same discipline for every configuration:
+Whether same-GPU DP helps is easy to measure incorrectly, so hold the comparison to the same discipline for every configuration:
 
 | Control | Why it matters |
 |---|---|
@@ -128,9 +145,11 @@ Whether same-GPU DP helps is easy to measure wrong, so hold the comparison to th
 | pin software and runtime settings | makes the comparison reproducible |
 | report latency and unsuccessful runs | avoids showing only the best throughput |
 
-An early comparison did not drive every configuration equally: each DP replica was left below its saturation regime, so the pool looked slower than one replica. After the environment was pinned and each replica saturated, the gain held up.
+Our early comparison with Claude Fable 5 model did not drive every configuration equally: each DP replica was left below its saturation regime, so the pool looked slower than one replica. After we mannualy pinned the environment and each replica saturated, the gain held up.
 
-**H100 Higgs case study.** One H100 80 GB (driver 580.126.20 / CUDA 13), sglang-omni `a78de4cb`, sglang `0.5.12.post1`, `bosonai/higgs-tts-3-4b` (snapshot `7556c17e`), `/v1/audio/speech`, seed-tts-eval EN, 300 samples per client, default `max_running_requests=64` / `cuda_graph_max_bs=64`, 32 server cores of the GPU's NUMA node split per replica, one client per replica on the SMT-sibling cores, fresh servers per run, interleaved on a shared host. Every attempted run is reported.
+## Case Study on H100 with Higgs TTS Model
+
+ One H100 80 GB (driver 580.126.20 / CUDA 13), sglang-omni `a78de4cb`, sglang `0.5.12.post1`, `bosonai/higgs-tts-3-4b` (snapshot `7556c17e`), `/v1/audio/speech`, seed-tts-eval EN, 300 samples per client, default `max_running_requests=64` / `cuda_graph_max_bs=64`, 32 server cores of the GPU's NUMA node split per replica, one client per replica on the SMT-sibling cores, fresh servers per run, interleaved on a shared host. Every attempted run is reported.
 
 | Configuration | Nominal throughput | Relative to single | Run outcome |
 |---|---:|---:|---|
@@ -139,6 +158,8 @@ An early comparison did not drive every configuration equally: each DP replica w
 | DP3 + MPS, 3 x c64 | 39.9 to 46.9 qps | 1.8 to 2.1x | 2 nominal and 1 degraded of 4 attempts |
 
 The failures: one DP2 benchmark run hit `cudaErrorMpsRpcFailure`, and one DP2 and one DP3 replica failed to start, all coinciding with host-load spikes. One DP3 run completed every request but at 13.3 qps, so it is marked degraded rather than excluded. The core-pinned single stayed within a few percent across all runs, and DP3 was not clearly repeatably better than DP2.
+
+【cudaErrorMpsRpcFailure 这里需要备注下，ratish 的 PR 修好了这个 failure，现在方案启动是稳定且高效的，只是还有很多细节可以继续优化，可以达到更好的效果】
 
 The #907 profiling, this repeated case study, and the reviewer verification below are three separate measurement series. They ran on different dates and load, and in some cases different software, so they should not be compared by absolute QPS; the differences between roughly 61, 21, and 29.9 qps are not attributed to a single cause.
 
@@ -156,9 +177,10 @@ Low SM activity at the tuned single replica's peak may indicate reclaimable head
 
 ## Limits and next steps
 
-VRAM sets the replica count. In the pinned Higgs configuration, three replicas at `mf=0.27` fit an 80 GB H100 and a fourth (at `mf` near 0.11) failed to get a workable KV pool ("Colocated GPU budget leaves no KV-cache headroom"); treat replica counts and fractions as tested starting points, not hardware rules. DP3 is operationally tighter than DP2, with smaller per-replica KV pools, less balanced throughput under load, and `MpsRpcFailure` observed during some concurrent launches, so start with DP2 and treat DP3 as something to validate locally.
+In the pinned Higgs configuration, three replicas at `mf=0.27` fit an 80 GB H100 and a fourth (at `mf` near 0.11) failed to get a workable KV pool ("Colocated GPU budget leaves no KV-cache headroom"); treat replica counts and fractions as tested starting points, not hardware rules. DP3 is operationally tighter than DP2, with smaller per-replica KV pools, less balanced throughput under load, and `MpsRpcFailure` observed during some concurrent launches, so start with DP2 and treat DP3 as something to validate locally.
 
 This is not a universal optimization. A compute-bound model gains little: on the same GPU, MOSS-TTS-Local reached a compute ceiling near 13 qps with one replica (util about 81%), and DP2 and DP3 all converged to the same value with no peak-throughput gain. H200, multi-GPU scaling, and production stability are outside this case study's validated scope, and these are setup-specific results rather than properties of the model families.
 
 Same-GPU DP with MPS is a practical way to recover idle GPU time today, and it also makes clearer where the next work is. Two directions are directly connected. The **router** has to keep every colocated worker fed without becoming the throughput bottleneck, and it needs predictable admission and failure behavior under overload. The **scheduler and runtime** could reduce the serial host work and coordinate several execution streams more directly, so the runtime reclaims that headroom without relying solely on process-level replication. These are ongoing directions, and the recipe stays useful in the meantime. Independent measurements and fixes from other models, GPUs, and workloads are welcome.
 
+【这里写的挺好的，但是要画更大的饼，吸引更多人加入我们。】
