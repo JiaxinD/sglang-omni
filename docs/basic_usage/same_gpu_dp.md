@@ -4,7 +4,7 @@
 
 A common data-parallel deployment assigns one GPU to each replica. When a tuned replica still leaves substantial GPU headroom, colocating multiple replicas on the same GPU can improve per-GPU throughput.
 
-Same-GPU data parallelism runs several complete serving replicas on one GPU and lets [CUDA MPS](https://docs.nvidia.com/deploy/mps/index.html) share the GPU between them. This is a conditional and ongoing optimization. But we feel excited to share and calling for the community to join our exploration.
+Same-GPU data parallelism runs several complete serving replicas on one GPU and lets [CUDA MPS](https://docs.nvidia.com/deploy/mps/index.html) share the GPU between them. This is a conditional and ongoing optimization. We are excited to share it and call for the community to join the exploration.
 
 ## Deploy
 
@@ -56,9 +56,9 @@ for PORT in 8801 8802; do
 done
 ```
 
-The example below uses the **same** `--mem-fraction-static` for every replica. Launch one at a time, wait for `/health`, and confirm each replica's `KV Cache is allocated. #tokens: ...` line is workable. Tested starting points on the 80 GB H100 Higgs configuration are 2 replicas at `mf=0.42` with 16 cores each, or 3 at `mf=0.27` with 10 cores each.
+The example above uses the **same** `--mem-fraction-static` for every replica. Launch one at a time, wait for `/health`, and confirm each replica's `KV Cache is allocated. #tokens: ...` line is workable. Tested starting points on the 80 GB H100 Higgs configuration are 2 replicas at `mf=0.42` with 16 cores each, or 3 at `mf=0.27` with 10 cores each.
 
-Identical flag on `--mem-fraction-static` do **not** mean identical KV capacity. `--mem-fraction-static` is evaluated at each replica's init time against **remaining** GPU memory, roughly `mem_fraction × free_memory` after weights and other fixed overheads. It is a per-replica request against whatever is left, not an additive share of the card. Because replicas start sequentially, earlier ones have already reserved memory, so later ones see a smaller free pool and allocate fewer KV tokens even when every flag is the same (in one run, three sequential `mf=0.27` replicas received 97,503 / 53,149 / 20,961 KV tokens).
+Identical `--mem-fraction-static` flags do **not** mean identical KV capacity. `--mem-fraction-static` is evaluated at each replica's init time against **remaining** GPU memory, roughly `mem_fraction × free_memory` after weights and other fixed overheads. It is a per-replica request against whatever is left, not an additive share of the card. Because replicas start sequentially, earlier ones have already reserved memory, so later ones see a smaller free pool and allocate fewer KV tokens even when every flag is the same (in one run, three sequential `mf=0.27` replicas received 97,503 / 53,149 / 20,961 KV tokens).
 
 To control KV size more precisely, set an explicit common token cap with `--max-total-tokens`, at or below the smallest capacity any replica can actually satisfy:
 
@@ -82,10 +82,11 @@ Intuition suggests that equal KV capacity across colocated replicas is a prerequ
 
 4. **Drive every replica to saturation.**
 
-To reach maximum throughput, feed replicas one by one: keep sending to a replica until it is saturated (`#queue-req > 0`), then move to the next. Aggregate concurrency alone can leave some replicas under-driven. SGLang Omni's router does not yet support this fill-one-then-next behavior; that is planned for later work. Additionally as mentioned in the previous section, once every colocated replica can be given a stable, equal KV pool, sequential filling should no longer be needed: with fully equivalent workers, random routing is the most efficient way to keep the pool saturated.
+To reach maximum throughput, feed replicas one by one: keep sending to a replica until it is saturated (`#queue-req > 0`), then move to the next. Aggregate concurrency alone can leave some replicas under-driven. SGLang Omni's router does not yet support this fill-one-then-next behavior; that is planned for later work. Additionally, as mentioned in the previous section, once every colocated replica can be given a stable, equal KV pool, sequential filling should no longer be needed: with fully equivalent workers, random routing is the most efficient way to keep the pool saturated.
 
 5. **Verify MPS attachment.**
 
+MPS should be verified carefully. Four things are easy to conflate: env vars set, daemon running, an MPS server exists, and the replica processes you launched are actually attached as clients. Only the last makes the comparison valid, and a replica that missed the pipe directory falls back to time-slicing without any error. The launcher writes the server-to-client PID mapping to `mps_attach.txt` and fails if any replica has no attached client; to check manually:
 
 ```bash
 echo get_server_list | nvidia-cuda-mps-control
@@ -96,11 +97,9 @@ ps -o pid,pgid,cmd -p <client pids>     # confirm they are your replica processe
 grep -c MpsRpc <your replica logs>      # must total 0
 ```
 
-MPS should be verified carefully. Four things are easy to conflate: env vars set, daemon running, an MPS server exists, and the replica processes you launched are actually attached as clients. Only the last makes the comparison valid, and a replica that missed the pipe directory falls back to time-slicing without any error. The launcher writes the server-to-client PID mapping to `mps_attach.txt` and fails if any replica has no attached client; to check manually:
-
 6. **Route traffic.**
 
-For easy deployment, you can register each replica endpoint with the [Omni Router](omni_router.md). Keep the router's `--max-connections` at least as large as the total offered concurrency. However, as we said, current router doese not support sequential filling, i.e, the fill-one-then-next scheduling strategy. To reach maximum throughput, you can manually route traffic to the replicas one by one.
+For easy deployment, you can register each replica endpoint with the [Omni Router](omni_router.md). Keep the router's `--max-connections` at least as large as the total offered concurrency. However, as we said, the current router does not support sequential filling, i.e., the fill-one-then-next scheduling strategy. To reach maximum throughput, you can manually route traffic to the replicas one by one.
 
 7. **Tear down safely.**
 
@@ -120,7 +119,7 @@ These commands and `--mem-fraction-static` starting points are from an 80 GB H10
 
 ## How We Found This
 
-As we said, this recipe grew out of the serving profiling in [#907](https://github.com/sgl-project/sglang-omni/issues/907): that profiling found substantial unused GPU capacity across several omni serving workloads, with strong host-dispatch-bound evidence in the tested ASR setup. From there we ran same-GPU DP experiments on [Higgs](https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html) and [Moss](https://sgl-project.github.io/sglang-omni/cookbook/moss_tts_local.html) TTS models.
+This recipe grew out of the serving profiling in [#907](https://github.com/sgl-project/sglang-omni/issues/907). Our profiling found substantial unused GPU capacity across several omni serving workloads, with strong host-dispatch-bound evidence in the tested ASR setup. From there we ran same-GPU DP experiments on [Higgs](https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html) and [Moss](https://sgl-project.github.io/sglang-omni/cookbook/moss_tts_local.html) TTS models.
 
 | Experiment | GPU signal | Controlled observation | Result | Interpretation |
 |---|---|---|---|---|
@@ -160,7 +159,7 @@ Whether same-GPU DP helps is easy to measure incorrectly, so hold the comparison
 
 ## Case Study on H100 with Higgs TTS Model
 
- One H100 80 GB (driver 580.126.20 / CUDA 13), sglang-omni `a78de4cb`, sglang `0.5.12.post1`, `bosonai/higgs-tts-3-4b` (snapshot `7556c17e`), `/v1/audio/speech`, seed-tts-eval EN, 300 samples per client, default `max_running_requests=64` / `cuda_graph_max_bs=64`, 32 server cores of the GPU's NUMA node split per replica, one client per replica on the SMT-sibling cores, fresh servers per run, interleaved on a shared host. Every attempted run is reported.
+One H100 80 GB (driver 580.126.20 / CUDA 13), sglang-omni `a78de4cb`, sglang `0.5.12.post1`, `bosonai/higgs-tts-3-4b` (snapshot `7556c17e`), `/v1/audio/speech`, seed-tts-eval EN, 300 samples per client, default `max_running_requests=64` / `cuda_graph_max_bs=64`, 32 server cores of the GPU's NUMA node split per replica, one client per replica on the SMT-sibling cores, fresh servers per run, interleaved on a shared host. Every attempted run is reported.
 
 | Configuration | Nominal throughput | Relative to single | Run outcome |
 |---|---:|---:|---|
@@ -188,12 +187,10 @@ Low SM activity at the tuned single replica's peak may indicate reclaimable head
 
 ## Limits and next steps
 
-In the pinned Higgs configuration, three replicas at `mf=0.27` fit an 80 GB H100 and a fourth (at `mf` near 0.11) failed to get a workable KV pool ("Colocated GPU budget leaves no KV-cache headroom"); treat replica counts and fractions as tested starting points, not hardware rules. DP3 is operationally tighter than DP2, with smaller per-replica KV pools and less balanced throughput under load. The repeated study also observed both launch failures and a mid-run `MpsRpcFailure`, so start with DP2 and validate DP3 locally.
+1. **Generality is not fully validated.** Beyond the pinned H100 Higgs case study, we also ran related experiments on H200 and used SGLang to serve Qwen3-4B directly; both lines of work largely confirmed the same-GPU DP gains. Space and time limit how completely we can present those results here, and the measurements are not yet as polished as we would like. We believe same-GPU DP is a promising direction for smaller models on GPUs with ample memory and compute headroom, but the experimental coverage is still incomplete.
 
-This is not a universal optimization. A compute-bound model gains little: on the same GPU, MOSS-TTS-Local reached a compute ceiling near 13 qps with one replica (util about 81%), and DP2 and DP3 all converged to the same value with no peak-throughput gain. H200, multi-GPU scaling, and production stability are outside this case study's validated scope, and these are setup-specific results rather than properties of the model families.
+2. **Strictly equal per-replica KV size.** Sequential starts with the same `--mem-fraction-static` do not yield the same KV pool. Set each replica's KV size directly (e.g. a common `--max-total-tokens`) so capacities are strictly identical; intuition favors that for peak efficiency, but equal-versus-asymmetric budgets still need dedicated experiments and a sizing procedure that generalizes across cards.
 
-Intuition favors physically equal KV capacity across colocated replicas as a baseline for peak efficiency, but we lack a built-in way to guarantee that without an explicit common token cap, and we have not proven that equal allocation maximizes throughput or tail latency. Asymmetric budgets may do better under skewed request lengths or uneven routing; upcoming experiments will measure how uneven per-replica memory on one GPU affects aggregate throughput. Resource-equivalent replicas also involve more than KV capacity: CPU cores, admission limits, model and runtime configuration, MPS attachment, offered load, and NUMA placement all matter.
+3. **Router and scheduler still need a deeper dive.** Both the router and the SGLang Omni scheduler need further optimization. On the router side, better routing strategies for a colocated pool are clearly required. On the scheduler side, a more ambitious question is whether we can borrow the spirit of LLM prefill–decode (PD) disaggregation: keep one large shared KV cache and let multiple replicas share it. That direction is extremely challenging, and we believe the potential payoff is correspondingly large.
 
-Same-GPU DP with MPS is a practical way to recover idle GPU time today, and it also makes clearer where the next work is. Two directions are directly connected. The **router** has to keep every colocated worker fed without becoming the throughput bottleneck, and it needs predictable admission and failure behavior under overload. The **scheduler and runtime** could reduce the serial host work and coordinate several execution streams more directly, so the runtime reclaims that headroom without relying solely on process-level replication.
-
-This is an active area with room for many hands: the equal-versus-asymmetric KV question above, a token-cap sizing procedure that generalizes across GPUs, a router that keeps a colocated pool fed under load, and lower-overhead scheduling in the runtime. If any of this is interesting to you, or you have results from other models, GPUs, or workloads that confirm or challenge these findings, we would like to work with you.
+Same-GPU DP with MPS can recover idle GPU time on host- or dispatch-bound serving today, but broader validation and the work above are still unfinished. If this direction interests you, or you have results from other models, GPUs, or workloads that confirm or challenge these findings, we would like to work with you.
