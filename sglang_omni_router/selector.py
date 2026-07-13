@@ -14,9 +14,17 @@ class NoEligibleWorkerError(RuntimeError):
 
 
 class WorkerSelector:
-    def __init__(self, policy: RoutingPolicy, *, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        policy: RoutingPolicy,
+        *,
+        seed: int | None = None,
+        rr_offset: int = 0,
+    ) -> None:
         self.policy = policy
-        self._rr_index = 0
+        # rr_offset staggers round-robin starts across data-plane processes
+        # so N fresh DPs do not all herd onto worker 0 at once
+        self._rr_index = rr_offset
         self._random = random.Random(seed)
 
     def select(

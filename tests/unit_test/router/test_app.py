@@ -2877,3 +2877,135 @@ def test_max_connections_auto_at_cap_still_warns_when_pool_outgrows_it(
         config = RouterConfig(workers=workers)
     assert config.max_connections == 4096
     assert any("under-feed" in record.getMessage() for record in caplog.records)
+
+
+def test_route_registration_split_exposes_exact_route_sets() -> None:
+    from sglang_omni_router.app import (
+        register_admin_routes,
+        register_data_routes,
+        register_health_routes,
+        register_public_metadata_routes,
+    )
+
+    config = _router_config()
+    workers = build_workers(config.workers)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200))
+    )
+    proxy = proxy_module.ProxyHandler(
+        config=config,
+        workers=workers,
+        selector=WorkerSelector(config.policy),
+        client=client,
+    )
+
+    def _paths(register) -> set[str]:
+        app = FastAPI()
+        base = {route.path for route in app.routes}
+        register(app)
+        return {route.path for route in app.routes} - base
+
+    assert _paths(lambda app: register_health_routes(app, workers, proxy)) == {
+        "/live",
+        "/ready",
+        "/health",
+    }
+    assert _paths(
+        lambda app: register_admin_routes(app, workers, config, admin_api_key=None)
+    ) == {
+        "/workers",
+        "/workers/{worker_id:path}",
+        "/model_info",
+        "/pause_generation",
+        "/continue_generation",
+        "/update_weights_from_disk",
+        "/update_weights_from_tensor",
+        "/init_weights_update_group",
+        "/destroy_weights_update_group",
+        "/update_weights_from_distributed",
+        "/weights_checker",
+    }
+    assert _paths(
+        lambda app: register_public_metadata_routes(app, workers, config)
+    ) == {"/v1/models"}
+    assert _paths(lambda app: register_data_routes(app, proxy)) == {
+        "/generate",
+        "/v1/chat/completions",
+        "/v1/audio/speech",
+        "/v1/audio/transcriptions",
+    }
+
+
+def test_worker_crud_stays_unauthenticated_even_with_admin_key() -> None:
+    # Audit-frozen current behavior: worker CRUD carries no admin auth while
+    # the weight-update/broadcast routes do. The route split must not change
+    # this silently; changing it would be a separate, explicit behavior change.
+    app = _admin_router_app(admin_api_key=_ROUTER_ADMIN_API_KEY)
+    with TestClient(app) as client:
+        created = client.post("/workers", json={"url": "http://127.0.0.1:8199"})
+        assert created.status_code == 200
+        assert client.get("/workers").status_code == 200
+        worker_id = created.json()["worker"]["worker_id"]
+        assert (
+            client.put(f"/workers/{worker_id}", json={"disabled": True}).status_code
+            == 200
+        )
+        assert client.delete(f"/workers/{worker_id}").status_code == 200
+
+
+def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
+    # PoolTimeout means THIS router's pool is exhausted; it must shed with a
+    # retryable 503 and must not feed the worker-eviction signal
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        raise httpx.PoolTimeout("pool exhausted", request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client)
+    with TestClient(app) as client:
+        response = client.post("/generate", json={"prompt": "x"})
+        assert response.status_code == 503
+        assert response.json()["error"]["type"] == "overloaded_error"
+        assert "Retry-After" in response.headers
+        workers = client.get("/workers").json()["workers"]
+        assert all(w["consecutive_failures"] == 0 for w in workers)
+        assert all(w["health_state"] != "unhealthy" for w in workers)
+
+
+def test_worker_crud_holds_the_update_lock_through_its_mutation() -> None:
+    # the reject-while-updating guard is only sound if CRUD itself owns the
+    # lock across its awaits (health check) - otherwise a weight update can
+    # interleave mid-mutation
+    import threading
+
+    health_started = threading.Event()
+    release_health = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health" and "8199" in str(request.url):
+            health_started.set()
+            release_health.wait(timeout=5.0)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "healthy"})
+        return httpx.Response(200, json={"success": True})
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client)
+    with TestClient(app) as client:
+        result: list[int] = []
+        creator = threading.Thread(
+            target=lambda: result.append(
+                client.post(
+                    "/workers", json={"url": "http://127.0.0.1:8199"}
+                ).status_code
+            )
+        )
+        creator.start()
+        assert health_started.wait(timeout=5.0)
+        # mid-mutation (inside the new worker's health check): the lock is held
+        assert app.state.admin_update_lock.locked() is True
+        release_health.set()
+        creator.join(timeout=5.0)
+        assert result == [200]
+        assert app.state.admin_update_lock.locked() is False

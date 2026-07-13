@@ -225,12 +225,34 @@ class ProxyHandler:
         workers: list[Worker],
         selector: WorkerSelector,
         client: httpx.AsyncClient,
+        worker_provider: Callable[[], list[Worker]] | None = None,
+        on_worker_failure: (
+            Callable[[Worker, int | None, str | None], None] | None
+        ) = None,
+        admission: AdmissionController | None = None,
     ) -> None:
         self._config = config
         self._workers = workers
         self._selector = selector
         self._client = client
-        self._admission = AdmissionController(config.effective_max_inflight)
+        # admission accepts any object with the AdmissionController surface
+        # (try_acquire/release/inflight/to_dict), e.g. the shared-memory
+        # implementation in multi-process mode
+        self._admission = (
+            admission
+            if admission is not None
+            else AdmissionController(config.effective_max_inflight)
+        )
+        # Data-plane mode: workers come from the snapshot-fed view instead of
+        # the static list, and eviction-relevant failures are also reported
+        # to the control plane. Both default off (single-process mode).
+        self._worker_provider = worker_provider
+        self._on_worker_failure = on_worker_failure
+
+    def _current_workers(self) -> list[Worker]:
+        if self._worker_provider is not None:
+            return self._worker_provider()
+        return self._workers
 
     @property
     def admission(self) -> AdmissionController:
@@ -324,7 +346,9 @@ class ProxyHandler:
             )
 
         extra_capabilities, large_request_error = (
-            _large_request_extra_capabilities_or_error(self._workers, metadata)
+            _large_request_extra_capabilities_or_error(
+                self._current_workers(), metadata
+            )
         )
         if large_request_error is not None:
             self._log_route_rejection(
@@ -342,7 +366,7 @@ class ProxyHandler:
 
         try:
             worker = self._selector.select(
-                self._workers,
+                self._current_workers(),
                 required_capabilities=metadata.required_capabilities,
                 requested_model=metadata.model,
             )
@@ -384,6 +408,32 @@ class ProxyHandler:
         worker.increment_active()
         try:
             upstream = await self._client.send(upstream_request, stream=True)
+        except httpx.PoolTimeout:
+            # router-local pool contention, not a worker fault: do not feed
+            # the eviction signal (the pool-size invariant makes this
+            # unreachable for admitted model traffic, but auxiliary users of
+            # a shared client must not penalize a healthy worker)
+            worker.decrement_active()
+            worker.record_routed_request()
+            self._log_route_completion(
+                worker=worker,
+                path=path,
+                metadata=metadata,
+                status_code=503,
+                outcome="router_pool_exhausted",
+                start_time=start_time,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "router upstream pool exhausted",
+                        "type": "overloaded_error",
+                        "code": 503,
+                    }
+                },
+                headers={"Retry-After": _OVERLOAD_RETRY_AFTER_SECS},
+            )
         except httpx.HTTPError as exc:
             worker.decrement_active()
             worker.record_routed_request()
@@ -519,6 +569,8 @@ class ProxyHandler:
             f"status_code={status_code} error={error} "
             f"consecutive_failures={worker.consecutive_failures}",
         )
+        if self._on_worker_failure is not None:
+            self._on_worker_failure(worker, status_code, error)
 
     def _log_route_completion(
         self,

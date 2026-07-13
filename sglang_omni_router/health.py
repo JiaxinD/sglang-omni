@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from typing import Callable
 
 import httpx
 
@@ -22,11 +23,13 @@ class HealthChecker:
         workers: list[Worker],
         config: RouterConfig,
         client: httpx.AsyncClient,
+        on_tick: Callable[[], None] | None = None,
     ) -> None:
         self._workers = workers
         self._config = config
         self._client = client
         self._task: asyncio.Task[None] | None = None
+        self._on_tick = on_tick
 
     async def check_all_workers_health(self) -> None:
         workers = tuple(self._workers)
@@ -41,6 +44,8 @@ class HealthChecker:
                     f"health: {type(result).__name__}: {result}",
                     exc_info=(type(result), result, result.__traceback__),
                 )
+        if self._on_tick is not None:
+            self._on_tick()
 
     async def check_worker_health(self, worker: Worker) -> None:
         await self._check_worker_health(worker)

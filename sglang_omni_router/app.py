@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 
 import httpx
@@ -131,22 +131,17 @@ def register_routes(
     *,
     admin_api_key: str | None = None,
 ) -> None:
-    _auth = make_admin_auth_dependency(admin_api_key)
+    register_health_routes(app, workers, proxy)
+    register_admin_routes(app, workers, config, admin_api_key=admin_api_key)
+    register_public_metadata_routes(app, workers, config)
+    register_data_routes(app, proxy)
 
-    def _not_implemented_response() -> JSONResponse:
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": {
-                    "message": (
-                        "This weight update path is not yet implemented. "
-                        "Use /update_weights_from_disk for the disk-based update path."
-                    ),
-                    "code": "not_implemented",
-                }
-            },
-        )
 
+def register_health_routes(
+    app: FastAPI,
+    workers: list[Worker],
+    proxy: ProxyHandler,
+) -> None:
     @app.get("/live")
     async def live() -> JSONResponse:
         return JSONResponse({"status": "alive"})
@@ -167,6 +162,45 @@ def register_routes(
             unavailable_status="unhealthy",
             extra={"admission": proxy.admission.to_dict()},
         )
+
+
+def register_admin_routes(
+    app: FastAPI,
+    workers: list[Worker],
+    config: RouterConfig,
+    *,
+    admin_api_key: str | None = None,
+) -> None:
+    _auth = make_admin_auth_dependency(admin_api_key)
+
+    def _not_implemented_response() -> JSONResponse:
+        return JSONResponse(
+            status_code=501,
+            content={
+                "error": {
+                    "message": (
+                        "This weight update path is not yet implemented. "
+                        "Use /update_weights_from_disk for the disk-based update path."
+                    ),
+                    "code": "not_implemented",
+                }
+            },
+        )
+
+    def _registry_lock_or_reject(app: FastAPI):
+        # registry mutations must not race the weight-update disable/ACK/
+        # broadcast/restore interval; a held lock rejects instead of
+        # blocking CRUD for the whole update. The caller must acquire the
+        # returned lock IMMEDIATELY (no await in between): on a single
+        # event loop, locked() plus a fast-path acquire is atomic.
+        lock = getattr(app.state, "admin_update_lock", None)
+        if lock is None:
+            return None, None
+        if lock.locked():
+            return None, _error_response(
+                409, "a weight update is in progress; retry when it completes"
+            )
+        return lock, None
 
     @app.post("/workers")
     async def create_worker(request: Request) -> JSONResponse:
@@ -197,30 +231,47 @@ def register_routes(
             worker_config = WorkerConfig(**worker_config_kwargs)
         except ValidationError as exc:
             return _error_response(400, str(exc))
-        if any(worker.url == worker_config.url for worker in workers):
-            return _error_response(409, "worker already registered")
+        lock, rejected = _registry_lock_or_reject(app)
+        if rejected is not None:
+            return rejected
+        if lock is not None:
+            await lock.acquire()
+        try:
+            if any(worker.url == worker_config.url for worker in workers):
+                return _error_response(409, "worker already registered")
 
-        worker = Worker(config=worker_config)
-        workers.append(worker)
-        if config.max_connections < MIN_CONNECTIONS_PER_WORKER * len(workers):
-            logger.warning(
-                f"max_connections={config.max_connections} is below "
-                f"{MIN_CONNECTIONS_PER_WORKER} x {len(workers)} workers after "
-                "registration; the upstream client is sized at startup and can "
-                "under-feed the grown pool"
+            worker = Worker(config=worker_config)
+            workers.append(worker)
+            if config.max_connections < MIN_CONNECTIONS_PER_WORKER * len(workers):
+                logger.warning(
+                    f"max_connections={config.max_connections} is below "
+                    f"{MIN_CONNECTIONS_PER_WORKER} x {len(workers)} workers after "
+                    "registration; the upstream client is sized at startup and can "
+                    "under-feed the grown pool"
+                )
+            await app.state.health_checker.check_worker_health(worker)
+            logger.info(
+                f"worker_registered worker={worker.display_id} url={worker.url} "
+                f"model={worker.model or '-'} "
+                f"capabilities={','.join(sorted(worker.capabilities))} "
+                f"health_state={worker.state} disabled={worker.disabled}",
             )
-        await app.state.health_checker.check_worker_health(worker)
-        logger.info(
-            f"worker_registered worker={worker.display_id} url={worker.url} "
-            f"model={worker.model or '-'} "
-            f"capabilities={','.join(sorted(worker.capabilities))} "
-            f"health_state={worker.state} disabled={worker.disabled}",
-        )
-        return JSONResponse({"status": "ok", "worker": worker.to_dict()})
+            _notify_registry_change(app)
+            return JSONResponse({"status": "ok", "worker": worker.to_dict()})
+        finally:
+            if lock is not None:
+                lock.release()
 
     @app.get("/workers")
     async def list_workers() -> JSONResponse:
-        return JSONResponse(_pool_summary(workers, status="ok", include_workers=True))
+        return JSONResponse(
+            _pool_summary(
+                workers,
+                status="ok",
+                include_workers=True,
+                overlay=getattr(app.state, "worker_stats_overlay", None),
+            )
+        )
 
     @app.get("/workers/{worker_id:path}")
     async def get_worker(worker_id: str) -> JSONResponse:
@@ -234,10 +285,6 @@ def register_routes(
 
     @app.put("/workers/{worker_id:path}")
     async def update_worker(worker_id: str, request: Request) -> JSONResponse:
-        worker = _find_worker(workers, worker_id)
-        if worker is None:
-            return _error_response(404, "worker not found")
-
         payload, error = await _read_json_object(request)
         if error is not None:
             return error
@@ -263,6 +310,54 @@ def register_routes(
             if not isinstance(requested_disabled, bool):
                 return _error_response(400, "disabled must be a boolean")
 
+        lock, rejected = _registry_lock_or_reject(app)
+        if rejected is not None:
+            return rejected
+        if lock is not None:
+            await lock.acquire()
+        try:
+            return await _apply_worker_update(
+                worker_id,
+                payload,
+                requested_is_dead,
+                requested_disabled,
+                request,
+            )
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _discard_needs_admin_auth(resolved_worker_id: str) -> bool:
+        # re-enabling a worker that a crashed update left disabled discards
+        # its journal entry (an operator asserting its weights are verified);
+        # that is admin-sensitive even though ordinary worker CRUD is not
+        journal = getattr(app.state, "update_journal", None)
+        if journal is None or not admin_api_key:
+            return False
+        try:
+            return resolved_worker_id in journal.pending()
+        except Exception:
+            return True  # unreadable journal: require auth to touch it
+
+    async def _apply_worker_update(
+        worker_id: str,
+        payload: dict,
+        requested_is_dead: bool | None,
+        requested_disabled: bool | None,
+        request: Request,
+    ) -> JSONResponse:
+        worker = _find_worker(workers, worker_id)
+        if (
+            requested_disabled is False
+            and worker is not None
+            and _discard_needs_admin_auth(worker.worker_id)
+        ):
+            try:
+                await _auth(authorization=request.headers.get("authorization"))
+            except HTTPException as exc:
+                return _error_response(exc.status_code, str(exc.detail))
+        if worker is None:
+            return _error_response(404, "worker not found")
         next_config = worker.config
 
         if "capabilities" in payload or "model" in payload:
@@ -285,6 +380,11 @@ def register_routes(
 
         if requested_disabled is not None:
             worker.set_disabled(requested_disabled)
+            if requested_disabled is False:
+                journal = getattr(app.state, "update_journal", None)
+                if journal is not None:
+                    # operator verified this worker's weights: resolve it
+                    journal.discard(worker.worker_id)
 
         if requested_is_dead is not None:
             if requested_is_dead:
@@ -299,10 +399,23 @@ def register_routes(
             f"capabilities={','.join(sorted(worker.capabilities))} "
             f"health_state={worker.state} disabled={worker.disabled}",
         )
+        _notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker": worker.to_dict()})
 
     @app.delete("/workers/{worker_id:path}")
     async def delete_worker(worker_id: str) -> JSONResponse:
+        lock, rejected = _registry_lock_or_reject(app)
+        if rejected is not None:
+            return rejected
+        if lock is not None:
+            await lock.acquire()
+        try:
+            return _apply_worker_delete(worker_id)
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _apply_worker_delete(worker_id: str) -> JSONResponse:
         worker = _find_worker(workers, worker_id)
         if worker is None:
             return _error_response(404, "worker not found")
@@ -311,16 +424,8 @@ def register_routes(
             f"worker_deleted worker={worker.display_id} url={worker.url} "
             f"model={worker.model or '-'}",
         )
+        _notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker_id": worker.worker_id})
-
-    @app.get("/v1/models")
-    async def models(request: Request) -> JSONResponse:
-        return await _merge_models(
-            workers,
-            app.state.http_client,
-            request,
-            timeout_secs=config.health_check_timeout_secs,
-        )
 
     @app.get("/model_info", dependencies=[Depends(_auth)])
     async def model_info(request: Request) -> JSONResponse:
@@ -382,21 +487,52 @@ def register_routes(
     async def weights_checker(request: Request) -> JSONResponse:
         return await _broadcast_admin_request(app, request, "/weights_checker")
 
+
+def register_public_metadata_routes(
+    app: FastAPI,
+    workers: list[Worker],
+    config: RouterConfig,
+) -> None:
+    @app.get("/v1/models")
+    async def models(request: Request) -> JSONResponse:
+        return await _merge_models(
+            workers,
+            app.state.http_client,
+            request,
+            timeout_secs=config.health_check_timeout_secs,
+        )
+
+
+def register_data_routes(
+    app: FastAPI,
+    proxy: ProxyHandler,
+    *,
+    gate: Callable[[], Response | None] | None = None,
+) -> None:
+    # gate: data-plane pre-check (e.g. stale-snapshot shedding); returning a
+    # response short-circuits the relay. None (single-process mode) is a no-op.
+    async def _forward(request: Request, path: str) -> Response:
+        if gate is not None:
+            gated = gate()
+            if gated is not None:
+                return gated
+        return await proxy.forward_model_request(request, path)
+
     @app.post("/generate")
     async def generate(request: Request) -> Response:
-        return await proxy.forward_model_request(request, "/generate")
+        return await _forward(request, "/generate")
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
-        return await proxy.forward_model_request(request, "/v1/chat/completions")
+        return await _forward(request, "/v1/chat/completions")
 
     @app.post("/v1/audio/speech")
     async def audio_speech(request: Request) -> Response:
-        return await proxy.forward_model_request(request, "/v1/audio/speech")
+        return await _forward(request, "/v1/audio/speech")
 
     @app.post("/v1/audio/transcriptions")
     async def audio_transcriptions(request: Request) -> Response:
-        return await proxy.forward_model_request(request, "/v1/audio/transcriptions")
+        return await _forward(request, "/v1/audio/transcriptions")
 
 
 def _pool_summary(
@@ -404,6 +540,7 @@ def _pool_summary(
     *,
     status: str,
     include_workers: bool = True,
+    overlay: Callable[[Worker], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     healthy = sum(1 for worker in workers if worker.is_healthy)
     dead = sum(1 for worker in workers if worker.is_dead)
@@ -422,7 +559,13 @@ def _pool_summary(
         "total_workers": len(workers),
     }
     if include_workers:
-        payload["workers"] = [worker.to_dict() for worker in workers]
+        if overlay is None:
+            payload["workers"] = [worker.to_dict() for worker in workers]
+        else:
+            # CP mode: merge the DP counter aggregate over the local fields
+            payload["workers"] = [
+                {**worker.to_dict(), **overlay(worker)} for worker in workers
+            ]
     return payload
 
 
@@ -432,14 +575,41 @@ def _worker_pool_status_response(
     available_status: str,
     unavailable_status: str,
     extra: dict[str, Any] | None = None,
+    overlay: Callable[[Worker], dict[str, Any]] | None = None,
 ) -> JSONResponse:
     routable = sum(1 for worker in workers if worker.is_routable)
     status_code = 200 if routable > 0 else 503
     status = available_status if routable > 0 else unavailable_status
-    payload = _pool_summary(workers, status=status)
+    payload = _pool_summary(workers, status=status, overlay=overlay)
     if extra:
         payload.update(extra)
     return JSONResponse(payload, status_code=status_code)
+
+
+def _notify_registry_change(app: FastAPI) -> None:
+    # Control-plane hook: republish the worker snapshot after any registry
+    # mutation. Unset (single-process mode) this is a no-op.
+    callback = getattr(app.state, "on_registry_change", None)
+    if callback is not None:
+        callback()
+
+
+async def _await_dp_snapshot_ack(app: FastAPI) -> JSONResponse | None:
+    # Control-plane hook: before broadcasting a weight update, wait until all
+    # live data planes acknowledged the just-published disabled-worker
+    # snapshot. Unset (single-process mode) this is a no-op.
+    barrier = getattr(app.state, "dp_snapshot_ack_barrier", None)
+    if barrier is None:
+        return None
+    acked, pending = await barrier()
+    if acked:
+        return None
+    return _error_response(
+        503,
+        f"weight update aborted: data planes {pending} did not acknowledge "
+        "the disabled-worker snapshot within the ack timeout; no broadcast "
+        "was sent",
+    )
 
 
 async def _broadcast_admin_request(
@@ -479,6 +649,29 @@ async def _broadcast_admin_request(
                 "another update operation may be in progress",
             )
         try:
+            journal = getattr(app.state, "update_journal", None)
+            if journal is not None and journal.has_pending():
+                return _error_response(
+                    409,
+                    "an earlier weight update did not complete; verify the "
+                    "journaled workers' weight versions, re-enable them "
+                    "(admin-authenticated PUT /workers {disabled: false}), "
+                    "then retry",
+                )
+            # re-resolve the target set under the lock: membership may have
+            # changed while this request waited for a previous update
+            target_workers = [worker for worker in workers if not worker.is_dead]
+            if not target_workers:
+                return _error_response(503, "no live upstream workers")
+            if path == "/init_weights_update_group" and len(target_workers) > 1:
+                return _error_response(
+                    422,
+                    "distributed weight-update init currently supports a "
+                    "single-replica target stage, but "
+                    f"{len(target_workers)} live workers were targeted; "
+                    "multi-replica refit needs a distinct rank_offset per "
+                    "replica.",
+                )
             return await _broadcast_admin_request_locked(
                 app,
                 request,
@@ -509,11 +702,29 @@ async def _broadcast_admin_request_locked(
     body = await request.body()
     headers = filter_request_headers(request)
     previous_disabled = {worker.worker_id: worker.disabled for worker in workers}
+    # `results` distinguishes three outcomes for the journal/restore logic:
+    #   None -> crashed/cancelled after the broadcast started, outcome
+    #           UNKNOWN: keep targets disabled and journaled (fail closed).
+    #   []   -> the ACK barrier aborted before anything was sent: no weight
+    #           change happened, restore fully and clear the journal.
+    #   list -> the broadcast completed and the caller sees per-worker
+    #           results: the outcome is known, restore and clear.
     results: list[dict[str, Any]] | None = None
+    journal = getattr(app.state, "update_journal", None)
+    if disable_targets and journal is not None:
+        # durable BEFORE disabling/publishing, so even a crash in the
+        # disable/publish window fails closed on recovery
+        journal.begin(path, [worker.worker_id for worker in workers])
     if disable_targets:
         for worker in workers:
             worker.set_disabled(True)
+        _notify_registry_change(app)
     try:
+        if disable_targets:
+            ack_error = await _await_dp_snapshot_ack(app)
+            if ack_error is not None:
+                results = []  # nothing was sent
+                return ack_error
         results = await asyncio.gather(
             *[
                 _send_admin_to_worker(
@@ -529,7 +740,20 @@ async def _broadcast_admin_request_locked(
         )
     finally:
         if disable_targets:
-            _restore_admin_disabled_state(path, workers, previous_disabled, results)
+            outcome_known = results is not None
+            _restore_admin_disabled_state(
+                path, workers, previous_disabled, results, outcome_known
+            )
+            _notify_registry_change(app)
+            if journal is not None:
+                if outcome_known:
+                    # ACK abort ([]) or a completed broadcast (list): the
+                    # outcome is known to the caller, so nothing is uncertain
+                    journal.clear()
+                else:
+                    # crashed after the broadcast started: every target's
+                    # weight version is uncertain, keep the whole set
+                    journal.keep([worker.worker_id for worker in workers])
 
     success = all(item["success"] for item in results)
     if path == "/model_info":
@@ -550,17 +774,23 @@ def _restore_admin_disabled_state(
     workers: list[Worker],
     previous_disabled: dict[str, bool],
     results: list[dict[str, Any]] | None,
+    outcome_known: bool,
 ) -> None:
+    if not outcome_known:
+        # crashed/cancelled after the broadcast started: the outcome is
+        # unknown for EVERY target, so none may be re-enabled (fail closed,
+        # not just for init_weights_update_group)
+        for worker in workers:
+            worker.set_disabled(True)
+        return
+
     keep_disabled_urls: set[str] = set()
-    if path == "/init_weights_update_group":
-        if results is None:
-            keep_disabled_urls = {worker.url for worker in workers}
-        else:
-            keep_disabled_urls = {
-                str(item.get("worker"))
-                for item in results
-                if item.get("success") is not True
-            }
+    if path == "/init_weights_update_group" and results:
+        keep_disabled_urls = {
+            str(item.get("worker"))
+            for item in results
+            if item.get("success") is not True
+        }
 
     for worker in workers:
         if worker.url in keep_disabled_urls:
