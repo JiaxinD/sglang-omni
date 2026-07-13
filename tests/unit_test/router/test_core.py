@@ -1096,3 +1096,42 @@ def test_nofile_check_follows_the_upstream_pool_size(
     # cannot help; the remediation must name --max-inflight.
     assert "max(--max-connections=64, --max-inflight=800)" in caplog.text
     assert "lower --max-inflight" in caplog.text
+
+
+def test_nofile_check_explicit_tie_recommends_both_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(serve_module, "_read_nofile_soft_limit", lambda: 1024)
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=512,
+        max_inflight=512,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="sglang_omni_router.serve"):
+        serve_module.check_file_descriptor_limit(config)
+
+    # Both flags are explicitly set to the value that binds max(512, 512), so
+    # lowering only one leaves the other holding the pool; recommend both.
+    assert "nofile soft limit 1024 is below 1088" in caplog.text
+    assert "lower both --max-connections and --max-inflight" in caplog.text
+
+
+def test_nofile_check_derived_tie_recommends_max_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(serve_module, "_read_nofile_soft_limit", lambda: 1024)
+    # max_inflight unset: effective_max_inflight derives from max_connections, so
+    # lowering --max-connections also lowers the admission bound and clears it.
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=512,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="sglang_omni_router.serve"):
+        serve_module.check_file_descriptor_limit(config)
+
+    assert "lower --max-connections" in caplog.text
+    assert "lower both" not in caplog.text
