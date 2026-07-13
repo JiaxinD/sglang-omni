@@ -52,15 +52,25 @@ def check_file_descriptor_limit(config: RouterConfig, *, strict: bool = False) -
     soft_limit = _read_nofile_soft_limit()
     if soft_limit is None:
         return
-    required = 2 * config.upstream_pool_size + _NOFILE_HEADROOM
+    pool_size = config.upstream_pool_size
+    required = 2 * pool_size + _NOFILE_HEADROOM
     if soft_limit >= required:
         return
+    # Note (Jiaxin Deng): the pool is max(max_connections, max_inflight); name the
+    # flag that actually drives it, otherwise lowering the smaller one cannot
+    # change the resolved pool size and the warning never clears.
+    max_connections = config.max_connections
+    max_inflight = config.effective_max_inflight
+    remediation_flag = (
+        "--max-inflight" if max_inflight > max_connections else "--max-connections"
+    )
     message = (
         f"nofile soft limit {soft_limit} is below {required} "
-        f"(2 x upstream_pool_size={config.upstream_pool_size} + "
-        f"{_NOFILE_HEADROOM} headroom); under load the relay exhausts file "
+        f"(2 x upstream_pool_size={pool_size} + {_NOFILE_HEADROOM} headroom, where "
+        f"upstream_pool_size = max(--max-connections={max_connections}, "
+        f"--max-inflight={max_inflight})); under load the relay exhausts file "
         f"descriptors and clients see raw connection errors. Raise the limit "
-        f"(ulimit -n {required}) or lower --max-connections."
+        f"(ulimit -n {required}) or lower {remediation_flag}."
     )
     if strict:
         raise ValueError(message)
@@ -146,8 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-limits",
         action="store_true",
         help=(
-            "Fail startup instead of warning when system limits (nofile soft "
-            "limit) are too low for the configured --max-connections."
+            "Fail startup instead of warning when the nofile soft limit is too "
+            "low for the resolved upstream pool size "
+            "(max of --max-connections and --max-inflight)."
         ),
     )
     parser.add_argument(

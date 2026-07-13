@@ -7,6 +7,7 @@ import asyncio
 import logging
 import time
 import weakref
+from collections.abc import Callable
 from http import HTTPStatus
 
 import httpx
@@ -53,13 +54,13 @@ RESPONSE_HEADERS_TO_STRIP = HOP_BY_HOP_HEADERS | {
 BUFFERED_RESPONSE_HEADERS_TO_STRIP = RESPONSE_HEADERS_TO_STRIP | {
     "content-encoding",
 }
-# Note (Jiaxin Deng): 500 is excluded: workers answer deterministic bad inputs
-# with 500, so counting it toward eviction lets one bad client drain the pool.
+# Note (Jiaxin Deng): liveness is owned by /health probes; a relayed status
+# evicts only on gateway failure (502/504). Capacity backpressure (429/503),
+# request timeouts (408), and bad-input 500s are per-request failures counted in
+# worker stats, so one overloaded or bad-input client cannot cascade the pool
+# unhealthy.
 WORKER_EVICTION_STATUS_CODES = {
-    HTTPStatus.REQUEST_TIMEOUT.value,
-    HTTPStatus.TOO_MANY_REQUESTS.value,
     HTTPStatus.BAD_GATEWAY.value,
-    HTTPStatus.SERVICE_UNAVAILABLE.value,
     HTTPStatus.GATEWAY_TIMEOUT.value,
 }
 
@@ -129,6 +130,63 @@ class _ReleaseOnce:
             return
         self._released = True
         self._admission.release()
+
+
+class _RelayCleanup:
+    """Idempotent teardown for one streamed relay.
+
+    Closes the upstream stream, decrements the worker in-flight count, releases
+    the admission slot, and records completion exactly once, whichever path
+    finishes the response: the body iterator (normal completion, mid-stream
+    error, or cancellation) or the response ``__call__`` when ``send`` fails on
+    ``http.response.start`` before the iterator ever runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        upstream: httpx.Response,
+        worker: Worker,
+        release: _ReleaseOnce,
+        record_completion: Callable[[str], None],
+    ) -> None:
+        self._upstream = upstream
+        self._worker = worker
+        self._release = release
+        self._record_completion = record_completion
+        self._done = False
+
+    async def __call__(self, outcome: str) -> None:
+        if self._done:
+            return
+        self._done = True
+        # aclose() raising on a broken mid-stream connection must not skip the
+        # decrement, otherwise least_request drifts permanently.
+        try:
+            await self._upstream.aclose()
+        finally:
+            self._worker.decrement_active()
+            self._release()
+            self._record_completion(outcome)
+
+
+class _RelayResponse(StreamingResponse):
+    """Streaming relay response that cleans up even if the body never streams.
+
+    Starlette sends ``http.response.start`` before it iterates the body, so a
+    client disconnect (or any ``send`` failure) during that first send skips the
+    iterator's ``finally``. This ``__call__`` is the cleanup owner for that path.
+    """
+
+    def __init__(self, *args, cleanup: _RelayCleanup, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._cleanup = cleanup
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._cleanup("client_disconnected")
 
 
 def filter_request_headers(request: Request) -> dict[str, str]:
@@ -207,13 +265,12 @@ class ProxyHandler:
         except BaseException:
             release()
             raise
-        # The streaming relay hands its slot to the response iterator; every
-        # other path is done with it as soon as the response object exists.
+        # Note (Jiaxin Deng): a streamed relay releases its slot from the cleanup
+        # owner (iterator or __call__ finally); other responses release once built.
+        # The finalizer is only a GC backstop if the ASGI stack never calls it.
         if not isinstance(response, StreamingResponse):
             release()
         else:
-            # Note (Jiaxin Deng): if the ASGI stack drops the response without
-            # ever starting the iterator, GC frees the slot (release is idempotent).
             weakref.finalize(response, release)
         return response
 
@@ -375,6 +432,25 @@ class ProxyHandler:
             "text/event-stream"
         )
 
+        def record_completion(outcome: str) -> None:
+            status_code = upstream.status_code if outcome == "completed" else None
+            worker.record_routed_request(status_code=status_code)
+            self._log_route_completion(
+                worker=worker,
+                path=path,
+                metadata=metadata,
+                status_code=upstream.status_code,
+                outcome=outcome,
+                start_time=start_time,
+            )
+
+        cleanup = _RelayCleanup(
+            upstream=upstream,
+            worker=worker,
+            release=release,
+            record_completion=record_completion,
+        )
+
         async def iter_bytes():
             outcome = _response_outcome(upstream.status_code)
             try:
@@ -391,26 +467,7 @@ class ProxyHandler:
                     return
                 raise
             finally:
-                # Note (Jiaxin Deng): decrement the in-flight count (and record
-                # completion) even if aclose() raises on a broken mid-stream
-                # connection, otherwise least_request drifts permanently.
-                try:
-                    await upstream.aclose()
-                finally:
-                    worker.decrement_active()
-                    release()
-                    status_code = (
-                        upstream.status_code if outcome == "completed" else None
-                    )
-                    worker.record_routed_request(status_code=status_code)
-                    self._log_route_completion(
-                        worker=worker,
-                        path=path,
-                        metadata=metadata,
-                        status_code=upstream.status_code,
-                        outcome=outcome,
-                        start_time=start_time,
-                    )
+                await cleanup(outcome)
 
         try:
             headers = filter_response_headers(upstream.headers, buffered=not stream)
@@ -424,11 +481,12 @@ class ProxyHandler:
             if stream
             else upstream.headers.get("content-type")
         )
-        return StreamingResponse(
+        return _RelayResponse(
             iter_bytes(),
             status_code=upstream.status_code,
             headers=headers,
             media_type=media_type,
+            cleanup=cleanup,
         )
 
     def _diagnostic_headers(

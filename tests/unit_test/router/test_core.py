@@ -972,6 +972,9 @@ def test_nofile_check_warns_when_soft_limit_too_low(
 
     assert "nofile soft limit 1024 is below 1088" in caplog.text
     assert "ulimit -n 1088" in caplog.text
+    # max_connections drives the pool here, so it is the flag to lower.
+    assert "max(--max-connections=512, --max-inflight=512)" in caplog.text
+    assert "lower --max-connections" in caplog.text
 
 
 def test_nofile_check_silent_when_soft_limit_sufficient(
@@ -1089,3 +1092,7 @@ def test_nofile_check_follows_the_upstream_pool_size(
         serve_module.check_file_descriptor_limit(config)
 
     assert "nofile soft limit 1024 is below 1664" in caplog.text
+    # max_inflight (800) drives max(64, 800), so lowering --max-connections
+    # cannot help; the remediation must name --max-inflight.
+    assert "max(--max-connections=64, --max-inflight=800)" in caplog.text
+    assert "lower --max-inflight" in caplog.text

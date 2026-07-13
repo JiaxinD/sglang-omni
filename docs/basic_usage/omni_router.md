@@ -196,7 +196,7 @@ The table below lists the router command-line arguments.
 | `--health-check-interval-secs` | `10` | Interval between background worker health checks. |
 | `--health-check-endpoint` | `/health` | Worker endpoint used by background health checks. |
 | `--log-level` | `info` | Router and Uvicorn log level. |
-| `--strict-limits` | off | Fail startup instead of warning when the `nofile` soft limit is too low for `--max-connections`. |
+| `--strict-limits` | off | Fail startup instead of warning when the `nofile` soft limit is too low for the resolved upstream pool size (`max(--max-connections, --max-inflight)`). |
 
 Routing policies:
 
@@ -419,20 +419,27 @@ Sizing guidance:
   `capacity x acceptable latency` for your payload shape.
 - Each in-flight request holds two file descriptors (client plus upstream). The
   router warns at startup when the `nofile` soft limit is below
-  `2 x upstream pool size + headroom`; `--strict-limits` turns the warning into
-  a startup error.
+  `2 x upstream pool size + headroom`, where the pool size is
+  `max(--max-connections, --max-inflight)`. Raise the limit, or lower whichever
+  of the two flags binds the pool (the warning names it); `--strict-limits`
+  turns the warning into a startup error.
 - A rejected request costs the client its keep-alive connection (the router
   responds before reading the body), so clients should back off on `503` rather
   than immediately retrying on a fresh connection.
 
 ## Failure Handling
 
-If a worker health check fails repeatedly, or routed requests fail repeatedly at
-the transport level (connection errors, timeouts, gateway statuses), the worker
-becomes unhealthy and leaves the routable pool. Relayed HTTP `500` responses are
-treated as per-request failures and do not evict the worker; a worker that is
-genuinely stuck answering `500` is caught by the health-check path. A worker can
-return to healthy after the configured number of successful health checks.
+Worker liveness is owned by the background `/health` probes. A relayed request
+only marks a worker unhealthy when the router cannot get a usable response from
+it: a transport-level failure (connection error or read timeout, with no HTTP
+response) or a gateway status the worker returns, `502 Bad Gateway` or `504
+Gateway Timeout`. Capacity backpressure and application statuses the worker
+answers with itself, `429 Too Many Requests`, `503 Service Unavailable`, `408
+Request Timeout`, and `500 Internal Server Error`, are counted as per-request
+failures in the worker statistics but never evict a reachable worker, so one
+overloaded worker or a stream of bad-input requests cannot cascade the pool into
+unavailability. A worker that leaves the pool can return to healthy after the
+configured number of successful health checks.
 
 To inspect failover behavior:
 
