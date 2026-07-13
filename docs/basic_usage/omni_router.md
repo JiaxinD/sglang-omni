@@ -457,6 +457,58 @@ point with:
 python -m sglang_omni_router.serve --help
 ```
 
+## Multi-Process Router (Control/Data-Plane Split)
+
+> Linux only. Enabled with `--router-processes N`; the default `1` keeps the
+> single-process router described above, unchanged.
+
+At `N >= 2` the router runs as a small process tree:
+
+- A **supervisor** binds the public port once and passes the listening socket
+  to `N` **data-plane (DP)** processes, which accept from the shared queue and
+  relay the model routes (`/generate`, `/v1/chat/completions`,
+  `/v1/audio/speech`, `/v1/audio/transcriptions`).
+- One **control plane (CP)** owns the worker registry, health checks, and the
+  admin surface. DPs learn the routable-worker set from a snapshot file the CP
+  republishes on every state change and on a fixed keepalive cadence. Admin
+  requests sent to the public port are forwarded to the CP, which enforces the
+  admin key; `/v1/models`, `/live`, and `/ready` are answered by the DP
+  itself, `/health` is the CP's aggregate view.
+- The supervisor restarts crashed children (with a fail-closed budget for
+  rapid crash loops), fences replaced processes by generation, and tears the
+  tree down in order on SIGTERM.
+
+Behavior differences to know about:
+
+- **The admission bound is shared and soft.** The in-flight bound spans all
+  DPs through a shared-memory counter array. Concurrent admission checks can
+  overshoot the bound by at most `N - 1` requests. In `/health`, `inflight` is
+  an instantaneous sum (not a linearizable value), `rejected_total` is exact,
+  and `peak_inflight` is best-effort.
+- **`least_request` requires a single process.** It reads per-process
+  counters, so `--router-processes >= 2` combined with an explicit
+  `--policy least_request` fails at startup; use `round_robin` (DPs stagger
+  their starting offsets to avoid herding) or `random`.
+- **CP unavailability degrades before it fails.** DPs keep serving from their
+  last snapshot for the stale timeout, then shed new requests with fast `503`s
+  and flip `/ready`; one republish restores service. `/health` reports
+  `degraded` while some DPs are missing and `503` only when nothing can serve.
+- **Worker weight updates wait for the data planes.** Before broadcasting, the
+  CP publishes the disabled-worker snapshot and waits until every live DP has
+  acknowledged it; on timeout the update fails closed and nothing is sent.
+- **Counters are aggregated.** `/workers` totals are summed across DPs and
+  stay monotonic across DP restarts; `active_requests` is a best-effort gauge
+  over live DPs. Counters reset with the CP, matching single-process restarts.
+- **File descriptors scale with `N`.** Each DP holds a full-size upstream pool
+  (a skewed keep-alive client mix can pin the whole bound onto one DP, which
+  must still carry it) with keep-alives split `pool / N`; the startup log
+  prints the per-process and cluster fd budget for the nofile check.
+
+CPU affinity guidance for dense deployments: pin the `N` DP processes to `N`
+dedicated cores on one NUMA node; the CP and supervisor are near-idle and can
+share one core; keep model workers and benchmark clients on other cores (or
+the other NUMA node) so relay throughput is not contended.
+
 ## Troubleshooting
 
 Check the Router and worker pool before restarting any process — see
