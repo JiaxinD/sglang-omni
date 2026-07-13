@@ -7,6 +7,7 @@ import argparse
 import copy
 import logging
 import logging.config
+import os
 import shlex
 from collections.abc import Sequence
 from typing import Any, get_args
@@ -29,6 +30,7 @@ from sglang_omni_router.launcher import (
     LocalLauncherConfig,
     load_launcher_config,
 )
+from sglang_omni_router.supervisor import RouterSupervisor
 
 logger = logging.getLogger("sglang_omni_router.serve")
 
@@ -150,6 +152,16 @@ def build_parser() -> argparse.ArgumentParser:
             "sized to the larger of the two."
         ),
     )
+    parser.add_argument(
+        "--router-processes",
+        type=int,
+        default=1,
+        help=(
+            "Number of data-plane processes. 1 (default) keeps the current "
+            "single-process router. Values >= 2 run the multi-process "
+            "control-plane/data-plane split (Linux only)."
+        ),
+    )
     parser.add_argument("--health-failure-threshold", type=int, default=3)
     parser.add_argument("--health-success-threshold", type=int, default=2)
     parser.add_argument("--health-check-timeout-secs", type=int, default=5)
@@ -251,6 +263,8 @@ def resolve_managed_worker_capabilities(
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.router_processes < 1:
+        parser.error("--router-processes must be >= 1")
     log_level = normalize_log_level(args.log_level)
     log_config = build_log_config(args.log_level)
     logging.config.dictConfig(log_config)
@@ -274,6 +288,32 @@ def main(argv: Sequence[str] | None = None) -> None:
             config = build_config_from_args(args)
 
         check_file_descriptor_limit(config, strict=args.strict_limits)
+        if args.router_processes > 1:
+            # control-plane/data-plane split: the supervisor owns the public
+            # socket, the managed-worker launcher, and the process tree
+            if args.admin_api_key:
+                os.environ["SGLANG_OMNI_ADMIN_KEY"] = args.admin_api_key
+            # propagate the log level so CP/DP children are not stuck on the
+            # hard-coded default
+            os.environ["SGLANG_OMNI_ROUTER_LOG_LEVEL"] = log_level
+            logger.info(
+                f"Starting SGLang-Omni Router (multi-process) on "
+                f"{config.host}:{config.port} with "
+                f"{args.router_processes} data planes"
+            )
+            supervisor = RouterSupervisor(
+                config, router_processes=args.router_processes
+            )
+            supervisor.start()
+            try:
+                supervisor.run_forever()
+            except KeyboardInterrupt:
+                parser.exit(130)
+            # run_forever installs its own SIGINT handler and returns cleanly;
+            # preserve the interrupted exit status after the orderly shutdown
+            if supervisor.stopped_by_interrupt:
+                parser.exit(130)
+            return
         logger.info(f"Starting SGLang-Omni Router on {config.host}:{config.port}")
         logger.info(
             f"Router configuration: workers={len(config.workers)} | "

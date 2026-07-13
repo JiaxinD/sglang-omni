@@ -1135,3 +1135,113 @@ def test_nofile_check_derived_tie_recommends_max_connections(
 
     assert "lower --max-connections" in caplog.text
     assert "lower both" not in caplog.text
+
+
+def test_router_processes_defaults_to_one() -> None:
+    args = build_parser().parse_args(["--worker-urls", "http://127.0.0.1:8101"])
+    assert args.router_processes == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_router_processes_rejects_non_positive(
+    value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        serve_module.main(
+            ["--worker-urls", "http://127.0.0.1:8101", "--router-processes", value]
+        )
+    assert "--router-processes must be >= 1" in capsys.readouterr().err
+
+
+def test_router_processes_multiprocess_runs_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict = {}
+
+    class _FakeSupervisor:
+        def __init__(self, config, *, router_processes):
+            calls["config"] = config
+            calls["router_processes"] = router_processes
+
+        def start(self):
+            calls["started"] = True
+
+        def run_forever(self):
+            calls["ran"] = True
+
+        stopped_by_interrupt = False
+
+    monkeypatch.setattr(serve_module, "RouterSupervisor", _FakeSupervisor)
+    # serve.main sets SGLANG_OMNI_ADMIN_KEY via os.environ directly to pass the
+    # CLI admin key to the CP child. setenv-then-delenv makes monkeypatch own
+    # the key (recorded original = absent) so it is restored at teardown and
+    # cannot leak into other tests, even though the code mutates os.environ.
+    monkeypatch.setenv("SGLANG_OMNI_ADMIN_KEY", "__owned_by_monkeypatch__")
+    monkeypatch.delenv("SGLANG_OMNI_ADMIN_KEY")
+    serve_module.main(
+        [
+            "--worker-urls",
+            "http://127.0.0.1:8101",
+            "--router-processes",
+            "2",
+            "--admin-api-key",
+            "cli-admin-key",
+        ]
+    )
+    assert calls["router_processes"] == 2
+    assert calls["config"].workers[0].url == "http://127.0.0.1:8101"
+    assert calls["started"] and calls["ran"]
+    # a CLI-provided admin key must reach the CP child through the env
+    import os
+
+    assert os.environ["SGLANG_OMNI_ADMIN_KEY"] == "cli-admin-key"
+
+
+def test_app_factory_rebuilds_config_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sglang_omni_router import app_factory
+
+    config = RouterConfig(
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        max_connections=64,
+        max_inflight=128,
+    )
+    config_path = tmp_path / "router_config.json"
+    config_path.write_text(config.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv(app_factory.CONFIG_FILE_ENV, str(config_path))
+
+    loaded = app_factory.load_config_from_env()
+
+    assert loaded == config
+    assert loaded.effective_max_inflight == config.effective_max_inflight
+    assert loaded.upstream_pool_size == config.upstream_pool_size
+
+
+def test_app_factory_builds_the_same_app_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sglang_omni_router import app_factory
+    from sglang_omni_router.app import create_app
+
+    config = RouterConfig(workers=[WorkerConfig(url="http://127.0.0.1:8101")])
+    config_path = tmp_path / "router_config.json"
+    config_path.write_text(config.model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv(app_factory.CONFIG_FILE_ENV, str(config_path))
+
+    app = app_factory.create_app_from_env()
+    reference = create_app(config)
+
+    assert {route.path for route in app.routes} == {
+        route.path for route in reference.routes
+    }
+
+
+def test_app_factory_requires_the_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni_router import app_factory
+
+    monkeypatch.delenv(app_factory.CONFIG_FILE_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="SGLANG_OMNI_ROUTER_CONFIG_FILE"):
+        app_factory.load_config_from_env()
