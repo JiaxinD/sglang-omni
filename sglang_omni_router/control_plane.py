@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import mmap
+import os
 import time
 from contextlib import asynccontextmanager
+from typing import cast
 
 import httpx
 from fastapi import Depends, FastAPI
@@ -39,7 +41,7 @@ from sglang_omni_router.app import (
     register_admin_routes,
     register_public_metadata_routes,
 )
-from sglang_omni_router.config import RouterConfig
+from sglang_omni_router.config import RouterConfig, WorkerConfig
 from sglang_omni_router.health import HealthChecker
 from sglang_omni_router.internal_channel import (
     InternalChannelState,
@@ -51,13 +53,13 @@ from sglang_omni_router.observability import (
     DataPlaneCounterLedger,
     StaleCounterGenerationError,
 )
-from sglang_omni_router.snapshot import SnapshotWorker, SnapshotWriter
+from sglang_omni_router.snapshot import SnapshotReader, SnapshotWorker, SnapshotWriter
 from sglang_omni_router.update_journal import (
     JournalUnreadableError,
     UpdateJournal,
     default_journal_path,
 )
-from sglang_omni_router.worker import Worker, build_workers
+from sglang_omni_router.worker import Worker, WorkerState, build_workers
 
 logger = logging.getLogger("sglang_omni_router.control_plane")
 
@@ -100,6 +102,31 @@ def snapshot_workers(workers: list[Worker]) -> list[SnapshotWorker]:
     ]
 
 
+def restore_workers(snapshot_path: str, config: RouterConfig) -> list[Worker]:
+    if not os.path.exists(snapshot_path):
+        return build_workers(config.workers)
+
+    reader = SnapshotReader(snapshot_path)
+    if not reader.maybe_reload() or reader.snapshot is None:
+        raise RuntimeError(f"cannot recover worker registry from {snapshot_path}")
+
+    workers = []
+    for entry in reader.snapshot.workers:
+        worker = Worker(
+            config=WorkerConfig(
+                url=entry.url,
+                model=entry.model,
+                capabilities=set(entry.capabilities),
+            )
+        )
+        if entry.incarnation:
+            worker.incarnation = entry.incarnation
+        worker.state = cast(WorkerState, entry.state)
+        worker.disabled = entry.disabled
+        workers.append(worker)
+    return workers
+
+
 def create_control_plane_app(
     config: RouterConfig,
     *,
@@ -118,7 +145,7 @@ def create_control_plane_app(
 ) -> FastAPI:
     if expected_data_planes is not None and expected_data_planes < 1:
         raise ValueError("expected_data_planes must be >= 1 when set")
-    workers = build_workers(config.workers)
+    workers = restore_workers(snapshot_path, config)
     writer = SnapshotWriter(snapshot_path, cp_epoch)
     internal_state = InternalChannelState()
     ledger = DataPlaneCounterLedger()
@@ -268,7 +295,6 @@ def create_control_plane_app(
             except Exception:
                 logger.exception("snapshot keepalive task ended abnormally")
             await health_checker.stop()
-            writer.unlink()
             if admission_shm_file is not None:
                 admission_shm_file.close()
             if owns_health_client and health_client is not client:

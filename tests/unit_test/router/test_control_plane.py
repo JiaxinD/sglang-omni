@@ -111,8 +111,49 @@ def test_cp_publishes_snapshot_on_startup_and_crud(tmp_path: Path) -> None:
         assert client.delete(f"/workers/{worker_id}").status_code == 200
         after_delete = _read_snapshot(snapshot_path)
         assert [w.url for w in after_delete.workers] == ["http://worker-a:8101"]
-    # lifespan shutdown unlinks the snapshot
-    assert not Path(snapshot_path).exists()
+    # The supervisor owns cleanup; the CP leaves this state for crash recovery.
+    assert Path(snapshot_path).exists()
+
+
+def test_cp_restart_recovers_worker_crud(tmp_path: Path) -> None:
+    app, snapshot_path, upstream = _cp_app(tmp_path)
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/workers",
+                json={"url": "http://worker-b:8102", "capabilities": ["speech"]},
+            ).status_code
+            == 200
+        )
+        snapshot = _read_snapshot(snapshot_path)
+        added = snapshot.workers[1]
+        assert (
+            client.put(
+                f"/workers/{added.worker_id}", json={"disabled": True}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.delete(f"/workers/{snapshot.workers[0].worker_id}").status_code
+            == 200
+        )
+
+    restarted_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream.handler)
+    )
+    restarted = create_control_plane_app(
+        _config(),
+        snapshot_path=snapshot_path,
+        cp_epoch="epoch-restarted",
+        client=restarted_client,
+        journal_path=str(tmp_path / "update_journal.json"),
+    )
+    with TestClient(restarted) as client:
+        workers = client.get("/workers").json()["workers"]
+        assert [worker["url"] for worker in workers] == ["http://worker-b:8102"]
+        assert workers[0]["capabilities"] == ["speech"]
+        assert workers[0]["disabled"] is True
+        assert _read_snapshot(snapshot_path).cp_epoch == "epoch-restarted"
 
 
 def test_worker_failure_report_evicts_at_threshold_and_republishes(
