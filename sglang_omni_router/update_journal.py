@@ -57,10 +57,14 @@ class UpdateJournal:
             return []
         except (OSError, ValueError) as exc:
             raise JournalUnreadableError(str(exc)) from exc
-        workers = data.get("worker_ids", [])
-        if not isinstance(workers, list):
-            raise JournalUnreadableError("worker_ids is not a list")
-        return [worker_id for worker_id in workers if isinstance(worker_id, str)]
+        if not isinstance(data, dict):
+            raise JournalUnreadableError("journal is not an object")
+        workers = data.get("worker_ids")
+        if not isinstance(workers, list) or not all(
+            isinstance(worker_id, str) for worker_id in workers
+        ):
+            raise JournalUnreadableError("worker_ids is not a list of strings")
+        return workers
 
     def has_pending(self) -> bool:
         try:

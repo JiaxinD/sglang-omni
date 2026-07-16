@@ -395,8 +395,19 @@ def create_control_plane_app(
             state["seqs"] = {seq for seq in state["seqs"] if seq > state["floor"]}
         return False
 
+    def _stale_generation(dp_index: int, generation: int) -> JSONResponse | None:
+        current = internal_state.data_planes.get(dp_index)
+        if current is not None and generation != current.generation:
+            return _error_response(
+                409,
+                f"stale generation {generation}, current is {current.generation}",
+            )
+        return None
+
     @app.post("/internal/worker_failure", dependencies=[internal_auth])
     async def worker_failure(report: WorkerFailureReport) -> JSONResponse:
+        if error := _stale_generation(report.dp_index, report.generation):
+            return error
         worker = _find_worker(workers, report.worker_id)
         if worker is None:
             return _error_response(404, "worker not found")
@@ -416,6 +427,8 @@ def create_control_plane_app(
 
     @app.post("/internal/counters", dependencies=[internal_auth])
     async def counters(report: CounterReport) -> JSONResponse:
+        if error := _stale_generation(report.dp_index, report.generation):
+            return error
         try:
             applied = ledger.apply(report)
         except StaleCounterGenerationError as exc:

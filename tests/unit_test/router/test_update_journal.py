@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,16 @@ def test_unreadable_journal_fails_closed(tmp_path: Path) -> None:
     # discard must not silently clobber an unreadable journal
     journal.discard("w0")
     assert path.exists()
+
+
+@pytest.mark.parametrize("payload", [[], {"worker_ids": [1]}])
+def test_malformed_journal_schema_fails_closed(tmp_path: Path, payload) -> None:
+    path = tmp_path / "j.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    journal = UpdateJournal(str(path))
+    with pytest.raises(JournalUnreadableError):
+        journal.pending()
+    assert journal.has_pending() is True
 
 
 def test_discard_removes_one_entry(tmp_path: Path) -> None:

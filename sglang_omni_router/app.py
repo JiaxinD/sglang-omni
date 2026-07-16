@@ -763,8 +763,7 @@ async def _broadcast_admin_request_locked(
     #           UNKNOWN: keep targets disabled and journaled (fail closed).
     #   []   -> the ACK barrier aborted before anything was sent: no weight
     #           change happened, restore fully and clear the journal.
-    #   list -> the broadcast completed and the caller sees per-worker
-    #           results: the outcome is known, restore and clear.
+    #   list -> the broadcast completed; restore only if every target succeeded.
     results: list[dict[str, Any]] | None = None
     journal = getattr(app.state, "update_journal", None)
     if disable_targets and journal is not None:
@@ -796,15 +795,17 @@ async def _broadcast_admin_request_locked(
         )
     finally:
         if disable_targets:
-            outcome_known = results is not None
+            outcome_safe = results is not None and (
+                not results or all(item["success"] for item in results)
+            )
             _restore_admin_disabled_state(
-                path, workers, previous_disabled, results, outcome_known
+                path, workers, previous_disabled, results, outcome_safe
             )
             _notify_registry_change(app)
             if journal is not None:
-                if outcome_known:
-                    # ACK abort ([]) or a completed broadcast (list): the
-                    # outcome is known to the caller, so nothing is uncertain
+                if outcome_safe:
+                    # ACK abort ([]) or a fully successful broadcast: all
+                    # targets are known to remain on one weight version.
                     journal.clear()
                 else:
                     # crashed after the broadcast started: every target's
@@ -830,9 +831,9 @@ def _restore_admin_disabled_state(
     workers: list[Worker],
     previous_disabled: dict[str, bool],
     results: list[dict[str, Any]] | None,
-    outcome_known: bool,
+    outcome_safe: bool,
 ) -> None:
-    if not outcome_known:
+    if not outcome_safe:
         # crashed/cancelled after the broadcast started: the outcome is
         # unknown for EVERY target, so none may be re-enabled (fail closed,
         # not just for init_weights_update_group)

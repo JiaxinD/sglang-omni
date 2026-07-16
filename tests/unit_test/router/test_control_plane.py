@@ -625,6 +625,32 @@ def test_stale_incarnation_failures_cannot_evict_a_readded_worker(
         assert workers[0]["health_state"] == "unhealthy"
 
 
+def test_old_generation_reports_are_fenced(tmp_path: Path) -> None:
+    app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
+    with TestClient(app) as client:
+        worker_id = _read_snapshot(snapshot_path).workers[0].worker_id
+        assert (
+            client.post(
+                "/internal/register",
+                json={"dp_index": 0, "generation": 2, "pid": 22},
+            ).status_code
+            == 200
+        )
+
+        failure = _failure(worker_id, seq=1)
+        failure["generation"] = 1
+        assert client.post("/internal/worker_failure", json=failure).status_code == 409
+        assert app.state.workers[0].state != "unhealthy"
+
+        counters = {
+            "dp_index": 0,
+            "generation": 1,
+            "counter_seq": 1,
+            "workers": [{"worker_id": worker_id, "routed_total": 100}],
+        }
+        assert client.post("/internal/counters", json=counters).status_code == 409
+
+
 def test_health_excludes_non_serving_and_slot_mismatched_dps(
     tmp_path: Path,
 ) -> None:
@@ -684,7 +710,7 @@ def test_broadcast_crash_keeps_targets_disabled_and_journaled(tmp_path: Path) ->
     )
     previous = {w.worker_id: False for w in workers}
     _restore_admin_disabled_state(
-        "/update_weights_from_disk", workers, previous, None, outcome_known=False
+        "/update_weights_from_disk", workers, previous, None, outcome_safe=False
     )
     assert all(w.disabled for w in workers)
 
@@ -746,7 +772,7 @@ def test_unreadable_journal_disables_the_whole_pool_on_recovery(
     app, snapshot_path, _ = _cp_app(
         tmp_path, upstream=upstream, journal_path=journal_path
     )
-    with TestClient(app) as client:
+    with TestClient(app):
         snapshot = _read_snapshot(snapshot_path)
         assert snapshot.workers[0].disabled is True
 

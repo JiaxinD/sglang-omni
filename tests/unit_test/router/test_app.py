@@ -17,6 +17,7 @@ from sglang_omni_router import proxy as proxy_module
 from sglang_omni_router.app import _broadcast_admin_request, create_app
 from sglang_omni_router.config import RouterConfig, WorkerConfig
 from sglang_omni_router.selector import WorkerSelector
+from sglang_omni_router.update_journal import UpdateJournal
 from sglang_omni_router.worker import build_workers, worker_id_from_url
 
 
@@ -478,8 +479,6 @@ def test_single_process_recovers_an_unresolved_weight_update_fail_closed(
     # a single-process router that died mid weight-update must fail closed like
     # the multiprocess CP: recover the journaled target disabled and 409 a
     # retry, instead of returning success while the pool is silently disabled.
-    from sglang_omni_router.update_journal import UpdateJournal
-
     journal_path = str(tmp_path / "update_journal.json")
     worker_id = worker_id_from_url("http://worker-a:8101")
     UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
@@ -503,6 +502,30 @@ def test_single_process_recovers_an_unresolved_weight_update_fail_closed(
         response = client.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 409
         assert "did not complete" in response.json()["error"]["message"]
+
+
+def test_partial_weight_update_stays_disabled_and_journaled(tmp_path: Path) -> None:
+    journal_path = str(tmp_path / "update_journal.json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, request=request)
+        if request.url.path == "/update_weights_from_disk":
+            success = _request_netloc(request) == "worker-a:8101"
+            return httpx.Response(
+                200 if success else 500,
+                json={"success": success},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    with TestClient(app) as client:
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+        assert response.status_code == 502
+        assert all(worker.disabled for worker in app.state.workers)
+        assert UpdateJournal(journal_path).has_pending() is True
 
 
 def test_model_info_broadcast_exposes_sglang_compatible_weight_version() -> None:
@@ -2781,7 +2804,9 @@ def test_router_init_weights_update_group_single_replica_broadcasts() -> None:
     assert app.state.workers[0].disabled is False
 
 
-def test_router_init_weights_update_group_failure_keeps_worker_disabled() -> None:
+def test_router_init_weights_update_group_failure_keeps_worker_disabled(
+    tmp_path: Path,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "healthy"}, request=request)
@@ -2797,6 +2822,7 @@ def test_router_init_weights_update_group_failure_keeps_worker_disabled() -> Non
     app = create_app(
         _router_config(worker_configs=[WorkerConfig(url="http://worker-a:8101")]),
         client=async_client,
+        journal_path=str(tmp_path / "update_journal.json"),
     )
     with TestClient(app) as client:
         resp = client.post("/init_weights_update_group", json=_INIT_GROUP_PAYLOAD)
