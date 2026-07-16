@@ -255,7 +255,13 @@ def test_weight_update_fails_closed_when_a_live_dp_never_acks(
         assert _read_snapshot(snapshot_path).workers[0].disabled is False
 
 
-def test_stale_dps_are_excluded_from_the_ack_barrier(tmp_path: Path) -> None:
+def test_a_registered_dp_gone_silent_holds_the_barrier_without_an_expected_count(
+    tmp_path: Path,
+) -> None:
+    # no supervisor-provided fleet size: a DP that registered and then went
+    # silent may still be serving from a stale snapshot, so it must hold the
+    # barrier closed (matching the expected-count path) rather than be dropped
+    # into a zero-ACK broadcast.
     upstream = _Upstream()
     app, snapshot_path, _ = _cp_app(
         tmp_path, upstream=upstream, dp_ack_timeout_secs=0.2, dp_liveness_secs=5.0
@@ -265,11 +271,11 @@ def test_stale_dps_are_excluded_from_the_ack_barrier(tmp_path: Path) -> None:
             "/internal/register", json={"dp_index": 0, "generation": 1, "pid": 1}
         )
         record = app.state.internal_channel.data_planes[0]
-        record.last_seen_at = time.time() - 60.0  # long dead: not a live DP
+        record.last_seen_at = time.time() - 60.0  # registered but not live
 
         response = client.post("/update_weights_from_disk", json={"path": "/m"})
-        assert response.status_code == 200
-        assert "/update_weights_from_disk" in upstream.calls
+        assert response.status_code == 503
+        assert "/update_weights_from_disk" not in upstream.calls
 
 
 def test_cp_admin_surface_enforces_the_admin_key(tmp_path: Path) -> None:
@@ -563,7 +569,6 @@ def test_cp_restart_recovers_an_unresolved_update_fail_closed(
         assert snapshot.workers[0].routable is False
 
         # a retry of the update is rejected while the journal is unresolved
-        _ready_heartbeat(tc, 0, 1)
         response = tc.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 409
         assert "did not complete" in response.json()["error"]["message"]
@@ -583,7 +588,6 @@ def test_a_completed_update_leaves_no_journal(tmp_path: Path) -> None:
     upstream = _Upstream()
     app, snapshot_path, _ = _cp_app(tmp_path, upstream=upstream)
     with TestClient(app) as client:
-        _ready_heartbeat(client, 0, 1)
         assert (
             client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
             == 200
@@ -699,7 +703,6 @@ def test_completed_update_restores_a_previously_disabled_worker_without_journal(
         created = client.post("/workers", json={"url": "http://worker-b:8102"})
         wid = created.json()["worker"]["worker_id"]
         client.put(f"/workers/{wid}", json={"disabled": True})  # pre-disabled
-        _ready_heartbeat(client, 0, 1)
 
         assert (
             client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
@@ -728,7 +731,6 @@ def test_recovery_drops_journaled_workers_that_no_longer_exist(
         # the journaled id is not in the registry: it cannot serve mixed
         # weights, so recovery drops it and updates are not wedged
         assert not Path(journal_path).exists()
-        _ready_heartbeat(client, 0, 1)
         assert (
             client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
             == 200

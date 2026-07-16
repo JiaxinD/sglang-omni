@@ -33,7 +33,7 @@ from sglang_omni_router.app import (
 )
 from sglang_omni_router.config import RouterConfig, WorkerConfig
 from sglang_omni_router.internal_channel import INTERNAL_TOKEN_HEADER
-from sglang_omni_router.proxy import ProxyHandler
+from sglang_omni_router.proxy import HOP_BY_HOP_HEADERS, ProxyHandler
 from sglang_omni_router.selector import WorkerSelector
 from sglang_omni_router.snapshot import SnapshotReader, WorkerSnapshot
 from sglang_omni_router.worker import Worker
@@ -450,7 +450,14 @@ _FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("/weights_checker", ("GET", "POST")),
 )
 
-_FORWARD_REQUEST_STRIP = {"host", "content-length", "connection", "accept-encoding"}
+# reuse the canonical hop-by-hop set: the body is re-framed as fixed-length
+# bytes (httpx sets Content-Length), so a client transfer-encoding/te must not
+# ride along or the CP sees a Content-Length and a Transfer-Encoding at once
+_FORWARD_REQUEST_STRIP = HOP_BY_HOP_HEADERS | {
+    "host",
+    "content-length",
+    "accept-encoding",
+}
 _FORWARD_RESPONSE_STRIP = {
     "content-length",
     "date",

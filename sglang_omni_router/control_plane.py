@@ -38,6 +38,7 @@ from sglang_omni_router.app import (
     _find_worker,
     _pool_summary,
     _worker_pool_status_response,
+    recover_worker_pool_from_journal,
     register_admin_routes,
     register_public_metadata_routes,
 )
@@ -54,11 +55,7 @@ from sglang_omni_router.observability import (
     StaleCounterGenerationError,
 )
 from sglang_omni_router.snapshot import SnapshotReader, SnapshotWorker, SnapshotWriter
-from sglang_omni_router.update_journal import (
-    JournalUnreadableError,
-    UpdateJournal,
-    default_journal_path,
-)
+from sglang_omni_router.update_journal import UpdateJournal, default_journal_path
 from sglang_omni_router.worker import Worker, WorkerState, build_workers
 
 logger = logging.getLogger("sglang_omni_router.control_plane")
@@ -210,12 +207,17 @@ def create_control_plane_app(
                 if record.last_applied_epoch != cp_epoch
                 or record.last_applied_seq < target_seq
             }
+            # fail closed on absent DPs: a serving DP the (possibly just
+            # restarted) CP has not heard from is not an implicit ACK. With a
+            # supervisor-provided fleet size that set is range(expected); with
+            # no expected count, fall back to every DP that has ever registered
+            # so a known-but-silent DP still holds the barrier (matching the
+            # supervised path) instead of being dropped into a zero-ACK pass.
             if expected_data_planes is not None:
-                # fail closed on absent DPs: a serving DP the (possibly just
-                # restarted) CP has not heard from is not an implicit ACK
-                pending.update(
-                    index for index in range(expected_data_planes) if index not in live
-                )
+                expected_indices = range(expected_data_planes)
+            else:
+                expected_indices = list(internal_state.data_planes)
+            pending.update(index for index in expected_indices if index not in live)
             if not pending:
                 return True, []
             if loop.time() >= deadline:
@@ -237,39 +239,7 @@ def create_control_plane_app(
         app.state.on_registry_change = publish
         app.state.dp_snapshot_ack_barrier = dp_snapshot_ack_barrier
         app.state.update_journal = journal
-        try:
-            unresolved = journal.pending()
-        except JournalUnreadableError:
-            # a transaction may be in progress but its targets are unreadable:
-            # fail closed by disabling the whole pool until an operator clears
-            # the journal
-            unresolved = None
-        if unresolved is None:
-            for worker in workers:
-                worker.set_disabled(True)
-            logger.critical(
-                "weight-update journal is present but unreadable; disabling "
-                "the entire worker pool until it is inspected and cleared"
-            )
-        elif unresolved:
-            # crash recovery: an update died mid-transaction under a previous
-            # CP; keep its targets disabled (fail closed) until an operator
-            # verifies weight versions and re-enables them. A journaled worker
-            # that no longer exists in the registry cannot serve mixed weights,
-            # so drop it (otherwise a deleted target wedges every future
-            # update behind the 409 gate).
-            live = {worker.worker_id for worker in workers}
-            still_present = [wid for wid in unresolved if wid in live]
-            for worker_id in still_present:
-                _find_worker(workers, worker_id).set_disabled(True)
-            if len(still_present) != len(unresolved):
-                journal.keep(still_present)
-            if still_present:
-                logger.critical(
-                    f"unresolved weight update in the journal; keeping "
-                    f"{len(still_present)} target worker(s) disabled until "
-                    "verified and re-enabled"
-                )
+        recover_worker_pool_from_journal(journal, workers)
         publish()
         await health_checker.start()
 

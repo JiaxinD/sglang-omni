@@ -31,6 +31,7 @@ HOP_BY_HOP_HEADERS = {
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
+    "proxy-connection",
     "te",
     "trailer",
     "trailers",
@@ -410,11 +411,11 @@ class ProxyHandler:
             upstream = await self._client.send(upstream_request, stream=True)
         except httpx.PoolTimeout:
             # router-local pool contention, not a worker fault: do not feed
-            # the eviction signal (the pool-size invariant makes this
-            # unreachable for admitted model traffic, but auxiliary users of
-            # a shared client must not penalize a healthy worker)
+            # the eviction signal nor a failed_requests count (the pool-size
+            # invariant makes this unreachable for admitted model traffic, but
+            # auxiliary users of a shared client must not penalize a healthy
+            # worker); the request never reached the worker, so it is not routed
             worker.decrement_active()
-            worker.record_routed_request()
             self._log_route_completion(
                 worker=worker,
                 path=path,

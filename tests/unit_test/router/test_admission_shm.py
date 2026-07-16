@@ -95,6 +95,38 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
     assert results == [2]
 
 
+def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a DP killed mid-write leaves its slot odd until the supervisor reclaims
+    # it. The CP aggregate readers (/health, observability) run on the asyncio
+    # event loop, so they must fail fast (spin, never sleep) rather than block
+    # the loop for ~2s on a writer that is never coming back.
+    import sglang_omni_router.admission_shm as shm
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(shm.time, "sleep", lambda secs: sleeps.append(secs))
+
+    buf = _buf(2)
+    codec = SlotCodec(buf, 0)
+    codec.write(
+        inflight=1, peak_sum=1, rejected_total=0, generation=1, pid=1, heartbeat_ts=1.0
+    )
+    seq = struct.unpack_from("<q", buf, 0)[0]
+    struct.pack_into("<q", buf, 0, seq + 1)  # slot 0 left odd: writer died
+
+    view = AdmissionAggregateView(buf, 2)
+    with pytest.raises(shm.SeqlockUnstableError):
+        view.per_slot()
+    with pytest.raises(shm.SeqlockUnstableError):
+        view.to_dict(4)
+    # the DP-side aggregate read (DP /health) must be fail-fast too
+    admission = _admission(buf, 1)
+    with pytest.raises(shm.SeqlockUnstableError):
+        admission.to_dict()
+    assert sleeps == []  # never slept: the event loop was not blocked
+
+
 def test_fenced_process_cannot_acquire_or_release() -> None:
     buf = _buf()
     fenced: list[bool] = []
@@ -147,11 +179,14 @@ def test_to_dict_matches_the_single_process_surface() -> None:
     assert shared_keys == local_keys
 
 
-def test_release_below_zero_is_rejected() -> None:
+def test_release_below_zero_is_clamped_not_asserted() -> None:
+    # a shared-memory invariant must not be guarded by assert (stripped under
+    # python -O): a stray release is clamped and logged, never driving the
+    # shared in-flight count negative (which would inflate every DP's budget)
     buf = _buf()
     a = _admission(buf, 0)
-    with pytest.raises(AssertionError):
-        a.release()
+    a.release()  # no in-flight: ignored, not fatal
+    assert AdmissionAggregateView(buf, 3).to_dict(4)["inflight"] == 0
 
 
 def test_aggregate_view_reports_per_slot_details() -> None:

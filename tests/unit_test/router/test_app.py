@@ -4,6 +4,7 @@ import asyncio
 import gc
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,7 +17,7 @@ from sglang_omni_router import proxy as proxy_module
 from sglang_omni_router.app import _broadcast_admin_request, create_app
 from sglang_omni_router.config import RouterConfig, WorkerConfig
 from sglang_omni_router.selector import WorkerSelector
-from sglang_omni_router.worker import build_workers
+from sglang_omni_router.worker import build_workers, worker_id_from_url
 
 
 def _request_netloc(request: httpx.Request) -> str:
@@ -469,6 +470,39 @@ def test_admin_routes_broadcast_to_live_workers_and_preserve_query() -> None:
     assert {item[0] for item in seen} == {"worker-a:8101", "worker-b:8102"}
     assert [item[1] for item in seen] == [b"action=checksum", b"action=checksum"]
     assert [item[2] for item in seen] == [b"", b""]
+
+
+def test_single_process_recovers_an_unresolved_weight_update_fail_closed(
+    tmp_path: Path,
+) -> None:
+    # a single-process router that died mid weight-update must fail closed like
+    # the multiprocess CP: recover the journaled target disabled and 409 a
+    # retry, instead of returning success while the pool is silently disabled.
+    from sglang_omni_router.update_journal import UpdateJournal
+
+    journal_path = str(tmp_path / "update_journal.json")
+    worker_id = worker_id_from_url("http://worker-a:8101")
+    UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "worker"}, request=request)
+        if request.url.path == "/update_weights_from_disk":
+            return httpx.Response(
+                200,
+                json={"success": True, "worker": _request_netloc(request)},
+                request=request,
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    with TestClient(app) as client:
+        workers = {w["url"]: w for w in client.get("/workers").json()["workers"]}
+        assert workers["http://worker-a:8101"]["disabled"] is True
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+        assert response.status_code == 409
+        assert "did not complete" in response.json()["error"]["message"]
 
 
 def test_model_info_broadcast_exposes_sglang_compatible_weight_version() -> None:
@@ -2971,6 +3005,8 @@ def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
         workers = client.get("/workers").json()["workers"]
         assert all(w["consecutive_failures"] == 0 for w in workers)
         assert all(w["health_state"] != "unhealthy" for w in workers)
+        # router-local exhaustion must not inflate the worker's failure count
+        assert all(w["failed_requests"] == 0 for w in workers)
 
 
 def test_worker_crud_holds_the_update_lock_through_its_mutation() -> None:

@@ -308,7 +308,12 @@ class SharedAdmission:
         except SeqlockUnstableError:
             logger.warning("own admission slot unstable on release; skipping")
             return
-        assert self._inflight > 0, "in-flight count cannot be negative"
+        if self._inflight <= 0:
+            # a shared-memory invariant cannot be guarded by assert (stripped
+            # under python -O, which would let a stray release drive the count
+            # negative and permanently inflate every DP's admission budget)
+            logger.error("admission slot released with no in-flight request; ignoring")
+            return
         self._inflight -= 1
         self._write_own()
 
@@ -320,9 +325,9 @@ class SharedAdmission:
     def to_dict(self) -> dict[str, int]:
         # same fold-version retry as AdmissionAggregateView.to_dict
         for _ in range(4):
-            version_before = self._retired_codec.read().seq
-            views = [codec.read() for codec in self._codecs]
-            retired = self._retired_codec.read()
+            version_before = self._retired_codec.read(fail_fast=True).seq
+            views = [codec.read(fail_fast=True) for codec in self._codecs]
+            retired = self._retired_codec.read(fail_fast=True)
             if retired.seq == version_before:
                 return {
                     "inflight": sum(view.inflight for view in views),
@@ -349,7 +354,9 @@ class AdmissionAggregateView:
         current = now if now is not None else time.time()
         result = []
         for index, codec in enumerate(self._codecs):
-            view = codec.read()
+            # fail fast: /health and observability run on the event loop, so a
+            # slot left odd by a dead writer must not block it on a backoff sleep
+            view = codec.read(fail_fast=True)
             result.append(
                 {
                     "index": index,
@@ -372,9 +379,9 @@ class AdmissionAggregateView:
         # atomic, so use the retired slot's seq as a fold version and retry
         # if it moved while the DP slots were being read
         for _ in range(4):
-            version_before = self._retired_codec.read().seq
-            views = [codec.read() for codec in self._codecs]
-            retired = self._retired_codec.read()
+            version_before = self._retired_codec.read(fail_fast=True).seq
+            views = [codec.read(fail_fast=True) for codec in self._codecs]
+            retired = self._retired_codec.read(fail_fast=True)
             if retired.seq == version_before:
                 return {
                     "inflight": sum(view.inflight for view in views),

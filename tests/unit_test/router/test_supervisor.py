@@ -287,6 +287,38 @@ def test_run_forever_installs_and_restores_signal_handlers(tmp_path: Path) -> No
     assert signal_module.getsignal(signal_module.SIGTERM) == before
 
 
+def test_run_forever_shutdown_survives_an_unrestorable_previous_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a C-level previous handler reads back as None; reinstalling it via
+    # signal.signal(signum, None) raises TypeError. That must not skip
+    # shutdown() and leak the workdir/shm/UDS.
+    import sglang_omni_router.supervisor as sup
+
+    def fake_signal(signum, handler):
+        if handler is None:
+            raise TypeError("signal handler must be signal.SIG_IGN, SIG_DFL, ...")
+        return None  # pretend the previous handler was installed in C
+
+    monkeypatch.setattr(sup.signal, "signal", fake_signal)
+
+    harness = Harness(_config(), n=1, tmp_path=tmp_path)
+    harness.supervisor.start()
+    original = harness.supervisor.poll_once
+
+    def _poll_then_stop() -> None:
+        original()
+        harness.supervisor.request_stop()
+
+    harness.supervisor.poll_once = _poll_then_stop  # type: ignore[method-assign]
+    harness.supervisor.run_forever(poll_interval_secs=0.01)
+
+    # shutdown still ran and stopped every child despite the un-restorable handler
+    assert all(p.returncode is not None for _, _, p in harness.dp_spawns)
+    assert harness.cp_spawns[0][1].returncode is not None
+
+
 def test_rapidly_dying_cp_fails_closed(tmp_path: Path) -> None:
     harness = Harness(_config(), n=1, tmp_path=tmp_path)
     harness.supervisor.start()

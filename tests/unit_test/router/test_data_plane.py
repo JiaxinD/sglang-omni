@@ -320,6 +320,62 @@ def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
         assert cp.requests[-1].url.raw_path == b"/workers/some%2Fid"
 
 
+def test_dp_strips_hop_by_hop_headers_when_forwarding_to_the_cp(
+    tmp_path: Path,
+) -> None:
+    # the DP re-frames the body as fixed-length bytes (httpx sets Content-Length),
+    # so a client Transfer-Encoding/hop-by-hop header must not ride along or the
+    # CP sees both a Content-Length and a Transfer-Encoding (smuggling ambiguity)
+    upstream = _Recorder()
+
+    class _CPRecorder:
+        def __init__(self) -> None:
+            self.requests: list[httpx.Request] = []
+
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+    cp = _CPRecorder()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
+    internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(cp.handler), base_url="http://cp"
+    )
+    from sglang_omni_router.data_plane import create_data_plane_app
+
+    app = create_data_plane_app(
+        _config(),
+        snapshot_path=str(tmp_path / "w2.json"),
+        dp_index=0,
+        generation=1,
+        client=client,
+        internal_client=internal_client,
+        dp_refresh_interval_secs=0.02,
+        heartbeat_interval_secs=600,
+    )
+    with TestClient(app) as tc:
+        response = tc.post(
+            "/workers?url=http%3A%2F%2Fw%3A1",
+            json={"model": "m"},
+            headers={
+                "Authorization": "Bearer k",
+                "Transfer-Encoding": "chunked",
+                "TE": "trailers",
+                "Upgrade": "h2c",
+                "Proxy-Connection": "keep-alive",
+            },
+        )
+        assert response.status_code == 200
+        forwarded = cp.requests[-1]
+        forwarded_keys = {key.lower() for key in forwarded.headers}
+        assert "transfer-encoding" not in forwarded_keys
+        assert "te" not in forwarded_keys
+        assert "upgrade" not in forwarded_keys
+        assert "proxy-connection" not in forwarded_keys
+        # a non-hop-by-hop header (the admin key the CP re-checks) is preserved
+        assert forwarded.headers["authorization"] == "Bearer k"
+
+
 def test_dp_serves_v1_models_locally_from_the_snapshot_view(
     tmp_path: Path,
 ) -> None:

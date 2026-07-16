@@ -454,9 +454,17 @@ class RouterSupervisor:
                 self.poll_once()
                 time.sleep(poll_interval_secs)
         finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
-            self.shutdown()
+            # shut down FIRST, with our handler still installed, so a second
+            # signal during the drain is absorbed (request_stop) instead of the
+            # default action killing us mid-cleanup and leaking workdir/shm/UDS
+            try:
+                self.shutdown()
+            finally:
+                for signum, handler in previous_handlers.items():
+                    # a C-level previous handler reads back as None and cannot
+                    # be reinstalled via signal.signal (TypeError); leave ours
+                    if handler is not None:
+                        signal.signal(signum, handler)
 
     def _signal_child(self, process: ChildProcess) -> None:
         if process.poll() is None:

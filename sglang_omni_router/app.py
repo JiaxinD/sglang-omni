@@ -29,6 +29,11 @@ from sglang_omni_router.config import (
 from sglang_omni_router.health import HealthChecker
 from sglang_omni_router.proxy import ProxyHandler, filter_request_headers
 from sglang_omni_router.selector import WorkerSelector
+from sglang_omni_router.update_journal import (
+    JournalUnreadableError,
+    UpdateJournal,
+    default_journal_path,
+)
 from sglang_omni_router.worker import (
     HEALTH_STATE_UNHEALTHY,
     HEALTH_STATE_UNKNOWN,
@@ -48,14 +53,63 @@ _ADMIN_UPDATE_PATHS = {
 _ADMIN_UPDATE_LOCK_TIMEOUT_S = 300.0
 
 
+def recover_worker_pool_from_journal(
+    journal: UpdateJournal, workers: list[Worker]
+) -> None:
+    """Fail closed on an unresolved weight-update journal at startup.
+
+    An update that died mid-transaction leaves its targets journaled: keep them
+    disabled until an operator verifies weight versions and re-enables them
+    (which discards the entry), rather than re-enabling potentially mixed
+    weights. An unreadable journal disables the whole pool. A journaled worker
+    no longer in the registry is dropped so a deleted target cannot wedge every
+    future update behind the 409 gate.
+    """
+    try:
+        unresolved = journal.pending()
+    except JournalUnreadableError:
+        unresolved = None
+    if unresolved is None:
+        for worker in workers:
+            worker.set_disabled(True)
+        logger.critical(
+            "weight-update journal is present but unreadable; disabling the "
+            "entire worker pool until it is inspected and cleared"
+        )
+        return
+    if not unresolved:
+        return
+    live = {worker.worker_id for worker in workers}
+    still_present = [worker_id for worker_id in unresolved if worker_id in live]
+    for worker_id in still_present:
+        worker = _find_worker(workers, worker_id)
+        if worker is not None:
+            worker.set_disabled(True)
+    if len(still_present) != len(unresolved):
+        journal.keep(still_present)
+    if still_present:
+        logger.critical(
+            f"unresolved weight update in the journal; keeping "
+            f"{len(still_present)} target worker(s) disabled until verified "
+            "and re-enabled"
+        )
+
+
 def create_app(
     config: RouterConfig,
     *,
     client: httpx.AsyncClient | None = None,
     health_client: httpx.AsyncClient | None = None,
     admin_api_key: str | None = None,
+    journal_path: str | None = None,
 ) -> FastAPI:
     workers = build_workers(config.workers)
+    # a single-process router owns the same crash-safe weight-update journal as
+    # the multiprocess CP, so a crash mid-update fails closed (and 409s a retry)
+    # instead of returning success with the pool left disabled
+    journal = UpdateJournal(
+        journal_path or default_journal_path(config.host, config.port)
+    )
     timeout = httpx.Timeout(config.request_timeout_secs)
     owns_client = client is None
     if client is None:
@@ -97,6 +151,8 @@ def create_app(
         app.state.proxy = proxy
         app.state.admission_controller = proxy.admission
         app.state.admin_update_lock = asyncio.Lock()
+        app.state.update_journal = journal
+        recover_worker_pool_from_journal(journal, workers)
         await health_checker.start()
         try:
             yield
