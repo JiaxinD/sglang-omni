@@ -255,35 +255,31 @@ def test_cp_keepalive_republishes_without_state_changes(tmp_path: Path) -> None:
         _wait_for(lambda: reader.maybe_reload() and reader.snapshot.seq > first_seq)
 
 
-def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
-    tmp_path: Path,
-) -> None:
-    import json as jsonlib
+class _CPRecorder:
+    """Records requests the DP forwards to the CP."""
+
+    def __init__(self, status: int = 418) -> None:
+        self.requests: list[httpx.Request] = []
+        self._status = status
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(
+            self._status, json={"from": "cp"}, headers={"x-cp-extra": "yes"}
+        )
+
+
+def _dp_app_forwarding_to_cp(tmp_path: Path, cp: _CPRecorder):
+    from sglang_omni_router.data_plane import create_data_plane_app
 
     upstream = _Recorder()
-
-    class _CPRecorder:
-        def __init__(self) -> None:
-            self.requests: list[httpx.Request] = []
-
-        def handler(self, request: httpx.Request) -> httpx.Response:
-            self.requests.append(request)
-            return httpx.Response(
-                418,
-                json={"from": "cp"},
-                headers={"x-cp-extra": "yes"},
-            )
-
-    cp = _CPRecorder()
-    app, _ = _dp_app(tmp_path, upstream, internal=None)
-    # rebuild with a CP-backed internal client
     client = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
     internal_client = httpx.AsyncClient(
         transport=httpx.MockTransport(cp.handler), base_url="http://cp"
     )
-    from sglang_omni_router.data_plane import create_data_plane_app
-
-    app = create_data_plane_app(
+    # NOTE: no snapshot exists, so data routes are shedding; admin and health
+    # forwarding must be exempt from that gate and from admission.
+    return create_data_plane_app(
         _config(),
         snapshot_path=str(tmp_path / "w2.json"),
         dp_index=0,
@@ -293,9 +289,16 @@ def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
         dp_refresh_interval_secs=0.02,
         heartbeat_interval_secs=600,  # keep heartbeats out of cp.requests
     )
+
+
+def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
+    tmp_path: Path,
+) -> None:
+    import json as jsonlib
+
+    cp = _CPRecorder()
+    app = _dp_app_forwarding_to_cp(tmp_path, cp)
     with TestClient(app) as tc:
-        # NOTE: no snapshot exists, so data routes are shedding; admin and
-        # health forwarding must be exempt from that gate and from admission.
         response = tc.post(
             "/workers?url=http%3A%2F%2Fw%3A1",
             json={"model": "m"},
@@ -326,33 +329,8 @@ def test_dp_strips_hop_by_hop_headers_when_forwarding_to_the_cp(
     # the DP re-frames the body as fixed-length bytes (httpx sets Content-Length),
     # so a client Transfer-Encoding/hop-by-hop header must not ride along or the
     # CP sees both a Content-Length and a Transfer-Encoding (smuggling ambiguity)
-    upstream = _Recorder()
-
-    class _CPRecorder:
-        def __init__(self) -> None:
-            self.requests: list[httpx.Request] = []
-
-        def handler(self, request: httpx.Request) -> httpx.Response:
-            self.requests.append(request)
-            return httpx.Response(200, json={"ok": True})
-
-    cp = _CPRecorder()
-    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
-    internal_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(cp.handler), base_url="http://cp"
-    )
-    from sglang_omni_router.data_plane import create_data_plane_app
-
-    app = create_data_plane_app(
-        _config(),
-        snapshot_path=str(tmp_path / "w2.json"),
-        dp_index=0,
-        generation=1,
-        client=client,
-        internal_client=internal_client,
-        dp_refresh_interval_secs=0.02,
-        heartbeat_interval_secs=600,
-    )
+    cp = _CPRecorder(status=200)
+    app = _dp_app_forwarding_to_cp(tmp_path, cp)
     with TestClient(app) as tc:
         response = tc.post(
             "/workers?url=http%3A%2F%2Fw%3A1",

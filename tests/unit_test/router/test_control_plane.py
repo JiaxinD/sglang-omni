@@ -709,9 +709,7 @@ def test_broadcast_crash_keeps_targets_disabled_and_journaled(tmp_path: Path) ->
         ]
     )
     previous = {w.worker_id: False for w in workers}
-    _restore_admin_disabled_state(
-        "/update_weights_from_disk", workers, previous, None, outcome_safe=False
-    )
+    _restore_admin_disabled_state(workers, previous, outcome_safe=False)
     assert all(w.disabled for w in workers)
 
 

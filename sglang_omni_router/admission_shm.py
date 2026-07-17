@@ -323,24 +323,33 @@ class SharedAdmission:
             self._write_own()
 
     def to_dict(self) -> dict[str, int]:
-        # same fold-version retry as AdmissionAggregateView.to_dict
-        for _ in range(4):
-            version_before = self._retired_codec.read(fail_fast=True).seq
-            views = [codec.read(fail_fast=True) for codec in self._codecs]
-            retired = self._retired_codec.read(fail_fast=True)
-            if retired.seq == version_before:
-                return {
-                    "inflight": sum(view.inflight for view in views),
-                    "max_inflight": self._max_inflight,
-                    "peak_inflight": max(
-                        (view.peak_sum for view in views + [retired]), default=0
-                    ),
-                    "rejected_total": (
-                        sum(view.rejected_total for view in views)
-                        + retired.rejected_total
-                    ),
-                }
-        raise SeqlockUnstableError("aggregate read did not stabilize")
+        return _aggregate_to_dict(self._codecs, self._retired_codec, self._max_inflight)
+
+
+def _aggregate_to_dict(
+    codecs: list[SlotCodec], retired_codec: SlotCodec, max_inflight: int
+) -> dict[str, int]:
+    # a fold (supervisor moving a dying slot's counters into the retired slot)
+    # is a two-slot transfer; per-slot seqlocks cannot make it atomic, so use
+    # the retired slot's seq as a fold version and retry if it moved while the
+    # DP slots were being read. fail_fast throughout: aggregate readers run on
+    # event loops and must not sleep on a slot left odd by a dead writer.
+    for _ in range(4):
+        version_before = retired_codec.read(fail_fast=True).seq
+        views = [codec.read(fail_fast=True) for codec in codecs]
+        retired = retired_codec.read(fail_fast=True)
+        if retired.seq == version_before:
+            return {
+                "inflight": sum(view.inflight for view in views),
+                "max_inflight": max_inflight,
+                "peak_inflight": max(
+                    (view.peak_sum for view in views + [retired]), default=0
+                ),
+                "rejected_total": (
+                    sum(view.rejected_total for view in views) + retired.rejected_total
+                ),
+            }
+    raise SeqlockUnstableError("aggregate read did not stabilize")
 
 
 class AdmissionAggregateView:
@@ -374,24 +383,4 @@ class AdmissionAggregateView:
         return result
 
     def to_dict(self, max_inflight: int) -> dict[str, int]:
-        # a fold (supervisor moving a dying slot's counters into the retired
-        # slot) is a two-slot transfer; per-slot seqlocks cannot make it
-        # atomic, so use the retired slot's seq as a fold version and retry
-        # if it moved while the DP slots were being read
-        for _ in range(4):
-            version_before = self._retired_codec.read(fail_fast=True).seq
-            views = [codec.read(fail_fast=True) for codec in self._codecs]
-            retired = self._retired_codec.read(fail_fast=True)
-            if retired.seq == version_before:
-                return {
-                    "inflight": sum(view.inflight for view in views),
-                    "max_inflight": max_inflight,
-                    "peak_inflight": max(
-                        (view.peak_sum for view in views + [retired]), default=0
-                    ),
-                    "rejected_total": (
-                        sum(view.rejected_total for view in views)
-                        + retired.rejected_total
-                    ),
-                }
-        raise SeqlockUnstableError("aggregate read did not stabilize")
+        return _aggregate_to_dict(self._codecs, self._retired_codec, max_inflight)

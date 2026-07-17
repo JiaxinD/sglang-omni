@@ -798,9 +798,7 @@ async def _broadcast_admin_request_locked(
             outcome_safe = results is not None and (
                 not results or all(item["success"] for item in results)
             )
-            _restore_admin_disabled_state(
-                path, workers, previous_disabled, results, outcome_safe
-            )
+            _restore_admin_disabled_state(workers, previous_disabled, outcome_safe)
             _notify_registry_change(app)
             if journal is not None:
                 if outcome_safe:
@@ -827,32 +825,18 @@ async def _broadcast_admin_request_locked(
 
 
 def _restore_admin_disabled_state(
-    path: str,
     workers: list[Worker],
     previous_disabled: dict[str, bool],
-    results: list[dict[str, Any]] | None,
     outcome_safe: bool,
 ) -> None:
     if not outcome_safe:
-        # crashed/cancelled after the broadcast started: the outcome is
-        # unknown for EVERY target, so none may be re-enabled (fail closed,
-        # not just for init_weights_update_group)
+        # crashed/cancelled after the broadcast started, or some targets
+        # failed: the weight version is uncertain for the pool, so none may
+        # be re-enabled (fail closed)
         for worker in workers:
             worker.set_disabled(True)
         return
-
-    keep_disabled_urls: set[str] = set()
-    if path == "/init_weights_update_group" and results:
-        keep_disabled_urls = {
-            str(item.get("worker"))
-            for item in results
-            if item.get("success") is not True
-        }
-
     for worker in workers:
-        if worker.url in keep_disabled_urls:
-            worker.set_disabled(True)
-            continue
         worker.set_disabled(previous_disabled[worker.worker_id])
 
 
