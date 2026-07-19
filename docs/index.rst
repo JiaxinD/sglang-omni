@@ -75,6 +75,7 @@ Supported Models
    cookbook/moss_tts.md
    cookbook/moss_tts_local.md
    cookbook/qwen3_asr.md
+   cookbook/fun_asr.md
    cookbook/moss_transcribe_diarize.md
    cookbook/whisper_asr.md
    cookbook/qwen3_omni.md
@@ -88,6 +89,7 @@ Supported Models
    basic_usage/qwen3_omni.md
    basic_usage/tts.md
    basic_usage/omni_router.md
+   basic_usage/mps_dp.md
 
 
 .. toctree::
