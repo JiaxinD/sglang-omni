@@ -69,10 +69,8 @@ SLOT_SIZE = 64
 _SLOT_FORMAT = "<qqqqqqdq"
 _FIELDS_FORMAT = "<qqqqqdq"  # everything after seq
 _SEQ_FORMAT = "<q"
-# a live writer finishes in microseconds; the spin budget only has to cover
-# that. A slot left odd by a writer that died mid-write resolves when the
-# supervisor reclaims it (within its poll interval), so the reader backs off
-# briefly and eventually raises rather than hanging forever.
+# Note (Jiaxin Deng): a live writer finishes in microseconds; a slot left odd
+# by a dead writer resolves at supervisor reclaim, so readers eventually raise.
 _READ_SPIN_LIMIT = 1_000
 _READ_BACKOFF_SECS = 0.0001
 _READ_BACKOFF_LIMIT = 20_000
@@ -92,7 +90,8 @@ class SlotView:
 
 
 def admission_file_size(slots: int) -> int:
-    # one extra supervisor-owned RETIRED slot after the DP slots
+    # Note (Jiaxin Deng): one extra supervisor-owned retired slot after the
+    # DP slots.
     return (slots + 1) * SLOT_SIZE
 
 
@@ -118,9 +117,8 @@ class SlotCodec:
         self._offset = index * SLOT_SIZE
 
     def read(self, *, fail_fast: bool = False) -> SlotView:
-        # fail_fast: spin only, never sleep - request event loops must not
-        # block on a slot left odd by a crashed writer (the caller sheds and
-        # the supervisor reclaim heals the slot within its poll interval)
+        # Note (Jiaxin Deng): fail_fast spins without sleeping; request event
+        # loops must not block on a slot left odd by a crashed writer.
         budget = (
             _READ_SPIN_LIMIT if fail_fast else _READ_SPIN_LIMIT + _READ_BACKOFF_LIMIT
         )
@@ -146,10 +144,9 @@ class SlotCodec:
         pid: int,
         heartbeat_ts: float,
     ) -> None:
-        # seq | 1 tolerates a slot left odd by a writer that died mid-write
-        # (the supervisor reclaims through this same path after reaping it):
-        # the write-marker stays odd for the whole write and the final value
-        # is the next even number strictly above what any reader saw.
+        # Note (Jiaxin Deng): seq | 1 tolerates a slot left odd by a writer
+        # that died mid-write; the final value is the next even number
+        # strictly above what any reader saw.
         seq = struct.unpack_from(_SEQ_FORMAT, self._buf, self._offset)[0]
         writing_marker = seq | 1
         struct.pack_into(_SEQ_FORMAT, self._buf, self._offset, writing_marker)
@@ -284,9 +281,8 @@ class SharedAdmission:
                 return False
             total = self._total_inflight()
         except SeqlockUnstableError:
-            # a sibling slot is stuck mid-write (its writer crashed): shed
-            # instead of blocking the event loop; the supervisor reclaim
-            # heals the slot within its poll interval
+            # Note (Jiaxin Deng): a sibling slot is stuck mid-write (writer
+            # crashed); shed instead of blocking the event loop.
             logger.warning("admission slot unstable; shedding until reclaim")
             return False
         if total >= self._max_inflight:
@@ -309,9 +305,8 @@ class SharedAdmission:
             logger.warning("own admission slot unstable on release; skipping")
             return
         if self._inflight <= 0:
-            # a shared-memory invariant cannot be guarded by assert (stripped
-            # under python -O, which would let a stray release drive the count
-            # negative and permanently inflate every DP's admission budget)
+            # Note (Jiaxin Deng): not an assert (stripped under python -O); a
+            # stray release must not drive the shared count negative.
             logger.error("admission slot released with no in-flight request; ignoring")
             return
         self._inflight -= 1
@@ -329,11 +324,9 @@ class SharedAdmission:
 def _aggregate_to_dict(
     codecs: list[SlotCodec], retired_codec: SlotCodec, max_inflight: int
 ) -> dict[str, int]:
-    # a fold (supervisor moving a dying slot's counters into the retired slot)
-    # is a two-slot transfer; per-slot seqlocks cannot make it atomic, so use
-    # the retired slot's seq as a fold version and retry if it moved while the
-    # DP slots were being read. fail_fast throughout: aggregate readers run on
-    # event loops and must not sleep on a slot left odd by a dead writer.
+    # Note (Jiaxin Deng): a fold is a two-slot transfer the per-slot seqlocks
+    # cannot make atomic; use the retired slot's seq as a fold version and
+    # retry, fail-fast so event-loop readers never sleep.
     for _ in range(4):
         version_before = retired_codec.read(fail_fast=True).seq
         views = [codec.read(fail_fast=True) for codec in codecs]
@@ -363,8 +356,8 @@ class AdmissionAggregateView:
         current = now if now is not None else time.time()
         result = []
         for index, codec in enumerate(self._codecs):
-            # fail fast: /health and observability run on the event loop, so a
-            # slot left odd by a dead writer must not block it on a backoff sleep
+            # Note (Jiaxin Deng): /health runs on the event loop; a slot left
+            # odd by a dead writer must not block it on a backoff sleep.
             view = codec.read(fail_fast=True)
             result.append(
                 {

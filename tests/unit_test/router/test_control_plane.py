@@ -258,10 +258,8 @@ def test_weight_update_fails_closed_when_a_live_dp_never_acks(
 def test_a_registered_dp_gone_silent_holds_the_barrier_without_an_expected_count(
     tmp_path: Path,
 ) -> None:
-    # no supervisor-provided fleet size: a DP that registered and then went
-    # silent may still be serving from a stale snapshot, so it must hold the
-    # barrier closed (matching the expected-count path) rather than be dropped
-    # into a zero-ACK broadcast.
+    # no supervisor-provided fleet size: a registered-then-silent DP may
+    # still serve from a stale snapshot, so it must hold the barrier closed.
     upstream = _Upstream()
     app, snapshot_path, _ = _cp_app(
         tmp_path, upstream=upstream, dp_ack_timeout_secs=0.2, dp_liveness_secs=5.0

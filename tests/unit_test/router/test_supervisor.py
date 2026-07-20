@@ -291,9 +291,8 @@ def test_run_forever_shutdown_survives_an_unrestorable_previous_handler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # a C-level previous handler reads back as None; reinstalling it via
-    # signal.signal(signum, None) raises TypeError. That must not skip
-    # shutdown() and leak the workdir/shm/UDS.
+    # a C-level previous handler reads back as None and cannot be
+    # reinstalled; that must not skip shutdown() and leak workdir/shm/UDS
     import sglang_omni_router.supervisor as sup
 
     def fake_signal(signum, handler):

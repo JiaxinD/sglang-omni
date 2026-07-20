@@ -476,9 +476,8 @@ def test_admin_routes_broadcast_to_live_workers_and_preserve_query() -> None:
 def test_single_process_recovers_an_unresolved_weight_update_fail_closed(
     tmp_path: Path,
 ) -> None:
-    # a single-process router that died mid weight-update must fail closed like
-    # the multiprocess CP: recover the journaled target disabled and 409 a
-    # retry, instead of returning success while the pool is silently disabled.
+    # a single-process router that died mid weight-update must fail closed:
+    # recover the journaled target disabled and 409 a retry.
     journal_path = str(tmp_path / "update_journal.json")
     worker_id = worker_id_from_url("http://worker-a:8101")
     UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
@@ -2997,9 +2996,8 @@ def test_route_registration_split_exposes_exact_route_sets() -> None:
 
 
 def test_worker_crud_stays_unauthenticated_even_with_admin_key() -> None:
-    # Audit-frozen current behavior: worker CRUD carries no admin auth while
-    # the weight-update/broadcast routes do. The route split must not change
-    # this silently; changing it would be a separate, explicit behavior change.
+    # current behavior, frozen: worker CRUD carries no admin auth while the
+    # weight-update/broadcast routes do; the route split must not change this.
     app = _admin_router_app(admin_api_key=_ROUTER_ADMIN_API_KEY)
     with TestClient(app) as client:
         created = client.post("/workers", json={"url": "http://127.0.0.1:8199"})
@@ -3036,9 +3034,8 @@ def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
 
 
 def test_worker_crud_holds_the_update_lock_through_its_mutation() -> None:
-    # the reject-while-updating guard is only sound if CRUD itself owns the
-    # lock across its awaits (health check) - otherwise a weight update can
-    # interleave mid-mutation
+    # the reject-while-updating guard is only sound if CRUD owns the lock
+    # across its awaits; otherwise a weight update can interleave mid-mutation
     import threading
 
     health_started = threading.Event()

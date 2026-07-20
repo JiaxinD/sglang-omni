@@ -104,9 +104,9 @@ def create_app(
     journal_path: str | None = None,
 ) -> FastAPI:
     workers = build_workers(config.workers)
-    # a single-process router owns the same crash-safe weight-update journal as
-    # the multiprocess CP, so a crash mid-update fails closed (and 409s a retry)
-    # instead of returning success with the pool left disabled
+    # Note (Jiaxin Deng): the single-process router shares the CP's crash-safe
+    # journal, so a crash mid-update fails closed instead of returning success
+    # with the pool left disabled.
     journal = UpdateJournal(
         journal_path or default_journal_path(config.host, config.port)
     )
@@ -244,11 +244,9 @@ def register_admin_routes(
         )
 
     def _registry_lock_or_reject(app: FastAPI):
-        # registry mutations must not race the weight-update disable/ACK/
-        # broadcast/restore interval; a held lock rejects instead of
-        # blocking CRUD for the whole update. The caller must acquire the
-        # returned lock IMMEDIATELY (no await in between): on a single
-        # event loop, locked() plus a fast-path acquire is atomic.
+        # Note (Jiaxin Deng): a held lock rejects instead of blocking CRUD for
+        # the whole update; the caller must acquire the returned lock with no
+        # await in between, or locked() plus acquire stops being atomic.
         lock = getattr(app.state, "admin_update_lock", None)
         if lock is None:
             return None, None
@@ -384,9 +382,8 @@ def register_admin_routes(
                 lock.release()
 
     def _discard_needs_admin_auth(resolved_worker_id: str) -> bool:
-        # re-enabling a worker that a crashed update left disabled discards
-        # its journal entry (an operator asserting its weights are verified);
-        # that is admin-sensitive even though ordinary worker CRUD is not
+        # Note (Jiaxin Deng): discarding a journal entry asserts the weights
+        # are verified; admin-sensitive even though ordinary worker CRUD is not.
         journal = getattr(app.state, "update_journal", None)
         if journal is None or not admin_api_key:
             return False
@@ -439,7 +436,6 @@ def register_admin_routes(
             if requested_disabled is False:
                 journal = getattr(app.state, "update_journal", None)
                 if journal is not None:
-                    # operator verified this worker's weights: resolve it
                     journal.discard(worker.worker_id)
 
         if requested_is_dead is not None:
@@ -565,8 +561,8 @@ def register_data_routes(
     *,
     gate: Callable[[], Response | None] | None = None,
 ) -> None:
-    # gate: data-plane pre-check (e.g. stale-snapshot shedding); returning a
-    # response short-circuits the relay. None (single-process mode) is a no-op.
+    # Note (Jiaxin Deng): gate is the data-plane pre-check (stale-snapshot
+    # shedding); a returned response short-circuits the relay, None is a no-op.
     async def _forward(request: Request, path: str) -> Response:
         if gate is not None:
             gated = gate()
@@ -618,7 +614,8 @@ def _pool_summary(
         if overlay is None:
             payload["workers"] = [worker.to_dict() for worker in workers]
         else:
-            # CP mode: merge the DP counter aggregate over the local fields
+            # Note (Jiaxin Deng): CP mode merges the DP counter aggregate over
+            # the local fields.
             payload["workers"] = [
                 {**worker.to_dict(), **overlay(worker)} for worker in workers
             ]
@@ -643,17 +640,16 @@ def _worker_pool_status_response(
 
 
 def _notify_registry_change(app: FastAPI) -> None:
-    # Control-plane hook: republish the worker snapshot after any registry
-    # mutation. Unset (single-process mode) this is a no-op.
+    # Note (Jiaxin Deng): CP hook, republishes the snapshot after a registry
+    # mutation; unset (single-process mode) is a no-op.
     callback = getattr(app.state, "on_registry_change", None)
     if callback is not None:
         callback()
 
 
 async def _await_dp_snapshot_ack(app: FastAPI) -> JSONResponse | None:
-    # Control-plane hook: before broadcasting a weight update, wait until all
-    # live data planes acknowledged the just-published disabled-worker
-    # snapshot. Unset (single-process mode) this is a no-op.
+    # Note (Jiaxin Deng): CP hook, waits until all live DPs acknowledged the
+    # disabled-worker snapshot; unset (single-process mode) is a no-op.
     barrier = getattr(app.state, "dp_snapshot_ack_barrier", None)
     if barrier is None:
         return None
@@ -714,8 +710,8 @@ async def _broadcast_admin_request(
                     "(admin-authenticated PUT /workers {disabled: false}), "
                     "then retry",
                 )
-            # re-resolve the target set under the lock: membership may have
-            # changed while this request waited for a previous update
+            # Note (Jiaxin Deng): re-resolve the target set under the lock;
+            # membership may have changed while waiting for a previous update.
             target_workers = [worker for worker in workers if not worker.is_dead]
             if not target_workers:
                 return _error_response(503, "no live upstream workers")
@@ -758,17 +754,15 @@ async def _broadcast_admin_request_locked(
     body = await request.body()
     headers = filter_request_headers(request)
     previous_disabled = {worker.worker_id: worker.disabled for worker in workers}
-    # `results` distinguishes three outcomes for the journal/restore logic:
-    #   None -> crashed/cancelled after the broadcast started, outcome
-    #           UNKNOWN: keep targets disabled and journaled (fail closed).
-    #   []   -> the ACK barrier aborted before anything was sent: no weight
-    #           change happened, restore fully and clear the journal.
-    #   list -> the broadcast completed; restore only if every target succeeded.
+    # Note (Jiaxin Deng): `results` drives the journal/restore logic. None =
+    # crashed after the broadcast started (fail closed); [] = ACK barrier
+    # aborted before anything was sent (restore fully); list = broadcast
+    # completed (restore only if every target succeeded).
     results: list[dict[str, Any]] | None = None
     journal = getattr(app.state, "update_journal", None)
     if disable_targets and journal is not None:
-        # durable BEFORE disabling/publishing, so even a crash in the
-        # disable/publish window fails closed on recovery
+        # Note (Jiaxin Deng): durable before disabling/publishing, so even a
+        # crash in the disable/publish window fails closed on recovery.
         journal.begin(path, [worker.worker_id for worker in workers])
     if disable_targets:
         for worker in workers:
@@ -802,12 +796,10 @@ async def _broadcast_admin_request_locked(
             _notify_registry_change(app)
             if journal is not None:
                 if outcome_safe:
-                    # ACK abort ([]) or a fully successful broadcast: all
-                    # targets are known to remain on one weight version.
                     journal.clear()
                 else:
-                    # crashed after the broadcast started: every target's
-                    # weight version is uncertain, keep the whole set
+                    # Note (Jiaxin Deng): every target's weight version is
+                    # uncertain after a started broadcast; keep the whole set.
                     journal.keep([worker.worker_id for worker in workers])
 
     success = all(item["success"] for item in results)
@@ -830,9 +822,8 @@ def _restore_admin_disabled_state(
     outcome_safe: bool,
 ) -> None:
     if not outcome_safe:
-        # crashed/cancelled after the broadcast started, or some targets
-        # failed: the weight version is uncertain for the pool, so none may
-        # be re-enabled (fail closed)
+        # Note (Jiaxin Deng): the weight version is uncertain for the pool,
+        # so none may be re-enabled (fail closed).
         for worker in workers:
             worker.set_disabled(True)
         return

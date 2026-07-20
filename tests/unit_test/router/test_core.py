@@ -1172,10 +1172,8 @@ def test_router_processes_multiprocess_runs_the_supervisor(
         stopped_by_interrupt = False
 
     monkeypatch.setattr(serve_module, "RouterSupervisor", _FakeSupervisor)
-    # serve.main sets SGLANG_OMNI_ADMIN_KEY via os.environ directly to pass the
-    # CLI admin key to the CP child. setenv-then-delenv makes monkeypatch own
-    # the key (recorded original = absent) so it is restored at teardown and
-    # cannot leak into other tests, even though the code mutates os.environ.
+    # setenv-then-delenv makes monkeypatch own SGLANG_OMNI_ADMIN_KEY, so the
+    # key serve.main writes into os.environ is restored at teardown.
     monkeypatch.setenv("SGLANG_OMNI_ADMIN_KEY", "__owned_by_monkeypatch__")
     monkeypatch.delenv("SGLANG_OMNI_ADMIN_KEY")
     serve_module.main(

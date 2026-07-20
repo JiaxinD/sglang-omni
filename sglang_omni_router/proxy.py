@@ -236,17 +236,16 @@ class ProxyHandler:
         self._workers = workers
         self._selector = selector
         self._client = client
-        # admission accepts any object with the AdmissionController surface
-        # (try_acquire/release/inflight/to_dict), e.g. the shared-memory
-        # implementation in multi-process mode
+        # Note (Jiaxin Deng): admission accepts any object with the
+        # AdmissionController surface, e.g. the shared-memory one.
         self._admission = (
             admission
             if admission is not None
             else AdmissionController(config.effective_max_inflight)
         )
-        # Data-plane mode: workers come from the snapshot-fed view instead of
-        # the static list, and eviction-relevant failures are also reported
-        # to the control plane. Both default off (single-process mode).
+        # Note (Jiaxin Deng): data-plane mode; workers come from the
+        # snapshot-fed view and failures are reported to the CP. Both default
+        # off (single-process mode).
         self._worker_provider = worker_provider
         self._on_worker_failure = on_worker_failure
 
@@ -410,11 +409,9 @@ class ProxyHandler:
         try:
             upstream = await self._client.send(upstream_request, stream=True)
         except httpx.PoolTimeout:
-            # router-local pool contention, not a worker fault: do not feed
-            # the eviction signal nor a failed_requests count (the pool-size
-            # invariant makes this unreachable for admitted model traffic, but
-            # auxiliary users of a shared client must not penalize a healthy
-            # worker); the request never reached the worker, so it is not routed
+            # Note (Jiaxin Deng): router-local pool contention, not a worker
+            # fault; feed neither the eviction signal nor failed_requests, and
+            # the request never reached the worker, so it is not routed.
             worker.decrement_active()
             self._log_route_completion(
                 worker=worker,

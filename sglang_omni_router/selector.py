@@ -22,8 +22,8 @@ class WorkerSelector:
         rr_offset: int = 0,
     ) -> None:
         self.policy = policy
-        # rr_offset staggers round-robin starts across data-plane processes
-        # so N fresh DPs do not all herd onto worker 0 at once
+        # Note (Jiaxin Deng): rr_offset staggers round-robin starts so N
+        # fresh DPs do not all herd onto worker 0 at once.
         self._rr_index = rr_offset
         self._random = random.Random(seed)
 

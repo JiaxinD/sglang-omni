@@ -289,12 +289,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         check_file_descriptor_limit(config, strict=args.strict_limits)
         if args.router_processes > 1:
-            # control-plane/data-plane split: the supervisor owns the public
-            # socket, the managed-worker launcher, and the process tree
+            # Note (Jiaxin Deng): CP/DP split; the supervisor owns the public
+            # socket, the managed-worker launcher, and the process tree.
             if args.admin_api_key:
                 os.environ["SGLANG_OMNI_ADMIN_KEY"] = args.admin_api_key
-            # propagate the log level so CP/DP children are not stuck on the
-            # hard-coded default
+            # Note (Jiaxin Deng): propagate the log level so CP/DP children
+            # are not stuck on the hard-coded default.
             os.environ["SGLANG_OMNI_ROUTER_LOG_LEVEL"] = log_level
             logger.info(
                 f"Starting SGLang-Omni Router (multi-process) on "
@@ -309,8 +309,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 supervisor.run_forever()
             except KeyboardInterrupt:
                 parser.exit(130)
-            # run_forever installs its own SIGINT handler and returns cleanly;
-            # preserve the interrupted exit status after the orderly shutdown
+            # Note (Jiaxin Deng): run_forever absorbs SIGINT and returns
+            # cleanly; preserve the interrupted exit status (130).
             if supervisor.stopped_by_interrupt:
                 parser.exit(130)
             return

@@ -44,17 +44,15 @@ DEFAULT_DP_REFRESH_INTERVAL_SECS = 0.2
 DEFAULT_SNAPSHOT_MAX_AGE_SECS = 10.0
 DEFAULT_HEARTBEAT_INTERVAL_SECS = 2.0
 DEFAULT_COUNTER_FLUSH_INTERVAL_SECS = 1.0
-# Failure events are bounded-retry best-effort delivery, NOT at-least-once:
-# after the attempts below the event is dropped and the CP health probe is
-# the backstop.
+# Note (Jiaxin Deng): failure events are bounded-retry best-effort, not
+# at-least-once; past the attempts below the CP health probe is the backstop.
 _FAILURE_REPORT_MAX_ATTEMPTS = 3
 _FAILURE_REPORT_BACKOFF_SECS = 0.2
-# in-flight report tasks are bounded so a slow CP cannot accumulate
-# unbounded retry tasks (and their sockets) on the DP
+# Note (Jiaxin Deng): bound pending report tasks so a slow CP cannot pile up
+# retry tasks (and their sockets) on the DP.
 _FAILURE_REPORT_MAX_PENDING = 64
-# Consecutive definitive (non-428) registration rejections before the DP
-# fails closed; a DP the CP refuses to register cannot be covered by the
-# weight-update ACK barrier.
+# Note (Jiaxin Deng): definitive (non-428) registration rejections before the
+# DP fails closed; an unregistered DP escapes the weight-update ACK barrier.
 _REGISTER_REJECT_LIMIT = 10
 
 
@@ -89,10 +87,9 @@ class DataPlaneWorkerView:
                 and worker.incarnation != entry.incarnation
             )
             if worker is None or incarnation_changed:
-                # a new URL, or the same URL deleted and re-added (new
-                # incarnation): a FRESH Worker object, so an in-flight request
-                # holding the old object keeps the old incarnation and a late
-                # failure cannot be misattributed to the new worker (ABA)
+                # Note (Jiaxin Deng): a new incarnation gets a FRESH Worker, so
+                # an in-flight request holding the old object cannot
+                # misattribute a late failure to the new worker (ABA).
                 worker = Worker(config=config)
                 if entry.incarnation:
                     worker.incarnation = entry.incarnation
@@ -115,8 +112,8 @@ class DataPlaneWorkerView:
 
 
 def _default_fence_reaction() -> None:
-    # Fenced out by a newer generation: stop serving. SIGTERM lets uvicorn
-    # finish in-flight responses instead of dropping them.
+    # Note (Jiaxin Deng): SIGTERM lets uvicorn finish in-flight responses
+    # instead of dropping them.
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -159,9 +156,8 @@ def create_data_plane_app(
             timeout=httpx.Timeout(config.request_timeout_secs),
             limits=dp_client_limits(config, total_data_planes),
         )
-    # /v1/models fans out on its own small pool: metadata traffic is not
-    # admission-controlled and must not occupy the sized relay pool (an
-    # admitted model request must never queue behind it)
+    # Note (Jiaxin Deng): /v1/models fans out on its own small pool; metadata
+    # is not admission-controlled and must not occupy the sized relay pool.
     owns_metadata_client = metadata_client is None
     if metadata_client is None:
         metadata_client = httpx.AsyncClient(
@@ -175,15 +171,11 @@ def create_data_plane_app(
     def _report_failure(
         worker: Worker, status_code: int | None, error: str | None
     ) -> None:
-        # every distinct failure is reported with its own failure_seq (the
-        # CP's eviction threshold counts events, and dedups re-delivery by
-        # this id); retries of one event reuse the same id. The storm is
-        # self-limiting: at the threshold the CP unpublishes the worker and
-        # this DP stops routing to it within one refresh.
+        # Note (Jiaxin Deng): each distinct failure gets its own failure_seq
+        # (the CP counts events, dedups re-delivery by id; retries reuse it).
         if internal_client is None:
             return
         if len(failure_tasks) >= _FAILURE_REPORT_MAX_PENDING:
-            # bounded, best-effort by contract; health probes are the backstop
             logger.debug("worker_failure report dropped: too many pending")
             return
         loop = asyncio.get_running_loop()
@@ -278,8 +270,8 @@ def create_data_plane_app(
                             **identity,
                             "last_applied_seq": view.last_applied_seq,
                             "last_applied_epoch": view.last_applied_epoch,
-                            # self-reported serving state: shedding as
-                            # snapshot_stale must show up in CP /health
+                            # Note (Jiaxin Deng): shedding as snapshot_stale
+                            # must show up in CP /health.
                             "serving": _stale_gate() is None,
                         },
                         headers=_internal_headers(internal_token),
@@ -289,16 +281,16 @@ def create_data_plane_app(
                     on_fenced()
                     return
                 if response.status_code == 428:
-                    # the CP restarted and lost registrations: re-register,
-                    # this is NOT a fence
+                    # Note (Jiaxin Deng): 428 = CP restarted and lost
+                    # registrations; re-register, this is not a fence.
                     registered = False
                 elif response.status_code == 200:
                     registered = True
                     rejected_registrations = 0
                 else:
-                    # definitive rejection (e.g. token/config mismatch): an
-                    # unregistered DP is invisible to the weight-update ACK
-                    # barrier, so it must not keep serving indefinitely
+                    # Note (Jiaxin Deng): an unregistered DP is invisible to
+                    # the weight-update ACK barrier, so a definitively rejected
+                    # DP must not keep serving indefinitely.
                     registered = False
                     rejected_registrations += 1
                     logger.warning(
@@ -313,8 +305,8 @@ def create_data_plane_app(
                         on_fenced()
                         return
             except httpx.HTTPError:
-                # CP unreachable: the stale-snapshot gate governs serving;
-                # keep retrying and re-register once the CP is back.
+                # Note (Jiaxin Deng): CP unreachable; the stale-snapshot gate
+                # governs serving, keep retrying until the CP is back.
                 registered = False
             await asyncio.sleep(heartbeat_interval_secs)
 
@@ -341,7 +333,8 @@ def create_data_plane_app(
                 ],
             }
             if admission is not None and hasattr(admission, "touch"):
-                # keep the shm slot heartbeat fresh even when idle
+                # Note (Jiaxin Deng): keep the shm slot heartbeat fresh even
+                # when idle.
                 admission.touch()
             try:
                 response = await internal_client.post(
@@ -354,8 +347,8 @@ def create_data_plane_app(
                     on_fenced()
                     return
             except httpx.HTTPError:
-                # cumulative totals: the next flush carries everything, so a
-                # dropped report loses nothing
+                # Note (Jiaxin Deng): totals are cumulative; the next flush
+                # carries everything, so a dropped report loses nothing.
                 pass
 
     @asynccontextmanager
@@ -388,8 +381,8 @@ def create_data_plane_app(
                 await internal_client.aclose()
 
     app = FastAPI(title="sglang-omni-router-dp", version="0.1.0", lifespan=lifespan)
-    # same external CORS policy as the single-process app: the DP is the
-    # public surface, and browser preflights must keep working
+    # Note (Jiaxin Deng): same external CORS policy as the single-process app;
+    # the DP is the public surface.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -418,7 +411,6 @@ def create_data_plane_app(
 
     @app.get("/v1/models")
     async def models(request: Request) -> JSONResponse:
-        # public metadata stays DP-local: fan out over the snapshot view
         return await _merge_models(
             view.workers(),
             metadata_client,
@@ -432,9 +424,8 @@ def create_data_plane_app(
     return app
 
 
-# The privileged admin surface plus the aggregate /health live on the CP;
-# a DP relays them verbatim over the internal channel. Auth is NOT checked
-# here: the Authorization header is forwarded and the CP re-checks it.
+# Note (Jiaxin Deng): the admin surface and aggregate /health live on the CP;
+# a DP relays verbatim. Auth is not checked here: the CP re-checks it.
 _FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("/health", ("GET",)),
     ("/workers", ("GET", "POST")),
@@ -450,9 +441,8 @@ _FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("/weights_checker", ("GET", "POST")),
 )
 
-# reuse the canonical hop-by-hop set: the body is re-framed as fixed-length
-# bytes (httpx sets Content-Length), so a client transfer-encoding/te must not
-# ride along or the CP sees a Content-Length and a Transfer-Encoding at once
+# Note (Jiaxin Deng): the body is re-framed as fixed-length bytes, so a client
+# transfer-encoding/te must not ride along or the CP sees both framings at once.
 _FORWARD_REQUEST_STRIP = HOP_BY_HOP_HEADERS | {
     "host",
     "content-length",
@@ -487,9 +477,9 @@ def _register_cp_forwarding(
         )
 
     async def _forward(request: Request) -> Response:
-        # bound the body BEFORE buffering: auth happens on the CP, so this
-        # pre-auth path must not let an unauthenticated client exhaust DP
-        # memory with a huge or chunked body
+        # Note (Jiaxin Deng): bound the body before buffering; auth happens on
+        # the CP, so this pre-auth path must not let a huge or chunked body
+        # exhaust DP memory.
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > config.max_payload_size:
             return _payload_too_large()
@@ -499,8 +489,8 @@ def _register_cp_forwarding(
             if len(received) > config.max_payload_size:
                 return _payload_too_large()
         body = bytes(received)
-        # raw_path keeps the client's percent-encoding intact (worker ids
-        # contain encoded slashes that a decode/re-encode round trip loses)
+        # Note (Jiaxin Deng): raw_path keeps percent-encoding intact (worker
+        # ids contain encoded slashes a decode/re-encode round trip loses).
         raw_path = request.scope.get("raw_path")
         url = raw_path.decode("ascii") if raw_path else request.url.path
         query = request.scope.get("query_string", b"")
@@ -618,6 +608,7 @@ def create_dp_app_from_env() -> FastAPI:
         admission=admission,
         total_data_planes=total,
     )
-    # keep the shm file object alive for the app's lifetime
+    # Note (Jiaxin Deng): keep the shm file object alive for the app's
+    # lifetime.
     app.state.admission_shm_file = admission_file
     return app

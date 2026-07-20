@@ -62,9 +62,8 @@ logger = logging.getLogger("sglang_omni_router.control_plane")
 
 DEFAULT_DP_ACK_TIMEOUT_SECS = 10.0
 DEFAULT_DP_LIVENESS_SECS = 6.0
-# Note: (Jiaxin Deng) the snapshot doubles as the CP liveness signal for the
-# DP stale-timeout, so it is republished on a fixed cadence, not only on
-# state changes (the health tick alone can be slower than the DP max age).
+# Note (Jiaxin Deng): the snapshot doubles as the CP liveness signal for the
+# DP stale-timeout, so republish on a fixed cadence, not only on state changes.
 DEFAULT_SNAPSHOT_KEEPALIVE_SECS = 2.0
 _ACK_POLL_INTERVAL_SECS = 0.05
 
@@ -73,11 +72,11 @@ class WorkerFailureReport(BaseModel):
     worker_id: str
     status_code: int | None = None
     error: str | None = None
-    # the incarnation pins the report to the worker object it was observed
-    # on: a failure from a deleted-and-re-added URL must not evict the new one
+    # Note (Jiaxin Deng): the incarnation pins the report to the observed
+    # worker; a failure from a deleted-and-re-added URL must not evict the new one.
     incarnation: str = ""
-    # event identity: retries of ONE failure reuse one failure_seq, so
-    # re-delivery cannot count a single failure toward eviction twice
+    # Note (Jiaxin Deng): retries of one failure reuse one failure_seq, so
+    # re-delivery cannot count a single failure toward eviction twice.
     dp_index: int = PydanticField(ge=0)
     generation: int = PydanticField(ge=1)
     failure_seq: int = PydanticField(ge=1)
@@ -146,8 +145,8 @@ def create_control_plane_app(
     writer = SnapshotWriter(snapshot_path, cp_epoch)
     internal_state = InternalChannelState()
     ledger = DataPlaneCounterLedger()
-    # a STABLE path (default keyed by host:port): the journal must survive a
-    # full supervisor restart, not just a CP respawn inside one supervisor
+    # Note (Jiaxin Deng): a stable path (keyed by host:port); the journal must
+    # survive a full supervisor restart, not just a CP respawn.
     journal = UpdateJournal(
         journal_path or default_journal_path(config.host, config.port)
     )
@@ -165,9 +164,8 @@ def create_control_plane_app(
             expected_data_planes,
         )
 
-    # The CP only fans out health checks, admin broadcasts, and /v1/models
-    # merges; it never relays data traffic, so its pool is sized to the
-    # worker count, not to the admission bound.
+    # Note (Jiaxin Deng): the CP never relays data traffic, so its pool is
+    # sized to the worker count, not to the admission bound.
     owns_client = client is None
     if client is None:
         client = httpx.AsyncClient(
@@ -199,20 +197,17 @@ def create_control_plane_app(
                 for record in internal_state.data_planes.values()
                 if now - record.last_seen_at <= dp_liveness_secs
             }
-            # an ACK must come from THIS epoch: a bare seq carried over from
-            # a previous CP's numbering must never satisfy the barrier
+            # Note (Jiaxin Deng): an ACK must come from this epoch; a seq from
+            # a previous CP's numbering must never satisfy the barrier.
             pending = {
                 index
                 for index, record in live.items()
                 if record.last_applied_epoch != cp_epoch
                 or record.last_applied_seq < target_seq
             }
-            # fail closed on absent DPs: a serving DP the (possibly just
-            # restarted) CP has not heard from is not an implicit ACK. With a
-            # supervisor-provided fleet size that set is range(expected); with
-            # no expected count, fall back to every DP that has ever registered
-            # so a known-but-silent DP still holds the barrier (matching the
-            # supervised path) instead of being dropped into a zero-ACK pass.
+            # Note (Jiaxin Deng): fail closed on absent DPs; a DP the CP has
+            # not heard from is not an implicit ACK, and with no expected
+            # count every DP that ever registered holds the barrier.
             if expected_data_planes is not None:
                 expected_indices = range(expected_data_planes)
             else:
@@ -249,8 +244,8 @@ def create_control_plane_app(
                 try:
                     publish()
                 except Exception:
-                    # a transient write failure must not end the cadence:
-                    # the snapshot doubles as the CP liveness signal
+                    # Note (Jiaxin Deng): a transient write failure must not
+                    # end the cadence; the snapshot is the CP liveness signal.
                     logger.exception("snapshot keepalive publish failed")
 
         keepalive_task = asyncio.create_task(_keepalive())
@@ -296,10 +291,9 @@ def create_control_plane_app(
             for record in internal_state.data_planes.values()
             if now - record.last_seen_at <= dp_liveness_secs
         ]
-        # serving-ready = live AND applied THIS CP's snapshot AND
-        # self-reports serving AND (when the slot array is mapped) still owns
-        # its admission slot - a crashed generation drops out immediately
-        # instead of lingering for the liveness window
+        # Note (Jiaxin Deng): serving-ready = live + applied this epoch +
+        # self-reports serving + still owns its admission slot, so a crashed
+        # generation drops out immediately instead of lingering.
         slot_generations: dict[int, int] = {}
         admission_error = None
         admission_slots = None
@@ -310,9 +304,8 @@ def create_control_plane_app(
                     slot["index"]: slot["generation"] for slot in admission_slots
                 }
             except SeqlockUnstableError as exc:
-                # the shm is momentarily unstable (a fold in flight): report a
-                # read error rather than a 500, and do not gate readiness on
-                # an unreadable slot array
+                # Note (Jiaxin Deng): momentarily unstable shm (fold in
+                # flight); report a read error, do not gate readiness on it.
                 admission_error = str(exc)
         ready_indices = {
             record.dp_index
@@ -327,7 +320,8 @@ def create_control_plane_app(
         }
         routable = sum(1 for worker in workers if worker.is_routable)
         if expected_data_planes is not None:
-            # identity, not cardinality: {0, 99} is not a full roster of 2
+            # Note (Jiaxin Deng): identity, not cardinality; {0, 99} is not a
+            # full roster of 2.
             expected_set = set(range(expected_data_planes))
             missing = sorted(expected_set - ready_indices)
             unexpected = sorted({record.dp_index for record in live_dps} - expected_set)
@@ -336,8 +330,8 @@ def create_control_plane_app(
             missing = []
             unexpected = []
             serving = len(ready_indices)
-        # degraded, not dead: some DPs missing is a warning while at least
-        # one keeps serving; 503 only when nothing can serve at all
+        # Note (Jiaxin Deng): degraded, not dead, while at least one DP keeps
+        # serving; 503 only when nothing can serve at all.
         no_service = routable == 0 or (
             expected_data_planes is not None and serving == 0
         )
@@ -380,8 +374,8 @@ def create_control_plane_app(
     applied_failure_seqs: dict[tuple[int, int], dict] = {}
 
     def _failure_already_applied(report: WorkerFailureReport) -> bool:
-        # exact-id dedup (not high-water: distinct events may arrive out of
-        # order), with a pruning floor to bound memory
+        # Note (Jiaxin Deng): exact-id dedup (not high-water: events may
+        # arrive out of order), with a pruning floor to bound memory.
         state = applied_failure_seqs.setdefault(
             (report.dp_index, report.generation), {"seqs": set(), "floor": 0}
         )

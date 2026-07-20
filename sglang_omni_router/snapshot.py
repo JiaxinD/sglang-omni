@@ -27,7 +27,7 @@ class SnapshotWorker(BaseModel):
     routable: bool = True
     state: str = "healthy"
     disabled: bool = False
-    # Note: (Jiaxin Deng) reserved for a power-of-two-choices load hint; not
+    # Note (Jiaxin Deng): reserved for a power-of-two-choices load hint; not
     # populated or read anywhere yet.
     load_hint: float | None = None
 
@@ -108,9 +108,8 @@ class SnapshotReader:
             stat_result = os.stat(self._path)
         except OSError:
             return False
-        # Note: (Jiaxin Deng) mtime alone is not a change signal: kernel file
-        # timestamps are tick-granular, so rapid successive publishes can
-        # share one mtime. os.replace gives every publish a fresh inode, so
+        # Note (Jiaxin Deng): mtime alone is tick-granular and can be shared
+        # by rapid publishes; os.replace gives every publish a fresh inode, so
         # (ino, size, mtime) does change.
         fingerprint = (
             stat_result.st_ino,
@@ -123,12 +122,12 @@ class SnapshotReader:
             with open(self._path, encoding="utf-8") as f:
                 snapshot = WorkerSnapshot.model_validate_json(f.read())
         except (OSError, ValueError):
-            # Torn/invalid content: keep the last good snapshot. The
-            # fingerprint is NOT advanced, so the file is retried next poll.
+            # Note (Jiaxin Deng): torn/invalid content keeps the last good
+            # snapshot; the fingerprint is not advanced, so it retries.
             return False
         if snapshot.version != SNAPSHOT_SCHEMA_VERSION:
-            # a valid JSON from an incompatible schema must not replace the
-            # last good view
+            # Note (Jiaxin Deng): a valid JSON from an incompatible schema
+            # must not replace the last good view.
             return False
         self._last_fingerprint = fingerprint
         if (

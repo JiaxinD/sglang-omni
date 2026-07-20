@@ -70,7 +70,8 @@ class UpdateJournal:
         try:
             return bool(self.pending())
         except JournalUnreadableError:
-            # unreadable = assume a transaction is in progress (fail closed)
+            # Note (Jiaxin Deng): unreadable = assume a transaction is in
+            # progress (fail closed).
             return True
 
     def begin(self, path: str, worker_ids: list[str]) -> None:
@@ -87,8 +88,8 @@ class UpdateJournal:
         try:
             remaining = [wid for wid in self.pending() if wid != worker_id]
         except JournalUnreadableError:
-            # cannot safely edit an unreadable journal; leave it for an
-            # operator rather than partially clearing it
+            # Note (Jiaxin Deng): cannot safely edit an unreadable journal;
+            # leave it for an operator rather than partially clearing it.
             return
         self.keep(remaining)
 
@@ -111,8 +112,8 @@ class UpdateJournal:
         self._fsync_dir()
 
     def _fsync_dir(self) -> None:
-        # durability across a host crash: the rename/unlink is only durable
-        # once the parent directory entry is synced
+        # Note (Jiaxin Deng): the rename/unlink is only durable across a
+        # host crash once the parent directory entry is synced.
         directory = os.path.dirname(self._path) or "."
         try:
             fd = os.open(directory, os.O_RDONLY)

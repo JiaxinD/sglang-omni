@@ -98,10 +98,8 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
 def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # a DP killed mid-write leaves its slot odd until the supervisor reclaims
-    # it. The CP aggregate readers (/health, observability) run on the asyncio
-    # event loop, so they must fail fast (spin, never sleep) rather than block
-    # the loop for ~2s on a writer that is never coming back.
+    # a DP killed mid-write leaves its slot odd until reclaim; event-loop
+    # aggregate readers must fail fast (spin, never sleep) instead of blocking.
     import sglang_omni_router.admission_shm as shm
 
     sleeps: list[float] = []
@@ -180,9 +178,8 @@ def test_to_dict_matches_the_single_process_surface() -> None:
 
 
 def test_release_below_zero_is_clamped_not_asserted() -> None:
-    # a shared-memory invariant must not be guarded by assert (stripped under
-    # python -O): a stray release is clamped and logged, never driving the
-    # shared in-flight count negative (which would inflate every DP's budget)
+    # not an assert (stripped under python -O): a stray release is clamped
+    # and logged, never driving the shared in-flight count negative
     buf = _buf()
     a = _admission(buf, 0)
     a.release()  # no in-flight: ignored, not fatal
@@ -283,9 +280,8 @@ def test_platform_warning_fires_off_x86(
 
 
 def test_fold_is_atomic_across_the_two_slot_transfer() -> None:
-    # a reader entering after retired.write_fields but before dying.reclaim
-    # must NOT double count: the retired slot stays mid-write (odd) across
-    # both, so an aggregate read retries to a consistent state
+    # a reader between retired.write_fields and dying.reclaim must not double
+    # count: the retired slot stays mid-write (odd) across both, so it retries
     from sglang_omni_router.admission_shm import (
         SeqlockUnstableError,
         retired_slot_index,

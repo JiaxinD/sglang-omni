@@ -36,10 +36,11 @@ class DataPlaneHeartbeat(BaseModel):
     generation: int = Field(ge=1)
     pid: int = Field(ge=1)
     last_applied_seq: int = Field(default=0, ge=0)
-    # seqs are only ordered within one cp_epoch; a bare integer from an old
-    # epoch must never acknowledge a new epoch's snapshot
+    # Note (Jiaxin Deng): seqs are only ordered within one cp_epoch; a bare
+    # integer from an old epoch must never acknowledge a new epoch's snapshot.
     last_applied_epoch: str = ""
-    # self-reported: false while the DP sheds as snapshot_stale
+    # Note (Jiaxin Deng): self-reported; false while the DP sheds as
+    # snapshot_stale.
     serving: bool = True
 
 
@@ -70,9 +71,9 @@ class InternalChannelState:
             if hello.generation < current.generation:
                 raise StaleGenerationError(hello.generation, current.generation)
             if hello.generation == current.generation and hello.pid != current.pid:
-                # the supervisor never reuses a generation, so an
+                # Note (Jiaxin Deng): generations are never reused, so an
                 # equal-generation register from a different pid is a fenced
-                # or impostor process, not a re-register
+                # or impostor process, not a re-register.
                 raise StaleGenerationError(hello.generation, current.generation)
         preserved_seq = 0
         if (
@@ -80,8 +81,8 @@ class InternalChannelState:
             and hello.generation == current.generation
             and hello.pid == current.pid
         ):
-            # idempotent re-register (e.g. after a dropped connection): the
-            # DP's applied snapshot did not go backwards
+            # Note (Jiaxin Deng): idempotent re-register; the DP's applied
+            # snapshot did not go backwards.
             preserved_seq = current.last_applied_seq
         record = DataPlaneRecord(
             dp_index=hello.dp_index,
@@ -96,16 +97,18 @@ class InternalChannelState:
     def heartbeat(self, beat: DataPlaneHeartbeat) -> DataPlaneRecord:
         current = self.data_planes.get(beat.dp_index)
         if current is None or beat.generation > current.generation:
-            # not registered with THIS control plane (e.g. the CP restarted
-            # between heartbeats): tell the DP to register, do not fence it
+            # Note (Jiaxin Deng): not registered with this CP (it may have
+            # restarted); tell the DP to register, do not fence it.
             raise UnknownDataPlaneError(beat.dp_index)
         if beat.generation < current.generation or beat.pid != current.pid:
             raise StaleGenerationError(beat.generation, current.generation)
         if beat.last_applied_epoch == current.last_applied_epoch:
-            # max() so a delayed or replayed heartbeat cannot regress the ACK
+            # Note (Jiaxin Deng): max() so a delayed or replayed heartbeat
+            # cannot regress the ACK.
             applied_seq = max(current.last_applied_seq, beat.last_applied_seq)
         else:
-            # new epoch: the seq scale restarted, take it as reported
+            # Note (Jiaxin Deng): new epoch, the seq scale restarted; take it
+            # as reported.
             applied_seq = beat.last_applied_seq
         record = DataPlaneRecord(
             dp_index=beat.dp_index,
@@ -167,7 +170,8 @@ def register_internal_routes(
         try:
             record = state.heartbeat(beat)
         except UnknownDataPlaneError as exc:
-            # 428: this CP has no record (e.g. it restarted); re-register
+            # Note (Jiaxin Deng): 428 = this CP has no record (it may have
+            # restarted); the DP should re-register.
             raise HTTPException(status_code=428, detail=str(exc)) from exc
         except StaleGenerationError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

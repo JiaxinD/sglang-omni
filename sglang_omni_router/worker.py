@@ -36,8 +36,8 @@ class Worker:
     config: WorkerConfig
     worker_id: str = field(init=False)
     display_id: str = field(init=False)
-    # regenerated on every registration: stale reports from a previous
-    # incarnation of the same URL must not act on this one
+    # Note (Jiaxin Deng): regenerated on every registration; stale reports
+    # from a previous incarnation of the same URL must not act on this one.
     incarnation: str = field(default_factory=lambda: uuid.uuid4().hex)
     active_requests: int = 0
     state: WorkerState = HEALTH_STATE_UNKNOWN

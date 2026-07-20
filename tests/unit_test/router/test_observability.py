@@ -46,9 +46,8 @@ def test_first_contact_establishes_the_baseline() -> None:
 
 
 def test_cp_restart_restarts_the_window_coherently() -> None:
-    # a fresh ledger (CP restart) sees a surviving DP's large cumulative as
-    # baseline: the display restarts at zero, it does not fall to an
-    # arbitrary mid-window value
+    # a fresh ledger (CP restart) takes a surviving DP's cumulative as
+    # baseline: the display restarts at zero
     old_cp = DataPlaneCounterLedger()
     old_cp.apply(_report(1, 0), now=0.0)
     old_cp.apply(_report(9, 120), now=0.0)

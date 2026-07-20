@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multi-process router supervisor.
 
-Process model (plan-fixed topology): the supervisor binds the public data
-socket once and passes the inherited fd to N data-plane (DP) subprocesses,
-which accept from the shared listen queue. A separate control-plane (CP)
-process serves the internal channel (and, in later stages, the registry and
-admin plane) on a permission-controlled UDS or a token-guarded localhost port.
+Process model: the supervisor binds the public data socket once and passes
+the inherited fd to N data-plane (DP) subprocesses, which accept from the
+shared listen queue. A separate control-plane (CP) process serves the
+registry, the admin plane, and the internal channel on a
+permission-controlled UDS or a token-guarded localhost port.
 
-Lifecycle invariants (plan-fixed):
+Lifecycle invariants:
 - Slot reclaim ordering: a dead DP is first reaped (wait()), only then is its
   slot reclaimed (on_dp_exit hook) and the generation bumped; the replacement
   is spawned with the new generation. A still-running process is never
@@ -114,8 +114,8 @@ class SupervisorContext:
             env[EXPECTED_DPS_ENV] = str(self.expected_data_planes)
         if self.death_pipe_fd >= 0:
             env[DEATH_PIPE_FD_ENV] = str(self.death_pipe_fd)
-        # exactly one transport: a stale variable inherited from the parent
-        # environment must not misdirect the children
+        # Note (Jiaxin Deng): exactly one transport; a stale variable inherited
+        # from the parent environment must not misdirect the children.
         if self.internal_uds:
             env[INTERNAL_UDS_ENV] = self.internal_uds
             env.pop(INTERNAL_TCP_URL_ENV, None)
@@ -230,8 +230,8 @@ class RouterSupervisor:
         self._dp_slots: dict[int, DataPlaneSlot] = {}
         self._stop_requested = False
         self._interrupted = False
-        # Note: (Jiaxin Deng) hook point for the shared-admission slot reclaim
-        # (later stage); called only after the dead process is reaped.
+        # Note (Jiaxin Deng): hook point for the shared-admission slot reclaim;
+        # called only after the dead process is reaped.
         self.on_dp_exit: Callable[[int, int, int], None] | None = None
 
     def request_stop(self, *, interrupted: bool = False) -> None:
@@ -264,8 +264,8 @@ class RouterSupervisor:
         try:
             self._start_inner()
         except BaseException:
-            # transactional startup: a half-started supervisor must not leak
-            # already-spawned children, the bound socket, or workdir artifacts
+            # Note (Jiaxin Deng): a half-started supervisor must not leak
+            # spawned children, the bound socket, or workdir artifacts.
             self._cleanup_partial_start()
             raise
 
@@ -381,16 +381,14 @@ class RouterSupervisor:
         for slot in list(self._dp_slots.values()):
             if slot.process.poll() is None:
                 continue
-            # 1) confirm the exit before anything else touches the slot
             returncode = slot.process.wait()
             logger.warning(
                 f"data-plane {slot.index} (generation {slot.generation}, "
                 f"pid {slot.process.pid}) exited with {returncode}"
             )
-            # 2) reclaim only after the reap: free the dead DP's admission
-            #    slot so its in-flight count stops eating the global budget,
-            #    folding its rejected/peak into the retired slot first so
-            #    aggregate totals never move backwards
+            # Note (Jiaxin Deng): reclaim only after the reap; fold the dead
+            # DP's rejected/peak into the retired slot first so aggregate
+            # totals never move backwards.
             if self._admission_mmap is not None:
                 self._fold_and_reclaim_slot(slot.index)
             if self.on_dp_exit is not None:
@@ -406,7 +404,6 @@ class RouterSupervisor:
                     f"within {self._rapid_window_secs}s of spawn; failing "
                     "closed instead of flapping"
                 )
-            # 3) bump the generation and respawn
             self._spawn_dp_slot(slot.index, generation=slot.generation + 1)
 
         if self._cp_process is not None and self._cp_process.poll() is not None:
@@ -422,22 +419,23 @@ class RouterSupervisor:
                     f"{self._rapid_window_secs}s of spawn; failing closed "
                     "instead of flapping"
                 )
-            # a hard-killed CP leaves its UDS socket file behind, and the
-            # replacement cannot bind until it is gone
+            # Note (Jiaxin Deng): a hard-killed CP leaves its UDS socket file
+            # behind, and the replacement cannot bind until it is gone.
             if self.context.internal_uds:
                 try:
                     os.unlink(self.context.internal_uds)
                 except OSError:
                     pass
-            # a restarted CP is a new epoch: snapshot seqs restart from 1
+            # Note (Jiaxin Deng): a restarted CP is a new epoch; snapshot seqs
+            # restart from 1.
             self._context = replace(self.context, cp_epoch=uuid.uuid4().hex)
             self._cp_process = self._spawn_cp(self._context)
             self._cp_spawned_at = self._clock()
 
     def run_forever(self, poll_interval_secs: float = 0.5) -> None:
-        # an ordinary service stop is SIGTERM to this pid; without a handler
-        # the default action would kill the supervisor with no cleanup and
-        # orphan every child on the still-bound public socket
+        # Note (Jiaxin Deng): without a SIGTERM handler the default action
+        # kills the supervisor with no cleanup and orphans every child on the
+        # still-bound public socket.
         previous_handlers: dict[int, object] = {}
 
         def _handler(signum, _frame):
@@ -447,22 +445,22 @@ class RouterSupervisor:
             try:
                 previous_handlers[signum] = signal.signal(signum, _handler)
             except (ValueError, OSError):
-                # not the main thread / unsupported: caller owns signals
+                # Note (Jiaxin Deng): not the main thread; caller owns signals.
                 pass
         try:
             while not self._stop_requested:
                 self.poll_once()
                 time.sleep(poll_interval_secs)
         finally:
-            # shut down FIRST, with our handler still installed, so a second
-            # signal during the drain is absorbed (request_stop) instead of the
-            # default action killing us mid-cleanup and leaking workdir/shm/UDS
+            # Note (Jiaxin Deng): shut down with our handler still installed,
+            # so a second signal during the drain is absorbed instead of
+            # killing us mid-cleanup and leaking workdir/shm/UDS.
             try:
                 self.shutdown()
             finally:
                 for signum, handler in previous_handlers.items():
-                    # a C-level previous handler reads back as None and cannot
-                    # be reinstalled via signal.signal (TypeError); leave ours
+                    # Note (Jiaxin Deng): a C-level previous handler reads back
+                    # as None and cannot be reinstalled; leave ours.
                     if handler is not None:
                         signal.signal(signum, handler)
 
@@ -500,17 +498,17 @@ class RouterSupervisor:
             view = dying.read(fail_fast=True)
             accumulated = retired.read(fail_fast=True)
         except SeqlockUnstableError:
-            # the owner died mid-write: its final counters are unreadable and
-            # drop out of the fold; still normalize the slot below
+            # Note (Jiaxin Deng): the owner died mid-write; its final counters
+            # are unreadable and drop out of the fold.
             logger.warning(
                 f"admission slot {index} unreadable at reclaim; its retired "
                 "counters were skipped"
             )
             dying.reclaim()
             return
-        # hold the retired slot mid-write across BOTH the field update and the
-        # dying-slot reclaim, so an aggregate reader that reads the retired
-        # slot retries until the whole transfer completes (no double count)
+        # Note (Jiaxin Deng): hold the retired slot mid-write across both the
+        # field update and the reclaim, so an aggregate reader retries until
+        # the whole transfer completes (no double count).
         marker = retired.begin_write()
         retired.write_fields(
             inflight=0,
@@ -538,8 +536,8 @@ class RouterSupervisor:
             self._admission_file = None
 
     def shutdown(self) -> None:
-        # two phases: signal EVERY DP first so none keeps accepting from the
-        # shared socket while its siblings drain, then reap them together
+        # Note (Jiaxin Deng): signal every DP first so none keeps accepting
+        # from the shared socket while its siblings drain, then reap together.
         for slot in self._dp_slots.values():
             self._signal_child(slot.process)
         for slot in self._dp_slots.values():

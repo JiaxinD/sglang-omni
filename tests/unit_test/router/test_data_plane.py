@@ -326,9 +326,8 @@ def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
 def test_dp_strips_hop_by_hop_headers_when_forwarding_to_the_cp(
     tmp_path: Path,
 ) -> None:
-    # the DP re-frames the body as fixed-length bytes (httpx sets Content-Length),
-    # so a client Transfer-Encoding/hop-by-hop header must not ride along or the
-    # CP sees both a Content-Length and a Transfer-Encoding (smuggling ambiguity)
+    # the DP re-frames the body as fixed-length bytes, so a client
+    # Transfer-Encoding must not ride along (smuggling ambiguity at the CP)
     cp = _CPRecorder(status=200)
     app = _dp_app_forwarding_to_cp(tmp_path, cp)
     with TestClient(app) as tc:
@@ -642,8 +641,8 @@ def test_selector_rr_offset_staggers_first_picks() -> None:
 
 
 def test_dp_relays_sse_byte_identically(tmp_path: Path) -> None:
-    # behavior-face corpus item: the DP app must relay an event stream
-    # byte-for-byte through the snapshot-fed relay path
+    # the DP app must relay an event stream byte-for-byte through the
+    # snapshot-fed relay path
     chunks = [
         b'data: {"choices": [{"delta": {"content": "he"}}]}\n\n',
         b'data: {"choices": [{"delta": {"audio": {"data": "AAAA"}}}]}\n\n',
@@ -685,9 +684,8 @@ def test_dp_relays_sse_byte_identically(tmp_path: Path) -> None:
 
 
 def test_incarnation_change_replaces_the_worker_object() -> None:
-    # a URL deleted and re-added (new incarnation) must yield a FRESH Worker
-    # object, so an in-flight request holding the old object keeps the old
-    # incarnation and a late failure cannot be misattributed (ABA)
+    # a new incarnation must yield a FRESH Worker object, so an in-flight
+    # request holding the old one cannot misattribute a late failure (ABA)
     view = DataPlaneWorkerView()
 
     class _Snap:
@@ -736,9 +734,8 @@ def test_incarnation_unchanged_preserves_the_worker_object_and_counters() -> Non
 
 
 def test_dp_does_not_report_non_gateway_failures_to_the_cp(tmp_path: Path) -> None:
-    # #1014 narrowed WORKER_EVICTION_STATUS_CODES to gateway-only (502/504):
-    # a 503 (capacity backpressure) is a per-request failure, not an eviction
-    # signal, so it must not fire a DP->CP worker_failure report.
+    # eviction is gateway-only (502/504): a 503 is a per-request failure,
+    # not an eviction signal, so it must not fire a worker_failure report
     import time as _time
 
     upstream = _Recorder(status_for={"/generate": 503})

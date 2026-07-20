@@ -98,10 +98,8 @@ class DataPlaneCounterLedger:
         for item in report.workers:
             ledger = per_worker.get(item.worker_id)
             if ledger is None:
-                # first sight of this worker under this (dp, generation):
-                # at first contact the whole cumulative becomes the baseline
-                # (since-CP-start); a worker appearing later started from a
-                # fresh zero-counter object on the DP, so its baseline is 0
+                # Note (Jiaxin Deng): first sight under this (dp, generation)
+                # takes the whole cumulative as the since-CP-start baseline.
                 first_contact = entry is None
                 per_worker[item.worker_id] = _WorkerLedger(
                     baseline={
@@ -113,10 +111,12 @@ class DataPlaneCounterLedger:
                 )
                 continue
             for key in _COUNTER_KEYS:
-                # clamp: a regressed cumulative must not lower the display
+                # Note (Jiaxin Deng): clamp; a regressed cumulative must not
+                # lower the display.
                 ledger.high_water[key] = max(ledger.high_water[key], getattr(item, key))
             ledger.current_active = item.current_active
-        # workers missing from the report keep their last contribution
+        # Note (Jiaxin Deng): workers missing from the report keep their
+        # last contribution.
 
         self._entries[report.dp_index] = _LedgerEntry(
             generation=report.generation,
