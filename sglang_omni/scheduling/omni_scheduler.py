@@ -97,6 +97,10 @@ class OmniScheduler:
         are defined directly on this class and take precedence.
     """
 
+    # Scan tooling (loop_timer.py), set in start(); class default keeps
+    # direct loop invocation (tests) working.
+    _loop_timer = None
+
     def __init__(
         self,
         tp_worker: Any,
@@ -1047,6 +1051,9 @@ class OmniScheduler:
             self._dirty_deferred_request_ids.add(request_id)
 
     def start(self) -> None:
+        from sglang_omni.scheduling.loop_timer import maybe_loop_timer
+
+        self._loop_timer = maybe_loop_timer()
         self._scheduler_thread_id = threading.get_ident()
         self._running = True
         try:
@@ -1608,10 +1615,16 @@ class OmniScheduler:
         # (which is mostly Python-side dispatch into many small CUDA kernels)
         # slows ~600x, dropping audio QPS from >10 to <0.5.
         while self._running:
+            _lt = self._loop_timer
+            _t = time.perf_counter() if _lt else 0.0
             self._process_admin_requests()
             recv_reqs = self.recv_requests()
             recv_reqs.extend(self._take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
+            if _lt:
+                _now = time.perf_counter()
+                _lt.add("recv", _now - _t)
+                _t = time.perf_counter()
             if self._engine_paused:
                 self._process_admin_requests()
                 time.sleep(0.001)
@@ -1619,14 +1632,27 @@ class OmniScheduler:
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            if _lt:
+                _now = time.perf_counter()
+                _lt.add("schedule", _now - _t)
+                _t = time.perf_counter()
 
             if batch:
                 result = self.run_batch(batch)
                 if result is not _FAILED_BATCH_RESULT:
                     self.process_batch_result(batch, result)
+                if _lt:
+                    _seg = (
+                        "sync_decode"
+                        if self._batch_is_decode(batch)
+                        else "sync_prefill"
+                    )
+                    _lt.add(_seg, time.perf_counter() - _t)
             else:
                 self.self_check_during_idle()
                 time.sleep(0.001)
+                if _lt:
+                    _lt.add("idle", time.perf_counter() - _t)
 
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
@@ -1809,10 +1835,16 @@ class OmniScheduler:
         decode first and run synchronously (the in-flight step is never stranded).
         """
         while self._running:
+            _lt = self._loop_timer
+            _t = time.perf_counter() if _lt else 0.0
             self._process_admin_requests()
             recv_reqs = self.recv_requests()
             recv_reqs.extend(self._take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
+            if _lt:
+                _now = time.perf_counter()
+                _lt.add("recv", _now - _t)
+                _t = time.perf_counter()
             if self._engine_paused:
                 self._process_admin_requests()
                 self._resolve_pending_async()
@@ -1828,9 +1860,17 @@ class OmniScheduler:
                 )
             ):
                 self._resolve_pending_async()
+                if _lt:
+                    _now = time.perf_counter()
+                    _lt.add("resolve_drain", _now - _t)
+                    _t = time.perf_counter()
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            if _lt:
+                _now = time.perf_counter()
+                _lt.add("schedule", _now - _t)
+                _t = time.perf_counter()
 
             # Route through sync when the runner's collect has a sync-only
             # fallback (default True for runners not overriding lookahead_eligible).
@@ -1848,6 +1888,10 @@ class OmniScheduler:
                 except Exception as exc:
                     self._handle_batch_failure(batch, exc)
                 else:
+                    if _lt:
+                        _now = time.perf_counter()
+                        _lt.add("launch", _now - _t)
+                        _t = time.perf_counter()
                     prev_pending = self._async_pending
                     self._async_pending = (batch.copy(), sched_output, pending_step)
                     if prev_pending is not None:
@@ -1856,6 +1900,8 @@ class OmniScheduler:
                             self._resolve_and_process(pb, ps, pstep)
                         except Exception as exc:
                             self._handle_batch_failure(pb, exc)
+                        if _lt:
+                            _lt.add("resolve", time.perf_counter() - _t)
             else:
                 # Fast path (low-concurrency decode below the threshold) +
                 # prefill + empty all land here: flush any in-flight lookahead
@@ -1874,13 +1920,26 @@ class OmniScheduler:
                     # KV). Fast-path analogue of the _resolve_and_process drop.
                     batch = self._drop_stale_overrun(batch)
                     self.cur_batch = batch
+                    if _lt:
+                        _now = time.perf_counter()
+                        _lt.add("resolve_drain", _now - _t)
+                        _t = time.perf_counter()
                 if batch:
                     result = self.run_batch(batch)
                     if result is not _FAILED_BATCH_RESULT:
                         self.process_batch_result(batch, result)
+                    if _lt:
+                        _seg = (
+                            "sync_decode"
+                            if self._batch_is_decode(batch)
+                            else "sync_prefill"
+                        )
+                        _lt.add(_seg, time.perf_counter() - _t)
                 else:
                     self.self_check_during_idle()
                     time.sleep(0.001)
+                    if _lt:
+                        _lt.add("idle", time.perf_counter() - _t)
 
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
