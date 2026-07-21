@@ -186,7 +186,7 @@ Every attempted configuration is reported, including the failures.
 | whisper-large-v3-turbo (c16) | 46 qps | 76 qps (1.65x) | 96 qps (**2.07x**) | prefill-loop-bound; 0.35 per replica; the first DP attempt lost replicas at MPS bring-up, clean on retry |
 | Higgs-TTS-3-4B (c32) | 19.4 qps | 31.6 qps (1.63x) | 36.9 qps (**1.91x**) | decode-launch-bound; 0.85/0.40/0.27; consistent with the pinned case study above (1.8-2.1x) |
 | MOSS-TTS-Local (c16) | 9.0 qps | 13.4 qps (1.50x) | 16.8 qps (**1.88x**) | decode-launch-bound; 0.75/0.35/0.24; DP3 failed to boot at 0.27, booted at 0.24 |
-| MOSS-Transcribe-Diarize (c8) | 2.5 qps | 3.7 qps (1.49x) | 4.25 qps (**1.70x**) | the GPU-side outlier (memory-bound decode backbone); 0.80/0.40/0.25; per-replica throughput -43 percent at DP3 |
+| MOSS-Transcribe-Diarize (c8) | 2.5 qps | 3.7 qps (1.49x) | 4.25 qps (**1.70x**) | the GPU-side outlier (memory-bound decode backbone); 0.80/0.40/0.25; per-replica throughput -43 percent at DP3. A controlled repeat at matched fractions landed at 1.35x, so treat this family's DP3 gain as 1.35-1.70x: run-to-run variance is high in the contended regime |
 | MOSS-TTS-v1.5 delay (c16) | 2.3 qps | did not fit | did not fit | combined DP2 allocations (weights + roughly 10 GB codec + engine pool per replica) exceed 80 GB at every per-replica fraction tried (0.42, 0.32, 0.24) |
 | Fun-ASR-Nano | (single-replica only) | failed | failed | replicas die at MPS bring-up; see [#1115](https://github.com/sgl-project/sglang-omni/issues/1115) |
 
@@ -194,13 +194,13 @@ Observations from these runs (measured on the configurations above, not general 
 
 1. **`nvidia-smi` SM-util overstated saturation on every family we checked; use deeper signals.**
    In these runs the family drawing 22 percent of TDP (Qwen3-ASR) scaled 2.67x while the one at
-   71 percent (MOSS-TD) capped at 1.70x; DCGM `SMOCC`/`TENSO`/`DRAMA` are device-level counters
+   71 percent (MOSS-TD) capped at 1.35-1.70x; DCGM `SMOCC`/`TENSO`/`DRAMA` are device-level counters
    that keep working under MPS and show which engine will contend. Sampling method is in the
    #921 comments linked above.
 2. **The two prefill-loop-bound ASR families landed at 2.07x and 2.67x at DP3; the two
-   decode-launch-bound TTS families at 1.88x and 1.91x; the GPU-busy family still gained 1.70x**
-   because its low-occupancy decode kernels leave warp slots MPS can fill, at the cost of a
-   large per-replica throughput loss (-43 percent).
+   decode-launch-bound TTS families at 1.88x and 1.91x; the GPU-busy family still gained
+   1.35-1.70x across repeats** because its low-occupancy decode kernels leave warp slots MPS can
+   fill, at the cost of a large per-replica throughput loss (-43 percent).
 3. **Density limits arrived from three directions in practice:** KV sizing (this guide),
    per-replica fixed assets (MOSS-TTS-v1.5 above), and bring-up robustness under MPS (both
    encoder-heavy families we ran: Whisper lost replicas on its first attempt, Fun-ASR could not
