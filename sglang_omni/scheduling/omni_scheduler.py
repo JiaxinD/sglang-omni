@@ -1628,6 +1628,8 @@ class OmniScheduler:
             if self._engine_paused:
                 self._process_admin_requests()
                 time.sleep(0.001)
+                if _lt:
+                    _lt.add("paused", time.perf_counter() - _t)
                 continue
 
             batch = self.get_next_batch_to_run()
@@ -1849,6 +1851,8 @@ class OmniScheduler:
                 self._process_admin_requests()
                 self._resolve_pending_async()
                 time.sleep(0.001)
+                if _lt:
+                    _lt.add("paused", time.perf_counter() - _t)
                 continue
 
             if (
@@ -1887,6 +1891,8 @@ class OmniScheduler:
                     sched_output, pending_step = self._run_batch_launch(batch)
                 except Exception as exc:
                     self._handle_batch_failure(batch, exc)
+                    if _lt:
+                        _lt.add("launch", time.perf_counter() - _t)
                 else:
                     if _lt:
                         _now = time.perf_counter()

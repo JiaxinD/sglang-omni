@@ -5,6 +5,10 @@ Enable with ``SGLANG_OMNI_LOOP_TIMER=1``; report interval via
 ``SGLANG_OMNI_LOOP_TIMER_INTERVAL_S`` (default 10). Emits one
 ``LOOP_TIMER {json}`` log line per interval with per-segment wall time,
 call count, and share of window wall time.
+
+An instance is owned by a single scheduler loop thread; it is not
+thread-safe. The injected ``clock`` must be monotonic. With the timer
+disabled the loops pay only a few local truthiness checks per iteration.
 """
 
 from __future__ import annotations
@@ -31,6 +35,9 @@ class LoopSegmentTimer:
         now = clock()
         self._t_report = now
         self._t0_window = now
+        # nan/inf would never report; <=0 would report every add(). Fail safe.
+        if not math.isfinite(interval_s) or interval_s <= 0:
+            interval_s = 10.0
         self._interval = interval_s
 
     def add(self, segment: str, dt: float) -> None:
@@ -63,8 +70,5 @@ def maybe_loop_timer() -> LoopSegmentTimer | None:
     try:
         interval = float(os.environ.get("SGLANG_OMNI_LOOP_TIMER_INTERVAL_S", "10"))
     except ValueError:
-        interval = 10.0
-    # nan/inf would never report; <=0 would report every add(). Fail safe.
-    if not math.isfinite(interval) or interval <= 0:
         interval = 10.0
     return LoopSegmentTimer(interval)

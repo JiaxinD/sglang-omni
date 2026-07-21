@@ -106,3 +106,19 @@ def test_invalid_interval_falls_back_to_default(monkeypatch, val):
     monkeypatch.setenv("SGLANG_OMNI_LOOP_TIMER_INTERVAL_S", val)
     t = maybe_loop_timer()
     assert t._interval == 10.0
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_direct_construction_invalid_interval_defaults(bad, caplog):
+    """0 would report on every add; nan/inf would never report. The class
+    itself (not just the env factory) falls back to the 10 s default."""
+    clock = _FakeClock()
+    t = LoopSegmentTimer(interval_s=bad, clock=clock)
+    with caplog.at_level(logging.INFO, logger="sglang_omni.scheduling.loop_timer"):
+        clock.t = 1.0
+        t.add("launch", 0.1)
+    assert _reports(caplog) == [], "invalid interval must behave like 10 s"
+    with caplog.at_level(logging.INFO, logger="sglang_omni.scheduling.loop_timer"):
+        clock.t = 11.0
+        t.add("launch", 0.1)
+    assert len(_reports(caplog)) == 1
