@@ -226,18 +226,21 @@ class HiggsTTSModelRunner(ModelRunner):
 
         # note (Jiaxin Deng): device-side copies only; a .cpu()/.tolist() here
         # is a stream-syncing D2H on the per-step launch path.
-        sampling_info = getattr(forward_batch, "sampling_info", None)
-        temps = _flat_nonempty(getattr(sampling_info, "temperatures", None))
+        sampling_info = forward_batch.sampling_info
+        if sampling_info is None:
+            temps = top_ps = top_ks = None
+        else:
+            temps = _flat_nonempty(sampling_info.temperatures)
+            top_ps = _flat_nonempty(sampling_info.top_ps)
+            top_ks = _flat_nonempty(sampling_info.top_ks)
         if temps is not None:
             model._cg_temperature[:n_real].copy_(temps[:n_real])
         else:
             model._cg_temperature[:n_real].fill_(1.0)
-        top_ps = _flat_nonempty(getattr(sampling_info, "top_ps", None))
         if top_ps is not None:
             model._cg_top_p[:n_real].copy_(top_ps[:n_real])
         else:
             model._cg_top_p[:n_real].fill_(1.0)
-        top_ks = _flat_nonempty(getattr(sampling_info, "top_ks", None))
         if top_ks is not None:
             tks = top_ks[:n_real].to(torch.long)
             # top_k outside (0, K_MAX) (incl. sglang's TOP_K_ALL sentinel for
