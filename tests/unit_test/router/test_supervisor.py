@@ -98,6 +98,44 @@ def _config() -> RouterConfig:
     )
 
 
+def test_supervisor_binds_an_ipv6_host(tmp_path: Path) -> None:
+    # --host ::1 works through the N=1 uvicorn path; the supervisor's shared
+    # socket must resolve the family instead of hardcoding AF_INET
+    config = RouterConfig(
+        host="::1",
+        port=_free_port(),
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+    )
+    import socket
+
+    harness = Harness(config, n=1, tmp_path=tmp_path)
+    harness.supervisor.start()
+    try:
+        assert harness.supervisor._socket.family == socket.AF_INET6
+    finally:
+        harness.supervisor.shutdown()
+
+
+def test_shutdown_closes_the_listener_before_draining_children(
+    tmp_path: Path,
+) -> None:
+    # if the parent held the listener until after the CP drained, connections
+    # would keep landing in the backlog after every acceptor was gone
+    harness = Harness(_config(), n=2, tmp_path=tmp_path)
+    harness.supervisor.start()
+    listener_closed_at_signal: list[bool] = []
+    for _, _, process in harness.dp_spawns:
+        original = process.terminate
+
+        def _terminate(orig=original):
+            listener_closed_at_signal.append(harness.supervisor._socket is None)
+            orig()
+
+        process.terminate = _terminate  # type: ignore[method-assign]
+    harness.supervisor.shutdown()
+    assert listener_closed_at_signal and all(listener_closed_at_signal)
+
+
 def test_start_spawns_cp_and_n_dps_with_the_env_contract(tmp_path: Path) -> None:
     harness = Harness(_config(), n=3, tmp_path=tmp_path)
     harness.supervisor.start()

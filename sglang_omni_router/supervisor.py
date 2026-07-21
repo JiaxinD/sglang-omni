@@ -309,9 +309,17 @@ class RouterSupervisor:
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(self._config.model_dump_json())
 
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # resolve the family from the configured host (AI_PASSIVE mirrors
+        # uvicorn's own bind): a hardcoded AF_INET would gaierror on ::/::1
+        family, _, _, _, bind_addr = socket.getaddrinfo(
+            self._config.host or None,
+            self._config.port,
+            type=socket.SOCK_STREAM,
+            flags=socket.AI_PASSIVE,
+        )[0]
+        self._socket = socket.socket(family, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.bind((self._config.host, self._config.port))
+        self._socket.bind(bind_addr)
         self._socket.listen(_LISTEN_BACKLOG)
         self._socket.set_inheritable(True)
 
@@ -536,8 +544,15 @@ class RouterSupervisor:
             self._admission_file = None
 
     def shutdown(self) -> None:
-        # Note (Jiaxin Deng): signal every DP first so none keeps accepting
-        # from the shared socket while its siblings drain, then reap together.
+        # Note (Jiaxin Deng): drop the parent's listener FIRST: once the DPs
+        # exit, the kernel listening socket dies with their inherited fds and
+        # new connections are refused, instead of landing in a backlog that no
+        # acceptor will ever serve while the CP drains.
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+        # signal every DP so none keeps accepting from the shared socket
+        # while its siblings drain, then reap together
         for slot in self._dp_slots.values():
             self._signal_child(slot.process)
         for slot in self._dp_slots.values():
@@ -548,9 +563,6 @@ class RouterSupervisor:
             self._cp_process = None
         self._close_death_pipe()
         self._close_admission_shm()
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
         context, self._context = self._context, None
         if context is not None:
             for path in (

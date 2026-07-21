@@ -84,14 +84,21 @@ class UpdateJournal:
         else:
             self.clear()
 
-    def discard(self, worker_id: str) -> None:
+    def discard(self, worker_id: str) -> bool:
+        """Remove one id; False when the journal is unreadable (unresolved).
+
+        A False return means the entry could NOT be durably resolved and the
+        file needs operator inspection; callers must surface that instead of
+        reporting success while the 409 update gate stays closed.
+        """
         try:
             remaining = [wid for wid in self.pending() if wid != worker_id]
         except JournalUnreadableError:
             # Note (Jiaxin Deng): cannot safely edit an unreadable journal;
             # leave it for an operator rather than partially clearing it.
-            return
+            return False
         self.keep(remaining)
+        return True
 
     def clear(self) -> None:
         try:

@@ -324,6 +324,7 @@ def create_data_plane_app(
                 "workers": [
                     {
                         "worker_id": worker.worker_id,
+                        "incarnation": worker.incarnation,
                         "routed_total": worker.routed_requests,
                         "successful_total": worker.successful_requests,
                         "failed_total": worker.failed_requests,

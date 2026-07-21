@@ -527,6 +527,85 @@ def test_partial_weight_update_stays_disabled_and_journaled(tmp_path: Path) -> N
         assert UpdateJournal(journal_path).has_pending() is True
 
 
+def _journal_app(tmp_path: Path, journaled_ids: list[str]):
+    journal_path = str(tmp_path / "update_journal.json")
+    if journaled_ids:
+        UpdateJournal(journal_path).begin("/update_weights_from_disk", journaled_ids)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "worker"}, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    return app, journal_path
+
+
+def test_absent_journaled_worker_survives_restart_as_a_tombstone(
+    tmp_path: Path,
+) -> None:
+    # a dynamically added worker is absent after a full restart (the registry
+    # rebuilds from static config): its journal entry must survive as a
+    # tombstone, and re-registering that stable ID must create it disabled
+    dynamic_url = "http://worker-dyn:8103"
+    dynamic_id = worker_id_from_url(dynamic_url)
+    app, journal_path = _journal_app(tmp_path, [dynamic_id])
+    with TestClient(app) as client:
+        # recovery kept the tombstone and the 409 gate stays closed
+        assert UpdateJournal(journal_path).pending() == [dynamic_id]
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+        assert response.status_code == 409
+
+        # re-registering the journaled stable ID creates the worker disabled
+        created = client.post("/workers", json={"url": dynamic_url})
+        assert created.status_code == 200
+        assert created.json()["worker"]["disabled"] is True
+
+        # an authenticated re-enable resolves the tombstone and unblocks updates
+        assert (
+            client.put(f"/workers/{dynamic_id}", json={"disabled": False}).status_code
+            == 200
+        )
+        assert UpdateJournal(journal_path).pending() == []
+        assert (
+            client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
+            == 200
+        )
+
+
+def test_deleting_a_journaled_worker_keeps_the_tombstone_for_readd(
+    tmp_path: Path,
+) -> None:
+    worker_id = worker_id_from_url("http://worker-a:8101")
+    app, journal_path = _journal_app(tmp_path, [worker_id])
+    with TestClient(app) as client:
+        assert client.delete(f"/workers/{worker_id}").status_code == 200
+        # deletion must not erase the tombstone
+        assert UpdateJournal(journal_path).pending() == [worker_id]
+        readded = client.post("/workers", json={"url": "http://worker-a:8101"})
+        assert readded.status_code == 200
+        assert readded.json()["worker"]["disabled"] is True
+
+
+def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> None:
+    # discard() cannot modify an unreadable journal: the re-enable must fail
+    # instead of returning 200 while every update stays blocked with 409
+    journal_path = str(tmp_path / "update_journal.json")
+    Path(journal_path).write_bytes(b"{corrupt")
+    worker_id = worker_id_from_url("http://worker-a:8101")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "worker"}, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    with TestClient(app) as client:
+        response = client.put(f"/workers/{worker_id}", json={"disabled": False})
+        assert response.status_code == 503
+        assert "unreadable" in response.json()["error"]["message"]
+        listed = {w["url"]: w for w in client.get("/workers").json()["workers"]}
+        assert listed["http://worker-a:8101"]["disabled"] is True
+
+
 def test_model_info_broadcast_exposes_sglang_compatible_weight_version() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":

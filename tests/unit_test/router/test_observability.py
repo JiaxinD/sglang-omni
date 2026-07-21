@@ -18,6 +18,7 @@ def _report(
     generation: int = 1,
     active: int = 0,
     worker_id: str = "w0",
+    incarnation: str = "",
 ) -> CounterReport:
     return CounterReport(
         dp_index=dp,
@@ -26,6 +27,7 @@ def _report(
         workers=[
             WorkerCounters(
                 worker_id=worker_id,
+                incarnation=incarnation,
                 routed_total=routed,
                 successful_total=routed,
                 failed_total=0,
@@ -118,6 +120,24 @@ def test_active_gauge_sums_only_live_entries() -> None:
     assert ledger.active_gauge("w0", now=102.5) == 5
     # dp 0's report is now stale: its in-flight work is gone with it
     assert ledger.active_gauge("w0", now=103.5) == 3
+
+
+def test_incarnation_change_retires_the_old_segment_and_counts_the_new() -> None:
+    # DELETE then POST of the same URL on the DP is a fresh worker object whose
+    # cumulatives restart at zero; without retiring the old segment the
+    # high-water clamp would freeze the display until the new object caught up
+    ledger = DataPlaneCounterLedger()
+    ledger.apply(_report(1, 0, incarnation="inc-a"), now=0.0)  # baseline 0
+    ledger.apply(_report(2, 10, incarnation="inc-a"), now=1.0)
+    assert ledger.totals("w0")["routed_total"] == 10
+
+    # same stable id, new incarnation, cumulative restarted at 3
+    ledger.apply(_report(3, 3, incarnation="inc-b"), now=2.0)
+    totals = ledger.totals("w0")
+    # old segment retired (10) + new segment fully counted (3), not clamped
+    assert totals["routed_total"] == 13
+    ledger.apply(_report(4, 5, incarnation="inc-b"), now=3.0)
+    assert ledger.totals("w0")["routed_total"] == 15
 
 
 def test_overlay_renders_counter_fields() -> None:

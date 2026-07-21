@@ -409,12 +409,17 @@ def create_control_plane_app(
             return JSONResponse({"status": "ok", "stale_incarnation": True})
         if _failure_already_applied(report):
             return JSONResponse({"status": "ok", "deduplicated": True})
+        before = (worker.is_routable, worker.state)
         worker.record_request_failure(
             failure_threshold=config.health_failure_threshold,
             status_code=report.status_code,
             error=report.error,
         )
-        publish()
+        # publish only on a snapshot-visible transition: a counter increment
+        # on an already-unhealthy worker must not serialize a full snapshot
+        # per failure (the keepalive covers periodic liveness writes)
+        if (worker.is_routable, worker.state) != before:
+            publish()
         return JSONResponse(
             {"status": "ok", "worker_state": worker.state, "disabled": worker.disabled}
         )

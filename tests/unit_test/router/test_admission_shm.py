@@ -95,6 +95,22 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
     assert results == [2]
 
 
+def test_shed_on_a_sibling_stuck_slot_counts_as_a_rejection() -> None:
+    # the client received a rejection, so /health must count it: the own slot
+    # is intact even though a sibling's writer died mid-write
+    buf = _buf(2)
+    stuck = SlotCodec(buf, 0)
+    stuck.write(
+        inflight=0, peak_sum=0, rejected_total=0, generation=1, pid=1, heartbeat_ts=1.0
+    )
+    seq = struct.unpack_from("<q", buf, 0)[0]
+    struct.pack_into("<q", buf, 0, seq + 1)  # slot 0 left odd: writer died
+
+    b = _admission(buf, 1)
+    assert b.try_acquire() is False
+    assert SlotCodec(buf, 1).read(fail_fast=True).rejected_total == 1
+
+
 def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

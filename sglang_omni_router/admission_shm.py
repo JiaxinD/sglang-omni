@@ -17,14 +17,19 @@ unsupported for multi-process admission and log a warning at construction.
 
 The slot array carries one extra supervisor-owned RETIRED slot after the DP
 slots: on reclaim the dying DP's rejected_total and peak are folded into it,
-so those aggregate values never move backwards across DP restarts.
+so those aggregate values survive DP restarts. This is best-effort across
+crashes, not exact: a DP killed mid-write leaves its slot unreadable and its
+counters are skipped at reclaim (logged), and a shed taken while the DP's own
+slot is mid-fold cannot be recorded at all, so the aggregates can lose (never
+invent) rejections around a DP crash.
 
 Documented semantics (the bound is a shedding knob, not an invariant):
 - the global bound is SOFT: concurrent check-then-increment across processes
   can overshoot by at most N-1 requests;
 - inflight is an instantaneous sum of per-slot snapshots, not a linearizable
   value;
-- rejected_total is a sum of single-writer counters (exact);
+- rejected_total is a sum of single-writer counters: exact while DPs are
+  live, best-effort across DP crashes (see the retired-slot note above);
 - peak_inflight is best-effort: each DP records the highest SUM it observed
   at its own acquire time and the aggregate takes the max; there is no
   global atomic max;
@@ -279,11 +284,20 @@ class SharedAdmission:
             if not self._still_owner():
                 self._fenced()
                 return False
+        except SeqlockUnstableError:
+            # own slot unstable (mid-fold by the supervisor): writing now
+            # would race the fold, so this shed cannot be counted
+            logger.warning("own admission slot unstable; shedding until reclaim")
+            return False
+        try:
             total = self._total_inflight()
         except SeqlockUnstableError:
             # Note (Jiaxin Deng): a sibling slot is stuck mid-write (writer
-            # crashed); shed instead of blocking the event loop.
-            logger.warning("admission slot unstable; shedding until reclaim")
+            # crashed); shed instead of blocking the event loop. The own slot
+            # is intact, so the rejection is counted like any other shed.
+            logger.warning("sibling admission slot unstable; shedding until reclaim")
+            self._rejected_total += 1
+            self._write_own()
             return False
         if total >= self._max_inflight:
             self._rejected_total += 1

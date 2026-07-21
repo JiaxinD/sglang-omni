@@ -36,6 +36,10 @@ _COUNTER_KEYS = ("routed_total", "successful_total", "failed_total")
 
 class WorkerCounters(BaseModel):
     worker_id: str
+    # the DP-side worker object's incarnation: a deleted-and-re-added URL is a
+    # fresh object whose cumulatives restart at zero, so the ledger must
+    # retire the old segment instead of clamping the new one to nothing
+    incarnation: str = ""
     routed_total: int = Field(default=0, ge=0)
     successful_total: int = Field(default=0, ge=0)
     failed_total: int = Field(default=0, ge=0)
@@ -58,6 +62,7 @@ class _WorkerLedger:
     baseline: dict[str, int]
     high_water: dict[str, int]
     current_active: int = 0
+    incarnation: str = ""
 
     def contribution(self, key: str) -> int:
         return max(0, self.high_water[key] - self.baseline[key])
@@ -97,9 +102,17 @@ class DataPlaneCounterLedger:
         per_worker = entry.per_worker if entry is not None else {}
         for item in report.workers:
             ledger = per_worker.get(item.worker_id)
+            if ledger is not None and ledger.incarnation != item.incarnation:
+                # a fresh DP worker object at the same stable id (deleted and
+                # re-added URL): retire the old segment, else the high-water
+                # clamp freezes the display until the new object catches up
+                self._retire_worker(item.worker_id, ledger)
+                ledger = None
             if ledger is None:
                 # Note (Jiaxin Deng): first sight under this (dp, generation)
-                # takes the whole cumulative as the since-CP-start baseline.
+                # takes the whole cumulative as the since-CP-start baseline;
+                # a replaced incarnation restarts at zero, so its baseline is
+                # zero and everything it reports counts.
                 first_contact = entry is None
                 per_worker[item.worker_id] = _WorkerLedger(
                     baseline={
@@ -108,6 +121,7 @@ class DataPlaneCounterLedger:
                     },
                     high_water={key: getattr(item, key) for key in _COUNTER_KEYS},
                     current_active=item.current_active,
+                    incarnation=item.incarnation,
                 )
                 continue
             for key in _COUNTER_KEYS:
@@ -128,11 +142,12 @@ class DataPlaneCounterLedger:
 
     def _retire(self, entry: _LedgerEntry) -> None:
         for worker_id, ledger in entry.per_worker.items():
-            slot = self._retired.setdefault(
-                worker_id, {key: 0 for key in _COUNTER_KEYS}
-            )
-            for key in _COUNTER_KEYS:
-                slot[key] += ledger.contribution(key)
+            self._retire_worker(worker_id, ledger)
+
+    def _retire_worker(self, worker_id: str, ledger: _WorkerLedger) -> None:
+        slot = self._retired.setdefault(worker_id, {key: 0 for key in _COUNTER_KEYS})
+        for key in _COUNTER_KEYS:
+            slot[key] += ledger.contribution(key)
 
     def totals(self, worker_id: str) -> dict[str, int]:
         totals = dict(self._retired.get(worker_id, {key: 0 for key in _COUNTER_KEYS}))

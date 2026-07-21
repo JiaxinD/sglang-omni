@@ -62,8 +62,10 @@ def recover_worker_pool_from_journal(
     disabled until an operator verifies weight versions and re-enables them
     (which discards the entry), rather than re-enabling potentially mixed
     weights. An unreadable journal disables the whole pool. A journaled worker
-    no longer in the registry is dropped so a deleted target cannot wedge every
-    future update behind the 409 gate.
+    absent from the registry (e.g. a dynamically added worker after a full
+    supervisor restart) keeps its entry as a tombstone: re-registering that
+    stable ID creates the worker disabled, and only an authenticated re-enable
+    resolves it.
     """
     try:
         unresolved = journal.pending()
@@ -79,20 +81,27 @@ def recover_worker_pool_from_journal(
         return
     if not unresolved:
         return
-    live = {worker.worker_id for worker in workers}
-    still_present = [worker_id for worker_id in unresolved if worker_id in live]
-    for worker_id in still_present:
+    disabled_count = 0
+    for worker_id in unresolved:
         worker = _find_worker(workers, worker_id)
         if worker is not None:
             worker.set_disabled(True)
-    if len(still_present) != len(unresolved):
-        journal.keep(still_present)
-    if still_present:
-        logger.critical(
-            f"unresolved weight update in the journal; keeping "
-            f"{len(still_present)} target worker(s) disabled until verified "
-            "and re-enabled"
-        )
+            disabled_count += 1
+    logger.critical(
+        f"unresolved weight update in the journal; {disabled_count} target "
+        f"worker(s) kept disabled and {len(unresolved) - disabled_count} "
+        "absent target(s) kept as tombstones until verified and re-enabled"
+    )
+
+
+def _worker_id_is_journaled(app: FastAPI, worker_id: str) -> bool:
+    journal = getattr(app.state, "update_journal", None)
+    if journal is None:
+        return False
+    try:
+        return worker_id in journal.pending()
+    except JournalUnreadableError:
+        return True  # fail closed: an unreadable journal may name this id
 
 
 def create_app(
@@ -295,6 +304,15 @@ def register_admin_routes(
                 return _error_response(409, "worker already registered")
 
             worker = Worker(config=worker_config)
+            if _worker_id_is_journaled(app, worker.worker_id):
+                # Note (Jiaxin Deng): this stable ID has an unresolved weight
+                # update (tombstone); it may carry mixed weights, so it starts
+                # disabled until an authenticated re-enable resolves it.
+                worker.set_disabled(True)
+                logger.warning(
+                    f"worker {worker.display_id} registered disabled: its id "
+                    "is journaled by an unresolved weight update"
+                )
             workers.append(worker)
             if config.max_connections < MIN_CONNECTIONS_PER_WORKER * len(workers):
                 logger.warning(
@@ -335,7 +353,14 @@ def register_admin_routes(
                 status_code=404,
                 content={"error": {"message": "worker not found"}},
             )
-        return JSONResponse(worker.to_dict())
+        # same DP-counter overlay as the /workers listing: on the CP the local
+        # Worker never handles data traffic, so its own counters are not the
+        # ones a caller wants
+        overlay = getattr(app.state, "worker_stats_overlay", None)
+        payload = worker.to_dict()
+        if overlay is not None:
+            payload.update(overlay(worker))
+        return JSONResponse(payload)
 
     @app.put("/workers/{worker_id:path}")
     async def update_worker(worker_id: str, request: Request) -> JSONResponse:
@@ -432,11 +457,19 @@ def register_admin_routes(
         worker.replace_config(next_config)
 
         if requested_disabled is not None:
-            worker.set_disabled(requested_disabled)
             if requested_disabled is False:
                 journal = getattr(app.state, "update_journal", None)
-                if journal is not None:
-                    journal.discard(worker.worker_id)
+                if journal is not None and not journal.discard(worker.worker_id):
+                    # the journal could not be durably resolved: enabling now
+                    # would report success while every weight update stays
+                    # blocked behind the 409 gate
+                    return _error_response(
+                        503,
+                        "cannot re-enable: the weight-update journal at "
+                        f"{journal.path} is unreadable; inspect and remove or "
+                        "replace it, then retry",
+                    )
+            worker.set_disabled(requested_disabled)
 
         if requested_is_dead is not None:
             if requested_is_dead:

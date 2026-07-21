@@ -182,6 +182,32 @@ def test_worker_failure_report_evicts_at_threshold_and_republishes(
         )
 
 
+def test_repeat_failures_on_an_unhealthy_worker_do_not_republish(
+    tmp_path: Path,
+) -> None:
+    # only a snapshot-visible transition republishes; a counter increment on
+    # an already-unhealthy worker must not serialize a snapshot per failure
+    app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
+    with TestClient(app) as client:
+        snapshot = _read_snapshot(snapshot_path)
+        worker_id = snapshot.workers[0].worker_id
+        assert (
+            client.post(
+                "/internal/worker_failure", json=_failure(worker_id, seq=1)
+            ).status_code
+            == 200
+        )
+        seq_after_eviction = _read_snapshot(snapshot_path).seq
+
+        assert (
+            client.post(
+                "/internal/worker_failure", json=_failure(worker_id, seq=2)
+            ).status_code
+            == 200
+        )
+        assert _read_snapshot(snapshot_path).seq == seq_after_eviction
+
+
 def test_internal_routes_on_cp_require_the_token_when_configured(
     tmp_path: Path,
 ) -> None:
@@ -325,6 +351,14 @@ def test_cp_aggregates_dp_counters_into_worker_listings(tmp_path: Path) -> None:
         assert listed["successful_requests"] == 6
         assert listed["failed_requests"] == 1
         assert listed["active_requests"] == 2
+
+        # the detail endpoint carries the same DP-counter overlay: the
+        # CP-local worker object never handles data traffic
+        detail = client.get(f"/workers/{worker_id}").json()
+        assert detail["routed_requests"] == 7
+        assert detail["successful_requests"] == 6
+        assert detail["failed_requests"] == 1
+        assert detail["active_requests"] == 2
 
         # stale generation is fenced with 409 (pydantic bound: use gen >= 1)
         stale = {**_report(9, 9, 9, 0, 0), "generation": 1}
@@ -738,9 +772,13 @@ def test_completed_update_restores_a_previously_disabled_worker_without_journal(
         )
 
 
-def test_recovery_drops_journaled_workers_that_no_longer_exist(
+def test_recovery_keeps_absent_journaled_workers_as_tombstones(
     tmp_path: Path,
 ) -> None:
+    # a journaled id absent from the registry (dynamic worker after a full
+    # restart) must survive recovery as a tombstone: dropping it would erase
+    # the only evidence its update partially applied, and a later
+    # re-registration of the same stable id would serve mixed weights
     from sglang_omni_router.update_journal import UpdateJournal
 
     journal_path = str(tmp_path / "j.json")
@@ -750,13 +788,10 @@ def test_recovery_drops_journaled_workers_that_no_longer_exist(
         tmp_path, upstream=upstream, journal_path=journal_path
     )
     with TestClient(app) as client:
-        # the journaled id is not in the registry: it cannot serve mixed
-        # weights, so recovery drops it and updates are not wedged
-        assert not Path(journal_path).exists()
-        assert (
-            client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
-            == 200
-        )
+        assert UpdateJournal(journal_path).pending() == ["gone-worker-id"]
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+        assert response.status_code == 409
+        assert "/update_weights_from_disk" not in upstream.calls
 
 
 def test_unreadable_journal_disables_the_whole_pool_on_recovery(
