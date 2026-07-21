@@ -75,6 +75,8 @@ dependencies = [
     # Ming-Omni
     "diffusers==0.37.0",      # Align with sglang 0.5.12.post1 hard pin (diffusers==0.37.0)
     "x-transformers",          # Ming talker rotary embeddings
+    # Qwen3-TTS
+    "qwen-tts==0.1.1",        # Engine builder imports qwen_tts; pulls sox/onnxruntime it needs
 ]
 
 [project.optional-dependencies]
