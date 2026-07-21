@@ -165,6 +165,52 @@ nsys profile --gpu-metrics-devices $GPU_ID --gpu-metrics-set gh100 \
 
 Low SM activity at the tuned single replica's peak may indicate reclaimable headroom; confirm it with a controlled DP comparison before relying on it. If SM activity is already near the ceiling, stop here.
 
+## Case studies across model families (ASR and TTS)
+
+The recipe generalizes beyond Higgs, but not uniformly, so we measured it per family. Method for
+every row: single replica first (loop-segment timing plus DCGM to establish whether the GPU is
+actually idle), then N replicas behind MPS with per-replica `mem_fraction_static`, one
+closed-loop client per replica, direct-to-replica aggregate throughput. cN below means N
+concurrent requests per replica on the client side. One H100 80 GB, seed-tts-eval EN
+(movies800times for MOSS-Transcribe-Diarize), 128-512 samples per client per point, fresh
+servers per point, host load logged. Qwen3-ASR single/DP2 are triplicate (CV under 1 percent);
+other rows are single long runs. Scaling ratios are computed from unrounded per-run values.
+Software revisions, per-row memory fractions, and the full profiling behind these rows are on
+[#921](https://github.com/sgl-project/sglang-omni/issues/921#issuecomment-5029329363) and the
+[all-family fingerprint comment](https://github.com/sgl-project/sglang-omni/issues/921#issuecomment-5030103336).
+Every attempted configuration is reported, including the failures.
+
+| family | single | DP2 + MPS | DP3 + MPS | notes (per-replica mem fractions) |
+|---|---:|---:|---:|---|
+| Qwen3-ASR-1.7B (c32) | 104 qps | 190 qps (1.83x) | 277 qps (**2.67x**) | prefill-loop-bound; 0.80/0.40/0.25; per-replica throughput -12 percent at DP3. DP4 + MPS at 0.19: 347 qps (**3.34x**), per-replica -17 percent, so the gain continues past three replicas for this family |
+| whisper-large-v3-turbo (c16) | 46 qps | 76 qps (1.65x) | 96 qps (**2.07x**) | prefill-loop-bound; 0.35 per replica; the first DP attempt lost replicas at MPS bring-up, clean on retry |
+| Higgs-TTS-3-4B (c32) | 19.4 qps | 31.6 qps (1.63x) | 36.9 qps (**1.91x**) | decode-launch-bound; 0.85/0.40/0.27; consistent with the pinned case study above (1.8-2.1x) |
+| MOSS-TTS-Local (c16) | 9.0 qps | 13.4 qps (1.50x) | 16.8 qps (**1.88x**) | decode-launch-bound; 0.75/0.35/0.24; DP3 failed to boot at 0.27, booted at 0.24 |
+| MOSS-Transcribe-Diarize (c8) | 2.5 qps | 3.7 qps (1.49x) | 4.25 qps (**1.70x**) | the GPU-side outlier (memory-bound decode backbone); 0.80/0.40/0.25; per-replica throughput -43 percent at DP3 |
+| MOSS-TTS-v1.5 delay (c16) | 2.3 qps | did not fit | did not fit | combined DP2 allocations (weights + roughly 10 GB codec + engine pool per replica) exceed 80 GB at every per-replica fraction tried (0.42, 0.32, 0.24) |
+| Fun-ASR-Nano | (single-replica only) | failed | failed | replicas die at MPS bring-up; see [#1115](https://github.com/sgl-project/sglang-omni/issues/1115) |
+
+Observations from these runs (measured on the configurations above, not general laws):
+
+1. **`nvidia-smi` SM-util overstated saturation on every family we checked; use deeper signals.**
+   In these runs the family drawing 22 percent of TDP (Qwen3-ASR) scaled 2.67x while the one at
+   71 percent (MOSS-TD) capped at 1.70x; DCGM `SMOCC`/`TENSO`/`DRAMA` are device-level counters
+   that keep working under MPS and show which engine will contend. Sampling method is in the
+   #921 comments linked above.
+2. **The two prefill-loop-bound ASR families landed at 2.07x and 2.67x at DP3; the two
+   decode-launch-bound TTS families at 1.88x and 1.91x; the GPU-busy family still gained 1.70x**
+   because its low-occupancy decode kernels leave warp slots MPS can fill, at the cost of a
+   large per-replica throughput loss (-43 percent).
+3. **Density limits arrived from three directions in practice:** KV sizing (this guide),
+   per-replica fixed assets (MOSS-TTS-v1.5 above), and bring-up robustness under MPS (both
+   encoder-heavy families we ran: Whisper lost replicas on its first attempt, Fun-ASR could not
+   boot at all, #1115).
+4. **Plumbing:** pipelines without a mem-fraction target reject `--mem-fraction-static`; inject
+   it through a config file instead, e.g. `runtime_overrides.<stage>.mem_fraction_static` (or
+   `server_args_overrides` where the stage factory forwards it). Clean up leaked MPS daemons
+   between runs (`echo quit | nvidia-cuda-mps-control`, remove the pipe directory), and kill the
+   spawn stage-worker children before stopping MPS on teardown.
+
 ## Limits and next steps
 
 1. **Generality is not fully validated.** Beyond the pinned H100 Higgs case study, we also ran related experiments on H200 and used SGLang to serve Qwen3-4B directly; both lines of work largely confirmed the same-GPU DP gains. Space and time limit how completely we can present those results here, and the measurements are not yet as polished as we would like. We believe same-GPU DP is a promising direction for smaller models on GPUs with ample memory and compute headroom, but the experimental coverage is still incomplete.
