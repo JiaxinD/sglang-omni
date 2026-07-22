@@ -682,6 +682,76 @@ def test_capture_failure_resets_cuda_graph(monkeypatch: pytest.MonkeyPatch):
     assert reset_calls, "failed capture must reset() its CUDAGraph"
 
 
+@pytest.mark.skipif(not _HAS_CUDA, reason="seeded sampling kernel needs CUDA")
+def test_widened_top_k_masked_ranks_never_sampled():
+    """Ranks past a row's true k must be impossible, not just probability 0.
+
+    The seeded sampler scores prob + gumbel, so a 0.0-prob rank still wins
+    with weight e^0; only a -inf mask keeps the ladder widening inert. With
+    the 0.0 mask this fails within a handful of seeds.
+    """
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    logits = torch.linspace(2.0, -2.0, PRED_VOCAB, device=device).unsqueeze(0)
+    allowed = set(torch.topk(logits[0], 2).indices.tolist())
+    row_indices = torch.zeros(1, dtype=torch.long, device=device)
+    positions = torch.zeros(1, dtype=torch.long, device=device)
+
+    for seed in range(100):
+        # top_k=2 quantizes to ladder width 4, leaving ranks 2-3 masked
+        talker.prepare_decode_buffers([_request(top_k=2, sub_seed=seed)])
+        token = talker._sample_subtalker_token_seeded(
+            logits,
+            0,
+            row_indices=row_indices,
+            semantic_positions=positions,
+        )
+        assert token.item() in allowed, (
+            f"seed={seed} sampled rank outside the request's top_k=2: "
+            f"{token.item()} not in {sorted(allowed)}"
+        )
+
+
+def test_resolve_predictor_graph_enabled(monkeypatch: pytest.MonkeyPatch):
+    talker = object.__new__(Qwen3TTSTalker)
+    args = SimpleNamespace(disable_cuda_graph=False, tp_size=1)
+    monkeypatch.setattr(sglang_model_module, "get_global_server_args", lambda: args)
+    monkeypatch.delenv(sglang_model_module.QTTS_PREDICTOR_GRAPH_ENV, raising=False)
+
+    assert talker._resolve_predictor_graph_enabled() is True
+    args.disable_cuda_graph = True
+    assert talker._resolve_predictor_graph_enabled() is False
+    args.disable_cuda_graph = False
+    args.tp_size = 2
+    assert talker._resolve_predictor_graph_enabled() is False
+    args.tp_size = 1
+    monkeypatch.setenv(sglang_model_module.QTTS_PREDICTOR_GRAPH_ENV, "0")
+    assert talker._resolve_predictor_graph_enabled() is False
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_server_disable_cuda_graph_gates_predictor(monkeypatch: pytest.MonkeyPatch):
+    """server_args.disable_cuda_graph must gate the lazily resolved graph path."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    talker._predictor_graph_enabled = None
+    monkeypatch.setattr(
+        sglang_model_module,
+        "get_global_server_args",
+        lambda: SimpleNamespace(disable_cuda_graph=True, tp_size=1),
+    )
+    talker.prepare_decode_buffers(_uniform_requests(2))
+    layer0, hidden, positions = _step_inputs(2, device)
+
+    eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+    graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+
+    assert not talker._predictor_graphs
+    assert talker._predictor_graph_enabled is False
+    assert torch.equal(graph_codes, eager_codes)
+    assert torch.equal(graph_embeds, eager_embeds)
+
+
 if __name__ == "__main__":
     import sys
 

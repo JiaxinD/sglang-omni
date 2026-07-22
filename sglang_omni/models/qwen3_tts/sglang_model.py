@@ -511,7 +511,9 @@ class Qwen3TTSTalker(nn.Module):
         )
         self._predictor_graphs: dict[tuple, _PredictorDecodeGraph] = {}
         self._predictor_graph_disabled: set[tuple] = set()
-        self._predictor_graph_enabled = _predictor_graph_env_enabled()
+        # Note: (Jiaxin Deng) None = resolved at decode time; bootstrap forces
+        # disable_cuda_graph on during init (deferred capture), so not here.
+        self._predictor_graph_enabled: bool | None = None
         self._predictor_graph_failure_count = 0
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
@@ -1218,12 +1220,24 @@ class Qwen3TTSTalker(nn.Module):
                 self._sub_sampled_has_unbounded_top_k,
             ) = saved
 
+    def _resolve_predictor_graph_enabled(self) -> bool:
+        if not _predictor_graph_env_enabled():
+            return False
+        server_args = get_global_server_args()
+        if bool(server_args.disable_cuda_graph):
+            return False
+        # Note: (Jiaxin Deng) capture under TP would record collectives; the
+        # graphed chain is only validated single-rank, so TP stays eager.
+        return int(getattr(server_args, "tp_size", 1) or 1) == 1
+
     def _predictor_forward_graphed(
         self,
         layer0_codes: torch.Tensor,
         talker_hidden: torch.Tensor,
         semantic_positions: torch.Tensor | None,
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
+        if self._predictor_graph_enabled is None:
+            self._predictor_graph_enabled = self._resolve_predictor_graph_enabled()
         if not self._predictor_graph_enabled:
             return None
         batch_size, seq_len = layer0_codes.shape
@@ -1481,6 +1495,9 @@ class Qwen3TTSTalker(nn.Module):
             remove = (cdf > top_ps.unsqueeze(1)) & active_top_p.unsqueeze(1)
             remove[:, 0] = False
             sorted_probs = sorted_probs.masked_fill(remove, 0.0)
+        # Note: (Jiaxin Deng) the seeded sampler scores prob + gumbel, so a
+        # 0.0 prob can still win; -inf keeps ranks past a row's true k out.
+        sorted_probs = sorted_probs.masked_fill(~keep_top_k, -float("inf"))
 
         sampled = sample_from_sorted_probs_with_seed_small_k(
             sorted_probs,
