@@ -11,6 +11,7 @@ bucket-exact batch sizes, and the dispatch/replay path must never host-sync.
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -165,6 +166,7 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker._predictor_graph_disabled = set()
     talker._predictor_graph_batch_sizes = BUCKETS
     talker._predictor_graph_enabled = True
+    talker._predictor_graph_failure_count = 0
     return talker
 
 
@@ -533,6 +535,151 @@ def test_normalize_predictor_graph_batch_sizes():
         SimpleNamespace(cuda_graph_bs=[4, 2, 2, 64]), max_batch_size=16
     ) == (2, 4, 16)
     assert normalize(SimpleNamespace(), max_batch_size=2) == (1, 2)
+
+
+def test_quantize_predictor_top_k_ladder():
+    quantize = sglang_model_module._quantize_predictor_top_k
+    assert quantize(1, 2048) == 4
+    assert quantize(37, 2048) == 50
+    assert quantize(50, 2048) == 50
+    assert quantize(51, 2048) == 64
+    assert quantize(600, 2048) == 1024
+    assert quantize(1500, 2048) is None
+    assert quantize(4, 16) == 4
+    assert quantize(5, 16) == 8
+    assert quantize(9, 16) is None
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_graph_key_shared_across_request_top_k_values():
+    """top_k=5 and top_k=7 land in the same ladder bucket and share one graph."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+
+    for top_k in (5, 7):
+        talker.prepare_decode_buffers(_uniform_requests(2, top_k=top_k))
+        layer0, hidden, positions = _step_inputs(2, device, step=top_k)
+        eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+        graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+        assert torch.equal(graph_codes, eager_codes), f"top_k={top_k}"
+        assert torch.equal(graph_embeds, eager_embeds), f"top_k={top_k}"
+
+    assert len(talker._predictor_graphs) == 1, (
+        "distinct request top_k values within one ladder bucket must share "
+        f"one graph, got keys {sorted(talker._predictor_graphs)}"
+    )
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_row_top_k_below_bucket_width_bit_identity():
+    """Rows with k below the captured bucket width stay bit-identical to eager."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    requests = [
+        _request(top_k=3, sub_seed=1000, semantic_seed=2000),
+        _request(top_k=5, sub_seed=1001, semantic_seed=2001),
+    ]
+    talker.prepare_decode_buffers(requests)
+    layer0, hidden, positions = _step_inputs(2, device)
+
+    eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+    graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+
+    assert any(
+        key[2] == 8 for key in talker._predictor_graphs
+    ), f"expected capture at ladder width 8, got keys {sorted(talker._predictor_graphs)}"
+    assert torch.equal(graph_codes, eager_codes)
+    assert torch.equal(graph_embeds, eager_embeds)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_replay_tracks_per_step_sampling_params():
+    """One graph key, three replays with fresh temps/top_p/top_k/seeds per step;
+    stale captured params would break bit-identity."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    step_params = [
+        {"temperature": 0.9, "top_p": 0.8, "top_k": 5},
+        {"temperature": 1.1, "top_p": 0.95, "top_k": 7},
+        {"temperature": 0.7, "top_p": 0.85, "top_k": 6},
+    ]
+
+    for step, params in enumerate(step_params):
+        requests = [
+            _request(
+                sub_seed=5000 + 10 * step + idx, semantic_seed=6000 + idx, **params
+            )
+            for idx in range(4)
+        ]
+        talker.prepare_decode_buffers(requests)
+        layer0, hidden, positions = _step_inputs(4, device, step=step)
+        eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+        graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+        assert torch.equal(graph_codes, eager_codes), f"step={step} params={params}"
+        assert torch.equal(graph_embeds, eager_embeds), f"step={step} params={params}"
+
+    assert len(talker._predictor_graphs) == 1
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_global_disable_after_max_capture_failures(monkeypatch: pytest.MonkeyPatch):
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    calls = []
+
+    class _BoomGraph:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append(1)
+            raise RuntimeError("simulated capture failure")
+
+    monkeypatch.setattr(sglang_model_module, "_PredictorDecodeGraph", _BoomGraph)
+
+    compositions = [(bs, True) for bs in (1, 2, 4, 8, 16)] + [
+        (bs, False) for bs in (1, 2, 4)
+    ]
+    for batch_size, dosample in compositions:
+        talker.prepare_decode_buffers(_uniform_requests(batch_size, dosample=dosample))
+        layer0, hidden, positions = _step_inputs(batch_size, device)
+        _run_forward(talker, layer0, hidden, positions)
+
+    assert len(calls) == 8
+    assert talker._predictor_graph_enabled is False, (
+        "predictor graphs must self-disable after "
+        f"{len(compositions)} distinct capture failures"
+    )
+
+    talker.prepare_decode_buffers(_uniform_requests(8, dosample=False))
+    layer0, hidden, positions = _step_inputs(8, device)
+    _run_forward(talker, layer0, hidden, positions)
+    assert len(calls) == 8, "globally disabled graphs must not attempt new captures"
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_capture_failure_resets_cuda_graph(monkeypatch: pytest.MonkeyPatch):
+    """A failed capture must release its CUDA graph (pool) via reset()."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    reset_calls = []
+    original_reset = torch.cuda.CUDAGraph.reset
+
+    def spy_reset(self, *args, **kwargs):
+        reset_calls.append(1)
+        return original_reset(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.cuda.CUDAGraph, "reset", spy_reset)
+
+    @contextmanager
+    def boom_capture_state(bucket_size, signature):
+        raise RuntimeError("simulated capture failure")
+        yield
+
+    talker._predictor_graph_capture_state = boom_capture_state
+    talker.prepare_decode_buffers(_uniform_requests(2))
+    layer0, hidden, positions = _step_inputs(2, device)
+    _run_forward(talker, layer0, hidden, positions)
+
+    assert talker._predictor_graph_disabled, "failed key must be disabled"
+    assert reset_calls, "failed capture must reset() its CUDAGraph"
 
 
 if __name__ == "__main__":
