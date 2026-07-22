@@ -32,6 +32,7 @@ NUM_CODE_GROUPS = 4
 PRED_VOCAB = 16
 MAX_BS = 16
 BUCKETS = (1, 2, 4, 8, 16)
+DTYPE = torch.bfloat16
 
 
 class _TupleLinear(nn.Module):
@@ -68,7 +69,7 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
         ),
     )
     talker._predictor_input_buffer = torch.zeros(
-        MAX_BS, predictor_len, HIDDEN, device=device
+        MAX_BS, predictor_len, HIDDEN, device=device, dtype=DTYPE
     )
     positions = torch.arange(predictor_len, device=device, dtype=torch.long)
     talker._predictor_positions = positions
@@ -76,13 +77,13 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
         positions[:, None].expand(predictor_len, MAX_BS).contiguous()
     )
     talker._predictor_k_cache = torch.zeros(
-        1, MAX_BS, NUM_KV_HEADS, predictor_len, HEAD_DIM, device=device
+        1, MAX_BS, NUM_KV_HEADS, predictor_len, HEAD_DIM, device=device, dtype=DTYPE
     )
     talker._predictor_v_cache = torch.zeros_like(talker._predictor_k_cache)
     talker._output_codes = torch.zeros(
         MAX_BS, NUM_CODE_GROUPS, dtype=torch.long, device=device
     )
-    talker._output_embeds = torch.zeros(MAX_BS, HIDDEN, device=device)
+    talker._output_embeds = torch.zeros(MAX_BS, HIDDEN, device=device, dtype=DTYPE)
     talker._sampled_token_ids = torch.zeros(MAX_BS, dtype=torch.long, device=device)
 
     talker._sub_batch_size = 0
@@ -110,9 +111,9 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker._sub_sampled_has_unbounded_top_k = False
 
     layer = SimpleNamespace(
-        input_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device),
-        post_attention_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device),
-        mlp=nn.Linear(HIDDEN, HIDDEN, bias=False).to(device),
+        input_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device, DTYPE),
+        post_attention_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device, DTYPE),
+        mlp=nn.Linear(HIDDEN, HIDDEN, bias=False).to(device, DTYPE),
     )
     layer.self_attn = SimpleNamespace(
         q_size=NUM_HEADS * HEAD_DIM,
@@ -120,36 +121,36 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
         num_heads=NUM_HEADS,
         num_kv_heads=NUM_KV_HEADS,
         head_dim=HEAD_DIM,
-        q_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device),
-        k_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device),
+        q_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device, DTYPE),
+        k_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device, DTYPE),
         alt_stream=None,
         qkv_proj=_TupleLinear(HIDDEN, (NUM_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM).to(
-            device
+            device, DTYPE
         ),
-        o_proj=_TupleLinear(NUM_HEADS * HEAD_DIM, HIDDEN).to(device),
+        o_proj=_TupleLinear(NUM_HEADS * HEAD_DIM, HIDDEN).to(device, DTYPE),
         rotary_emb=_IdentityRotary(),
     )
-    projection = nn.Linear(HIDDEN, HIDDEN, bias=True).to(device)
+    projection = nn.Linear(HIDDEN, HIDDEN, bias=True).to(device, DTYPE)
     talker.code_predictor = SimpleNamespace(
         model=SimpleNamespace(
             layers=[layer],
-            norm=RMSNorm(HIDDEN, eps=1e-6).to(device),
+            norm=RMSNorm(HIDDEN, eps=1e-6).to(device, DTYPE),
             codec_embedding=nn.ModuleList(
                 [
-                    nn.Embedding(PRED_VOCAB, HIDDEN).to(device)
+                    nn.Embedding(PRED_VOCAB, HIDDEN).to(device, DTYPE)
                     for _ in range(NUM_CODE_GROUPS - 1)
                 ]
             ),
         ),
         lm_head=nn.ModuleList(
             [
-                _TupleLinear(HIDDEN, PRED_VOCAB).to(device)
+                _TupleLinear(HIDDEN, PRED_VOCAB).to(device, DTYPE)
                 for _ in range(NUM_CODE_GROUPS - 1)
             ]
         ),
         project_input=lambda hidden: projection(hidden),
     )
-    layer0_embedding = nn.Embedding(PRED_VOCAB, HIDDEN).to(device)
+    layer0_embedding = nn.Embedding(PRED_VOCAB, HIDDEN).to(device, DTYPE)
     talker.get_input_embeddings = lambda: layer0_embedding
 
     talker._predictor_graphs = {}
@@ -194,7 +195,7 @@ def _step_inputs(batch_size: int, device: torch.device, *, step: int = 0):
     ).to(device)
     hidden = torch.randn(
         batch_size, 1, HIDDEN, generator=generator, dtype=torch.float32
-    ).to(device)
+    ).to(device, DTYPE)
     positions = torch.arange(
         step * 3, step * 3 + batch_size, device=device, dtype=torch.long
     )
