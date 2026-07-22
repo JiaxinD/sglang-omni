@@ -36,13 +36,19 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_HINT = "MOSS-TTS Local"
 _SESSION_RESERVED_OFFLINE_SLOTS = 1
-# Frame-count buckets for the non-streaming decode CUDA graphs (utterances pad
-# up to the next bucket; longer ones decode eager). 12.5 fps codec: 240 = 19.2s.
-_NONSTREAM_GRAPH_FRAME_BUCKETS = (48, 80, 112, 144, 176, 208, 240)
+# Buckets for the non-streaming decode CUDA graphs, sized to the measured
+# production shapes (waves are ~always B=1, T~53 at 12.5 fps; 176 = 14s).
+# Larger shapes decode eager rather than paying pool VRAM for cold keys.
+_NONSTREAM_GRAPH_BATCH_BUCKETS = (1, 2)
+_NONSTREAM_GRAPH_FRAME_BUCKETS = (48, 80, 112, 144, 176)
 # Note: (Jiaxin Deng) load gate: the graphs trade T-bucket padding compute for
 # launch/GIL relief, which only pays when the AR loop is contended; measured
 # +10-14% qps at AR bs>=16 but -7% at bs~8 without the gate.
 _NONSTREAM_GRAPH_MIN_AR_BATCH = 12
+# Note: (Jiaxin Deng) eager decodes coexist with the graphs under the load
+# gate; captures must leave real allocator headroom (3.8GB free measured
+# pathological, 11.8GB healthy).
+_NONSTREAM_GRAPH_MIN_FREE_GB = 8.0
 
 
 class _CodecStreamSession:
@@ -720,8 +726,7 @@ class MossTTSLocalStreamingVocoderScheduler(
         )
 
         batch_buckets = sorted(
-            {b for b in (1, 2, 4, 8) if b < self._max_batch_size}
-            | {self._max_batch_size}
+            b for b in _NONSTREAM_GRAPH_BATCH_BUCKETS if b <= self._max_batch_size
         )
         runner = MossNonstreamVocoderGraphRunner(
             self._codec,
@@ -729,7 +734,9 @@ class MossTTSLocalStreamingVocoderScheduler(
             n_vq=self._n_vq,
             batch_buckets=batch_buckets,
             frame_buckets=_NONSTREAM_GRAPH_FRAME_BUCKETS,
-            min_free_gb=self._cuda_graph_min_free_gb,
+            min_free_gb=max(
+                self._cuda_graph_min_free_gb, _NONSTREAM_GRAPH_MIN_FREE_GB
+            ),
         )
         try:
             runner.warmup()

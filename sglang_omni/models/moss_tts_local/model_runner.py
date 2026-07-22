@@ -251,7 +251,6 @@ class MossTTSLocalModelRunner(ModelRunner):
         pool = self.model._state_pool
         batch_size = len(requests)
         num_channels = int(cfg.n_vq) + 1
-        publish_ar_decode_batch(batch_size)
 
         try:
             row_t = forward_batch.moss_pool_row_t
@@ -261,6 +260,9 @@ class MossTTSLocalModelRunner(ModelRunner):
                 requests
             )
         else:
+            # Decode steps only: a prefill collect must not stomp the load
+            # beacon with its small new-sequence count.
+            publish_ar_decode_batch(batch_size)
             try:
                 has_audio_repetition_penalty = (
                     forward_batch.moss_has_audio_repetition_penalty

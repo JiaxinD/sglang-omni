@@ -275,13 +275,31 @@ def test_mixed_chunked_batch_still_uses_index_fallback(
 
 
 def test_run_frame_decode_publishes_ar_batch_size():
-    """Every frame-decode step publishes its batch size to the load beacon the
-    vocoder gate reads (colocated process)."""
-    for batch_size in (1, 4):
+    """Decode steps publish their batch size to the load beacon the vocoder
+    gate reads; prefill collects (no staged pool rows) must not stomp it."""
+
+    def _decode_step(batch_size: int) -> None:
         runner = _make_runner(batch_size)
         reqs = [_sched_req(f"r{i}") for i in range(batch_size)]
-        runner._run_frame_decode(_result(batch_size), types.SimpleNamespace(), reqs)
-        assert last_ar_decode_batch() == batch_size
+        pool = runner.model._state_pool
+        row_t, pool_rows, has_penalty = pool.prepare_active_rows(reqs)
+        forward_batch = types.SimpleNamespace(
+            moss_pool_row_t=row_t,
+            moss_pool_rows=pool_rows,
+            moss_has_audio_repetition_penalty=has_penalty,
+        )
+        runner._run_frame_decode(_result(batch_size), forward_batch, reqs)
+
+    _decode_step(4)
+    assert last_ar_decode_batch() == 4
+
+    # Prefill-style collect (forward_batch without staged rows): no stomp.
+    runner = _make_runner(1)
+    runner._run_frame_decode(_result(1), types.SimpleNamespace(), [_sched_req("p0")])
+    assert last_ar_decode_batch() == 4
+
+    _decode_step(2)
+    assert last_ar_decode_batch() == 2
 
 
 def _bare_scheduler():

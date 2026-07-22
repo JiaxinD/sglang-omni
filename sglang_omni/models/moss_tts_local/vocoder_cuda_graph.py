@@ -436,7 +436,10 @@ class MossNonstreamVocoderGraphRunner:
         try:
             with torch.cuda.device(self._device):
                 with self._nonstream_decoder.assume_full_lengths():
-                    for batch_bucket in sorted(self._batch_buckets, reverse=True):
+                    # B ascending: a VRAM-budget stop keeps the small-B keys,
+                    # which carry ~all production hits. T stays largest-first
+                    # within each per-B shared pool (pool-growth rule).
+                    for batch_bucket in sorted(self._batch_buckets):
                         for frame_bucket in sorted(self._frame_buckets, reverse=True):
                             if self._disabled:
                                 break
