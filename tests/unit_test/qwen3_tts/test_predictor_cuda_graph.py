@@ -20,6 +20,7 @@ from torch import nn
 
 import sglang_omni.models.qwen3_tts.sglang_model as sglang_model_module
 from sglang_omni.models.qwen3_tts.sglang_model import Qwen3TTSTalker
+from sglang_omni.vendor.sglang.layers import RMSNorm
 
 _HAS_CUDA = torch.cuda.is_available()
 
@@ -109,8 +110,8 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker._sub_sampled_has_unbounded_top_k = False
 
     layer = SimpleNamespace(
-        input_layernorm=nn.Identity(),
-        post_attention_layernorm=nn.Identity(),
+        input_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device),
+        post_attention_layernorm=RMSNorm(HIDDEN, eps=1e-6).to(device),
         mlp=nn.Linear(HIDDEN, HIDDEN, bias=False).to(device),
     )
     layer.self_attn = SimpleNamespace(
@@ -119,8 +120,8 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
         num_heads=NUM_HEADS,
         num_kv_heads=NUM_KV_HEADS,
         head_dim=HEAD_DIM,
-        q_norm=nn.Identity(),
-        k_norm=nn.Identity(),
+        q_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device),
+        k_norm=RMSNorm(HEAD_DIM, eps=1e-6).to(device),
         alt_stream=None,
         qkv_proj=_TupleLinear(HIDDEN, (NUM_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM).to(
             device
@@ -132,7 +133,7 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker.code_predictor = SimpleNamespace(
         model=SimpleNamespace(
             layers=[layer],
-            norm=nn.Identity(),
+            norm=RMSNorm(HIDDEN, eps=1e-6).to(device),
             codec_embedding=nn.ModuleList(
                 [
                     nn.Embedding(PRED_VOCAB, HIDDEN).to(device)
