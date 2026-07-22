@@ -35,7 +35,6 @@ from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (  # noqa: E402
     mossl_frame_graph_enabled,
 )
 
-
 # ---------------------------------------------------------------------------
 # Env switch
 # ---------------------------------------------------------------------------
@@ -182,9 +181,7 @@ def test_fast_path_bit_identical_to_legacy(
     assert torch.equal(legacy["journal_rows"], fast["journal_rows"])
     assert torch.equal(legacy["sampling_steps"], fast["sampling_steps"])
     assert torch.equal(legacy["feedback_embeds"], fast["feedback_embeds"])
-    assert torch.equal(
-        legacy["audio_token_presence"], fast["audio_token_presence"]
-    )
+    assert torch.equal(legacy["audio_token_presence"], fast["audio_token_presence"])
 
 
 @pytest.mark.parametrize("batch_size", [2, 4, 8, 16])
@@ -394,8 +391,7 @@ def _graphed(runner, codes_list):
     audio, audio_lengths = out
     audio_cpu = audio.detach().to("cpu", torch.float32)
     return [
-        audio_cpu[i, :, : audio_lengths[i]].contiguous()
-        for i in range(len(codes_list))
+        audio_cpu[i, :, : audio_lengths[i]].contiguous() for i in range(len(codes_list))
     ]
 
 
@@ -409,9 +405,7 @@ def _uniform_reference(codec, nonstream_decoder, codes_list, bucket):
     )
     for i, c in enumerate(codes_list):
         padded[:, i, : c.shape[1]] = c
-    lengths = torch.full(
-        (batch_bucket,), frame_bucket, device=device, dtype=torch.long
-    )
+    lengths = torch.full((batch_bucket,), frame_bucket, device=device, dtype=torch.long)
     original = codec.decoder
     codec.decoder = nonstream_decoder
     try:

@@ -388,10 +388,9 @@ class MossTTSLocalModelRunner(ModelRunner):
         emit_indices = sorted(emit_set)
         if emit_indices:
             if fast_path and len(emit_indices) == batch_size:
-                # Steady-state decode step: every row emits, so the batch-order
-                # tensors are used as-is. Skips the index_select chain and the
-                # index tensor built from a host list, whose pageable H2D copy
-                # stream-syncs every step (24.6% of the serving loop at c32).
+                # Steady-state decode step: every row emits, so batch-order
+                # tensors are used as-is; a host-list index tensor's pageable
+                # H2D copy would stream-sync the launch queue every step.
                 emit_pool_rows = pool_rows
                 emit_row_t = row_t
                 emit_rows = rows

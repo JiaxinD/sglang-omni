@@ -373,9 +373,7 @@ class MossNonstreamVocoderGraphRunner:
             self._pools[batch_bucket] = pool
         graph = torch.cuda.CUDAGraph()
         try:
-            with torch.cuda.graph(
-                graph, pool=pool, capture_error_mode="thread_local"
-            ):
+            with torch.cuda.graph(graph, pool=pool, capture_error_mode="thread_local"):
                 result = self._codec._decode_frame(static_codes, static_lengths)
                 static_audio = result.audio
         except Exception:
@@ -464,9 +462,7 @@ class MossNonstreamVocoderGraphRunner:
     def captured_keys(self) -> list[tuple[int, int]]:
         return sorted(self._graphs.keys())
 
-    def bucket_for(
-        self, live_batch: int, live_frames: int
-    ) -> tuple[int, int] | None:
+    def bucket_for(self, live_batch: int, live_frames: int) -> tuple[int, int] | None:
         """Smallest captured (batch, frames) bucket covering the live shape."""
         for batch_bucket in self._batch_buckets:
             if batch_bucket < live_batch:
