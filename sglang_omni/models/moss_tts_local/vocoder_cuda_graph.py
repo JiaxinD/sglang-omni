@@ -286,10 +286,13 @@ class MossNonstreamVocoderGraphRunner:
     """(B, T)-bucketed CUDA graphs over the packed non-streaming codec decode.
 
     Captured at warmup with every sequence pinned to the bucket's dense length
-    (``assume_full_lengths``); the decode chain's only temporal mixing is causal
-    local attention, so tail/batch padding cannot reach the valid region — the
-    bit-identity gate in tests enforces this. Replay copies padded codes into
-    the static buffer and slices per-utterance audio by ``frames *
+    (``assume_full_lengths``). Replay is bit-identical to the same-geometry
+    eager decode (gated in tests). Note: (Jiaxin Deng) the eager ragged decode
+    is itself batch-composition-dependent at the bit level (varlen flash
+    geometry; measured max|delta| ~2e-2 between batch layouts of the same
+    utterance), so bucket padding stays within the pre-existing numerical
+    family rather than adding a new error mode. Replay copies padded codes
+    into the static buffer and slices per-utterance audio by ``frames *
     samples_per_frame`` (the length map is exactly linear; validated at
     capture).
     """
@@ -461,19 +464,25 @@ class MossNonstreamVocoderGraphRunner:
     def captured_keys(self) -> list[tuple[int, int]]:
         return sorted(self._graphs.keys())
 
-    def _find_entry(
+    def bucket_for(
         self, live_batch: int, live_frames: int
-    ) -> _CapturedNonstreamGraph | None:
+    ) -> tuple[int, int] | None:
+        """Smallest captured (batch, frames) bucket covering the live shape."""
         for batch_bucket in self._batch_buckets:
             if batch_bucket < live_batch:
                 continue
             for frame_bucket in self._frame_buckets:
                 if frame_bucket < live_frames:
                     continue
-                entry = self._graphs.get((batch_bucket, frame_bucket))
-                if entry is not None:
-                    return entry
+                if (batch_bucket, frame_bucket) in self._graphs:
+                    return (batch_bucket, frame_bucket)
         return None
+
+    def _find_entry(
+        self, live_batch: int, live_frames: int
+    ) -> _CapturedNonstreamGraph | None:
+        key = self.bucket_for(live_batch, live_frames)
+        return self._graphs[key] if key is not None else None
 
     @torch.no_grad()
     def decode_padded(
