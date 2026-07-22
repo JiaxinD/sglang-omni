@@ -45,7 +45,7 @@ _PREDICTOR_TOP_K_LADDER = (4, 8, 16, 32, 50, 64, 128, 256, 512, 1024)
 
 def _predictor_graph_env_enabled() -> bool:
     value = os.environ.get(QTTS_PREDICTOR_GRAPH_ENV, "1").strip().lower()
-    return value not in ("0", "false", "off")
+    return value not in ("0", "false", "off", "no")
 
 
 def _quantize_predictor_top_k(max_top_k: int, vocab_size: int) -> int | None:
@@ -67,9 +67,9 @@ def _sample_seeded_categorical(
 class _PredictorDecodeGraph:
     """CUDA graph over the full per-token predictor chain for one batch bucket.
 
-    One graph per (bucket, sampling signature): the signature pins every host
-    branch the eager chain takes (argmax vs all-rows-sampled, top-k bound,
-    top-p presence), so replay reproduces the eager kernel sequence exactly.
+    One graph per (bucket, sampling signature): the signature pins the host
+    branches of the eager sampling path (argmax vs all-rows-sampled, top-k
+    bound, top-p presence), so replay reproduces the eager sampling bits.
     Per-step inputs reach the captured region through persistent device
     buffers written with device-side copies before replay.
     """
@@ -1191,23 +1191,23 @@ class Qwen3TTSTalker(nn.Module):
             self._sub_sampled_has_unbounded_top_k,
         )
         sampled = signature[0] == "sampled"
-        self._sub_batch_size = bucket_size
-        self._sub_has_sampled_rows = sampled
-        self._sub_sample_count = bucket_size if sampled else 0
-        self._sub_sample_rows = list(range(bucket_size)) if sampled else []
-        _, max_top_k, has_top_p, has_unbounded_top_k = signature
-        self._sub_sampled_max_top_k = max_top_k
-        self._sub_sampled_has_top_p = has_top_p
-        self._sub_sampled_has_unbounded_top_k = has_unbounded_top_k
-        if sampled:
-            self._sub_sample_row_indices_tensor[:bucket_size].copy_(
-                torch.arange(
-                    bucket_size,
-                    device=self._sub_sample_row_indices_tensor.device,
-                    dtype=torch.long,
-                )
-            )
         try:
+            self._sub_batch_size = bucket_size
+            self._sub_has_sampled_rows = sampled
+            self._sub_sample_count = bucket_size if sampled else 0
+            self._sub_sample_rows = list(range(bucket_size)) if sampled else []
+            _, max_top_k, has_top_p, has_unbounded_top_k = signature
+            self._sub_sampled_max_top_k = max_top_k
+            self._sub_sampled_has_top_p = has_top_p
+            self._sub_sampled_has_unbounded_top_k = has_unbounded_top_k
+            if sampled:
+                self._sub_sample_row_indices_tensor[:bucket_size].copy_(
+                    torch.arange(
+                        bucket_size,
+                        device=self._sub_sample_row_indices_tensor.device,
+                        dtype=torch.long,
+                    )
+                )
             yield
         finally:
             (
@@ -1494,7 +1494,7 @@ class Qwen3TTSTalker(nn.Module):
             cdf = torch.cumsum(sorted_probs, dim=-1)
             remove = (cdf > top_ps.unsqueeze(1)) & active_top_p.unsqueeze(1)
             remove[:, 0] = False
-            sorted_probs = sorted_probs.masked_fill(remove, 0.0)
+            sorted_probs = sorted_probs.masked_fill(remove, -float("inf"))
         # Note: (Jiaxin Deng) the seeded sampler scores prob + gumbel, so a
         # 0.0 prob can still win; -inf keeps ranks past a row's true k out.
         sorted_probs = sorted_probs.masked_fill(~keep_top_k, -float("inf"))

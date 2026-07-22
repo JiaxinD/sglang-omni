@@ -366,6 +366,8 @@ def test_env_switch_parsing(monkeypatch: pytest.MonkeyPatch):
     assert sglang_model_module._predictor_graph_env_enabled() is False
     monkeypatch.setenv(env, "false")
     assert sglang_model_module._predictor_graph_env_enabled() is False
+    monkeypatch.setenv(env, "no")
+    assert sglang_model_module._predictor_graph_env_enabled() is False
     monkeypatch.setenv(env, "1")
     assert sglang_model_module._predictor_graph_env_enabled() is True
 
@@ -712,6 +714,60 @@ def test_widened_top_k_masked_ranks_never_sampled():
         )
 
 
+@pytest.mark.skipif(not _HAS_CUDA, reason="seeded sampling kernel needs CUDA")
+def test_top_p_removed_ranks_never_sampled():
+    """Nucleus-removed ranks must be impossible, same rationale as the top-k mask."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    logits = torch.zeros(1, PRED_VOCAB, device=device)
+    logits[0, 3] = 4.0
+    row_indices = torch.zeros(1, dtype=torch.long, device=device)
+    positions = torch.zeros(1, dtype=torch.long, device=device)
+
+    for seed in range(100):
+        # rank 0 alone holds ~0.97 mass, so top_p=0.5 removes ranks 1-3
+        talker.prepare_decode_buffers([_request(top_k=4, top_p=0.5, sub_seed=seed)])
+        token = talker._sample_subtalker_token_seeded(
+            logits,
+            0,
+            row_indices=row_indices,
+            semantic_positions=positions,
+        )
+        assert (
+            token.item() == 3
+        ), f"seed={seed} sampled a nucleus-removed rank: {token.item()}"
+
+
+def test_capture_state_pre_yield_failure_restores_state():
+    """An exception while staging capture state must not leak bucket-shaped
+    _sub_* values into the eager fallback of the same step."""
+    device = torch.device("cpu")
+    talker = _build_talker(device)
+    talker.prepare_decode_buffers(_uniform_requests(3))
+    saved = (
+        talker._sub_batch_size,
+        talker._sub_sample_count,
+        list(talker._sub_sample_rows),
+        talker._sub_sampled_max_top_k,
+    )
+
+    class _Boom:
+        def __getitem__(self, item):
+            raise RuntimeError("simulated allocation failure")
+
+    talker._sub_sample_row_indices_tensor = _Boom()
+    with pytest.raises(RuntimeError, match="simulated allocation failure"):
+        with talker._predictor_graph_capture_state(4, ("sampled", 8, False, False)):
+            pass
+
+    assert (
+        talker._sub_batch_size,
+        talker._sub_sample_count,
+        list(talker._sub_sample_rows),
+        talker._sub_sampled_max_top_k,
+    ) == saved
+
+
 def test_resolve_predictor_graph_enabled(monkeypatch: pytest.MonkeyPatch):
     talker = object.__new__(Qwen3TTSTalker)
     args = SimpleNamespace(disable_cuda_graph=False, tp_size=1)
@@ -735,6 +791,7 @@ def test_server_disable_cuda_graph_gates_predictor(monkeypatch: pytest.MonkeyPat
     device = torch.device("cuda")
     talker = _build_talker(device)
     talker._predictor_graph_enabled = None
+    monkeypatch.delenv(sglang_model_module.QTTS_PREDICTOR_GRAPH_ENV, raising=False)
     monkeypatch.setattr(
         sglang_model_module,
         "get_global_server_args",
