@@ -29,6 +29,7 @@ class TtsCiThresholdPreset:
     stream_wer_corpus: float
     similarity_mean_min: float
     utmos_mean_min: float
+    non_stream_hc_speed: dict[int, dict[str, float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,11 +71,23 @@ _HIGGS_VC_STREAM_P95 = {
     }
 }
 
+_HIGGS_VC_NON_STREAM_HC_P95 = {
+    96: {
+        "throughput_qps": 40.0,
+        "output_tok_per_req_s": 100.0,
+        "latency_mean_s": 3.5,
+        "rtf_mean": 0.6,
+    }
+}
+
 HIGGS_VC_NON_STREAM_THRESHOLDS = apply_slack(
     _HIGGS_VC_NON_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
 )
 HIGGS_VC_STREAM_THRESHOLDS = apply_slack(
     _HIGGS_VC_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
+)
+HIGGS_VC_NON_STREAM_HC_THRESHOLDS = apply_slack(
+    _HIGGS_VC_NON_STREAM_HC_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
 )
 
 
@@ -124,6 +137,7 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
             stream_wer_corpus=HIGGS_VC_STREAM_WER_CORPUS_THRESHOLD,
             similarity_mean_min=HIGGS_VC_SIMILARITY_MEAN_MIN,
             utmos_mean_min=HIGGS_VC_UTMOS_MEAN_MIN,
+            non_stream_hc_speed=HIGGS_VC_NON_STREAM_HC_THRESHOLDS,
         ),
     ),
     "moss": TtsCiPreset(
