@@ -361,6 +361,88 @@ def test_nonstream_gate_dispatch(monkeypatch: pytest.MonkeyPatch):
     assert not consulted, "kill switch must force eager regardless of load"
 
 
+def test_gate_decision_is_per_batch_not_beacon(monkeypatch: pytest.MonkeyPatch):
+    """The per-batch decision carried with the emitted rows must beat any
+    beacon residue: an above-gate batch stays graphed even if a smaller batch
+    published afterwards, and a below-gate batch never enters the graph path
+    regardless of a stale high beacon. The beacon is only the fallback for
+    callers without a per-batch decision."""
+    scheduler = _bare_scheduler()
+    consulted: list = []
+
+    def fake_decode_padded(padded_codes, codes_lengths):
+        consulted.append(1)
+        return torch.zeros(1, 2, 100), [40]
+
+    scheduler._nonstream_cg_runner = types.SimpleNamespace(
+        decode_padded=fake_decode_padded
+    )
+    codes = torch.zeros(N_VQ, 1, 10, dtype=torch.long)
+    monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "1")
+
+    # Above-gate batch with a smaller batch published in between: still graphed.
+    publish_ar_decode_batch(4)
+    out = scheduler._graphed_nonstream_decode(codes, [10], above_load_gate=True)
+    assert consulted and out is not None
+
+    # Below-gate batch with stale high beacon residue: never graphed.
+    consulted.clear()
+    publish_ar_decode_batch(32)
+    assert (
+        scheduler._graphed_nonstream_decode(codes, [10], above_load_gate=False) is None
+    )
+    assert not consulted
+
+    # No per-batch decision: beacon fallback applies (both directions).
+    publish_ar_decode_batch(32)
+    assert scheduler._graphed_nonstream_decode(codes, [10]) is not None
+    publish_ar_decode_batch(4)
+    assert scheduler._graphed_nonstream_decode(codes, [10]) is None
+
+
+def test_journal_and_request_data_carry_gate_flag(monkeypatch: pytest.MonkeyPatch):
+    """The AR step's gate decision rides the journal into the request data and
+    the result payload, so the vocode dispatch needs no global temporal state."""
+    from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
+    from sglang_omni.models.moss_tts_local.request_builders import (
+        MossTTSLocalSGLangRequestData,
+        apply_sglang_moss_tts_local_result,
+    )
+    from sglang_omni.proto import StagePayload
+
+    monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "1")
+
+    def _run(batch_size: int):
+        runner = _make_runner(batch_size)
+        reqs = [_sched_req(f"r{i}") for i in range(batch_size)]
+        result = _result(batch_size)
+        runner._run_frame_decode(result, types.SimpleNamespace(), reqs)
+        journal = result.moss_journal
+        runner.post_process_outputs(
+            result,
+            types.SimpleNamespace(requests=reqs),
+            {req.request_id: types.SimpleNamespace(data=0) for req in reqs},
+        )
+        return journal.above_load_gate, reqs
+
+    above, reqs = _run(16)
+    assert above is True
+    assert all(req.data.above_load_gate is True for req in reqs)
+
+    above, reqs = _run(4)
+    assert above is False
+    assert all(req.data.above_load_gate is False for req in reqs)
+
+    # Result adapter and wire round-trip.
+    data = MossTTSLocalSGLangRequestData(
+        stage_payload=StagePayload(request_id="r", request=None, data={}),
+        above_load_gate=True,
+    )
+    payload = apply_sglang_moss_tts_local_result(data.stage_payload, data)
+    assert MossTTSLocalState.from_dict(payload.data).above_load_gate is True
+    assert MossTTSLocalState.from_dict({}).above_load_gate is False
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming vocoder CUDA graph (GPU + real codec)
 # ---------------------------------------------------------------------------
@@ -788,17 +870,119 @@ def test_scheduler_kill_switch_and_replay_failure(
         assert torch.isfinite(a).all()
         assert (a - b).abs().max().item() <= 0.5
 
-    # Replay failure: disables the runner, raises, then serves eager.
+    # A per-batch below-gate decision beats the open beacon on the real path.
+    consulted.clear()
+    below_out = scheduler._decode_codes_rows(
+        [r.clone() for r in rows_list], above_load_gate=False
+    )
+    assert not consulted, "below-gate batch must never enter the graph path"
+    for a, b in zip(below_out, eager_ref):
+        assert torch.equal(a, b)
+
+    # Replay failure: the SAME batch is retried eagerly inline (in-flight
+    # requests succeed, bit-identical), and the runner is disabled after.
     def boom(*args, **kwargs):
         raise RuntimeError("simulated replay failure")
 
     monkeypatch.setattr(graph_runner, "decode_padded", boom)
-    with pytest.raises(RuntimeError):
-        scheduler._decode_codes_rows([r.clone() for r in rows_list])
+    retried = scheduler._decode_codes_rows([r.clone() for r in rows_list])
     assert scheduler._nonstream_cg_runner is None
+    for a, b in zip(retried, eager_ref):
+        assert torch.equal(a, b)
     after = scheduler._decode_codes_rows([r.clone() for r in rows_list])
     for a, b in zip(after, eager_ref):
         assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + real codec")
+def test_post_capture_headroom_violation_rolls_back(codec_bundle, monkeypatch):
+    """A capture that eats into the promised free-VRAM reserve is rolled back:
+    the graph is reset, its key disabled, and capturing stops."""
+    codec, nonstream_decoder, _ = codec_bundle
+    runner = MossNonstreamVocoderGraphRunner(
+        codec,
+        nonstream_decoder,
+        n_vq=N_VQ,
+        batch_buckets=[1],
+        frame_buckets=[4, 8],
+    )
+    resets: list = []
+    original_reset = torch.cuda.CUDAGraph.reset
+
+    def spy_reset(self, *args, **kwargs):
+        resets.append(self)
+        return original_reset(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.cuda.CUDAGraph, "reset", spy_reset)
+
+    checks = {"n": 0}
+
+    def fake_headroom():
+        checks["n"] += 1
+        # Pre-capture check passes; the post-capture re-check reports the
+        # capture ate into the reserve.
+        return (checks["n"] % 2 == 1), 1 << 30
+
+    runner._enough_free_vram = fake_headroom
+    runner.warmup()
+    assert runner.captured_keys() == [], "violating capture must be rolled back"
+    assert resets, "rollback must release the graph via reset()"
+
+
+PROD_BATCH_BUCKETS = [1, 2]
+PROD_FRAME_BUCKETS = [144, 176]
+
+
+@pytest.fixture(scope="module")
+def prod_graph_runner(codec_bundle):
+    codec, nonstream_decoder, _ = codec_bundle
+    runner = MossNonstreamVocoderGraphRunner(
+        codec,
+        nonstream_decoder,
+        n_vq=N_VQ,
+        batch_buckets=PROD_BATCH_BUCKETS,
+        frame_buckets=PROD_FRAME_BUCKETS,
+    )
+    runner.warmup()
+    if not runner.captured_keys():
+        pytest.skip("no production-bucket graphs captured (low VRAM?)")
+    return runner
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + real codec")
+@pytest.mark.parametrize(
+    "lengths",
+    [
+        [144],  # exact production T bucket, crosses the 128-token query tile
+        [176],  # exact largest production T bucket
+        [150],  # tail-padded into T=176
+        [176, 130],  # ragged pair at B=2
+    ],
+    ids=["b1_t144_exact", "b1_t176_exact", "b1_t150_tailpad", "b2_ragged_prod"],
+)
+def test_prod_bucket_graph_bit_identical_same_geometry(
+    codec_bundle, prod_graph_runner, lengths
+):
+    """Same-geometry identity at the production frame buckets: T=144/176 span
+    multiple 128-token local-attention query tiles, which the small-T gates do
+    not exercise."""
+    codec, nonstream_decoder, vocab = codec_bundle
+    torch.manual_seed(sum(lengths) + 7)
+    codes_list = [
+        torch.randint(0, vocab, (N_VQ, t), device="cuda", dtype=torch.long)
+        for t in lengths
+    ]
+    bucket = prod_graph_runner.bucket_for(len(codes_list), max(lengths))
+    assert bucket is not None
+    graphed = _graphed(prod_graph_runner, codes_list)
+    assert graphed is not None
+    reference = _uniform_reference(codec, nonstream_decoder, codes_list, bucket)
+    for i in range(len(lengths)):
+        assert graphed[i].shape == reference[i].shape
+        assert torch.equal(graphed[i], reference[i]), (
+            f"utterance {i} not bit-identical at prod bucket {bucket}: "
+            f"max|delta|={(graphed[i] - reference[i]).abs().max().item():.3e}"
+        )
 
 
 if __name__ == "__main__":
