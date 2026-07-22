@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 _SOURCE_HINT = "MOSS-TTS Local"
 _SESSION_RESERVED_OFFLINE_SLOTS = 1
 # Frame-count buckets for the non-streaming decode CUDA graphs (utterances pad
-# up to the next bucket; longer ones decode eager).
-_NONSTREAM_GRAPH_FRAME_BUCKETS = (64, 96, 128, 160, 192, 224)
+# up to the next bucket; longer ones decode eager). 12.5 fps codec: 240 = 19.2s.
+_NONSTREAM_GRAPH_FRAME_BUCKETS = (48, 80, 112, 144, 176, 208, 240)
 
 
 class _CodecStreamSession:
