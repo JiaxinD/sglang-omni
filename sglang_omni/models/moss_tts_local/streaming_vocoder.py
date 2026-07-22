@@ -19,6 +19,7 @@ import torch
 
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+    last_ar_decode_batch,
     mossl_frame_graph_enabled,
 )
 from sglang_omni.models.moss_tts_local.vocoder_decoder import MossTTSLocalVocoderDecoder
@@ -38,6 +39,10 @@ _SESSION_RESERVED_OFFLINE_SLOTS = 1
 # Frame-count buckets for the non-streaming decode CUDA graphs (utterances pad
 # up to the next bucket; longer ones decode eager). 12.5 fps codec: 240 = 19.2s.
 _NONSTREAM_GRAPH_FRAME_BUCKETS = (48, 80, 112, 144, 176, 208, 240)
+# Note: (Jiaxin Deng) load gate: the graphs trade T-bucket padding compute for
+# launch/GIL relief, which only pays when the AR loop is contended; measured
+# +10-14% qps at AR bs>=16 but -7% at bs~8 without the gate.
+_NONSTREAM_GRAPH_MIN_AR_BATCH = 12
 
 
 class _CodecStreamSession:
@@ -878,6 +883,8 @@ class MossTTSLocalStreamingVocoderScheduler(
     ) -> list[torch.Tensor] | None:
         runner = self._nonstream_cg_runner
         if runner is None or not mossl_frame_graph_enabled():
+            return None
+        if last_ar_decode_batch() < _NONSTREAM_GRAPH_MIN_AR_BATCH:
             return None
         try:
             with self._nonstream_cg_lock:

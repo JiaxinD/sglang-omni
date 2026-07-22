@@ -24,6 +24,31 @@ def mossl_frame_graph_enabled() -> bool:
     return value not in ("0", "false", "off")
 
 
+class _ArDecodeLoadBeacon:
+    """Latest AR decode batch size, published by the model runner every step.
+
+    The colocated vocoder thread reads it as the in-flight load signal for the
+    nonstream-graph gate. Note: (Jiaxin Deng) a split-process vocoder reads 0,
+    so its nonstream decode stays eager (safe, just ungraphed).
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
+
+
+_ar_decode_load = _ArDecodeLoadBeacon()
+
+
+def publish_ar_decode_batch(batch_size: int) -> None:
+    _ar_decode_load.value = int(batch_size)
+
+
+def last_ar_decode_batch() -> int:
+    return _ar_decode_load.value
+
+
 class _CapturedVocoderGraph(NamedTuple):
     """One captured per-T graph and its static replay buffers (named to avoid positional unpack)."""
 

@@ -13,6 +13,7 @@ from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
 from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
 from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
     mossl_frame_graph_enabled,
+    publish_ar_decode_batch,
 )
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.types import RequestOutput
@@ -250,6 +251,7 @@ class MossTTSLocalModelRunner(ModelRunner):
         pool = self.model._state_pool
         batch_size = len(requests)
         num_channels = int(cfg.n_vq) + 1
+        publish_ar_decode_batch(batch_size)
 
         try:
             row_t = forward_batch.moss_pool_row_t
