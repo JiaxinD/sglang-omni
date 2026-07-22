@@ -17,6 +17,12 @@ _ATTN_ORIGINAL_UPDATE_CACHE_ATTR = "_sglang_omni_original_update_streaming_cache
 
 MOSSL_FRAME_GRAPH_ENV = "SGLANG_OMNI_MOSSL_FRAME_GRAPH"
 _NONSTREAM_MAX_CAPTURE_FAILURES = 8
+# Note: (Jiaxin Deng) one shared load threshold for the AR emit fast path and
+# the nonstream vocoder graphs: they must engage together. The fast path lets
+# the launch queue run deep, which the EAGER vocoder's ~13 per-utterance host
+# syncs each drain (measured stage-latency explosion); the graphed vocoder
+# syncs once. Below the threshold both stay off = the env-off code path.
+MOSSL_FRAME_GRAPH_MIN_AR_BATCH = 12
 
 
 def mossl_frame_graph_enabled() -> bool:

@@ -12,6 +12,7 @@ from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
 from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
 from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
 from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+    MOSSL_FRAME_GRAPH_MIN_AR_BATCH,
     mossl_frame_graph_enabled,
     publish_ar_decode_batch,
 )
@@ -365,7 +366,12 @@ class MossTTSLocalModelRunner(ModelRunner):
             )
             embeds = None
 
-        fast_path = mossl_frame_graph_enabled()
+        # Below the load threshold the legacy path (with its per-step stream
+        # sync) is kept deliberately: a deep launch queue makes the eager
+        # vocoder's host syncs pathological (see MOSSL_FRAME_GRAPH_MIN_AR_BATCH).
+        fast_path = (
+            mossl_frame_graph_enabled() and batch_size >= MOSSL_FRAME_GRAPH_MIN_AR_BATCH
+        )
         slot_id = int(cfg.audio_assistant_slot_token_id)
         end_id = int(cfg.audio_end_token_id)
         if fast_path:

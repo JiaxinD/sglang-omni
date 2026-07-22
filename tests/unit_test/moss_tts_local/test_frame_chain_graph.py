@@ -208,12 +208,19 @@ def test_mixed_chunked_batch_matches_legacy(
     assert torch.equal(legacy["rows"], fast["rows"])
 
 
-def test_all_emit_path_builds_no_host_index_tensor(monkeypatch: pytest.MonkeyPatch):
-    """The steady-state decode step (every row emits) must not build an index
-    tensor from a host list: torch.tensor(list, device=...) is a pageable H2D
-    copy that stream-syncs, measured at 24.6% of the serving loop."""
+@pytest.mark.parametrize(
+    ("batch_size", "expect_fast"),
+    [(16, True), (4, False)],
+    ids=["at_load_threshold_fast", "below_threshold_legacy_sync"],
+)
+def test_all_emit_path_index_tensor_follows_load_gate(
+    monkeypatch: pytest.MonkeyPatch, batch_size: int, expect_fast: bool
+):
+    """At/above the load threshold the steady-state decode step must not build
+    an index tensor from a host list (a pageable H2D copy that stream-syncs,
+    measured at 24.6% of the serving loop); below it the legacy synced path is
+    kept deliberately (the deep launch queue starves the eager vocoder)."""
     monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "1")
-    batch_size = 4
     runner = _make_runner(batch_size)
     reqs = [_sched_req(f"r{i}") for i in range(batch_size)]
     pool = runner.model._state_pool
@@ -235,24 +242,25 @@ def test_all_emit_path_builds_no_host_index_tensor(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(torch, "tensor", counting_tensor)
     runner._run_frame_decode(_result(batch_size), forward_batch, reqs)
-    assert not calls, (
-        "all-emit fast path must not call torch.tensor (host->device sync); "
-        f"saw {len(calls)} call(s)"
-    )
+    if expect_fast:
+        assert not calls, (
+            "all-emit fast path must not call torch.tensor (host->device "
+            f"sync); saw {len(calls)} call(s)"
+        )
+    else:
+        assert calls, "below-threshold load must keep the legacy synced path"
 
 
 def test_mixed_chunked_batch_still_uses_index_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Sanity for the counter above: the mixed emit case keeps the legacy
-    index-tensor path (so the fast-path counter is not vacuous)."""
+    """A mixed emit batch keeps the legacy index-tensor path even at/above the
+    load threshold (so the fast-path counter is not vacuous)."""
     monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "1")
-    batch_size = 3
+    batch_size = 16
     runner = _make_runner(batch_size)
-    reqs = [
-        _sched_req("r0"),
-        _sched_req("r1"),
-        _sched_req("r2", chunked=1),
+    reqs = [_sched_req(f"r{i}") for i in range(batch_size - 1)] + [
+        _sched_req(f"r{batch_size - 1}", chunked=1)
     ]
     pool = runner.model._state_pool
     row_t, pool_rows, has_penalty = pool.prepare_active_rows(reqs)
@@ -320,8 +328,8 @@ def test_nonstream_gate_dispatch(monkeypatch: pytest.MonkeyPatch):
     """Load-aware gate: below the AR-batch threshold the runner is not
     consulted (eager, zero low-load regression by construction); at/above it
     the graphs engage; the kill switch forces eager regardless of load."""
-    from sglang_omni.models.moss_tts_local.streaming_vocoder import (
-        _NONSTREAM_GRAPH_MIN_AR_BATCH,
+    from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+        MOSSL_FRAME_GRAPH_MIN_AR_BATCH as _NONSTREAM_GRAPH_MIN_AR_BATCH,
     )
 
     scheduler = _bare_scheduler()
