@@ -153,9 +153,8 @@ class _PredictorDecodeGraph:
                 if semantic_positions is not None:
                     self.semantic_positions[live:].zero_()
             if self.signature[0] == "sampled":
-                # Note: (Jiaxin Deng) the captured all-sampled path index-selects
-                # _sub_sample_row_indices_tensor[:bucket]; a preceding mixed batch
-                # may have scrambled it, so restore identity before every replay.
+                # Note: (Jiaxin Deng) restore identity row indices; the captured
+                # path reads [:bucket] and a mixed batch may have scrambled it.
                 self.model._sub_sample_row_indices_tensor[: self.batch_size].copy_(
                     self.identity_rows
                 )
