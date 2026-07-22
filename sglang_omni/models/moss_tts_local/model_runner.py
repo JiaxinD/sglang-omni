@@ -11,6 +11,9 @@ from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
 from sglang_omni.models.moss_tts_local.radix_hash import gpu_radix_row_hash
 from sglang_omni.models.moss_tts_local.state_pool import MossTTSLocalDecodeJournal
+from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+    mossl_frame_graph_enabled,
+)
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.types import RequestOutput
 
@@ -358,13 +361,21 @@ class MossTTSLocalModelRunner(ModelRunner):
             )
             embeds = None
 
+        fast_path = mossl_frame_graph_enabled()
         slot_id = int(cfg.audio_assistant_slot_token_id)
         end_id = int(cfg.audio_end_token_id)
-        next_text = torch.where(
-            stop_choice == 0,
-            torch.full((batch_size,), slot_id, dtype=torch.long, device=device),
-            torch.full((batch_size,), end_id, dtype=torch.long, device=device),
-        )
+        if fast_path:
+            next_text = torch.where(
+                stop_choice == 0,
+                self._token_scalar(slot_id, device),
+                self._token_scalar(end_id, device),
+            )
+        else:
+            next_text = torch.where(
+                stop_choice == 0,
+                torch.full((batch_size,), slot_id, dtype=torch.long, device=device),
+                torch.full((batch_size,), end_id, dtype=torch.long, device=device),
+            )
 
         rows = torch.empty((batch_size, num_channels), dtype=torch.long, device=device)
         rows[:, 0] = next_text
@@ -376,23 +387,38 @@ class MossTTSLocalModelRunner(ModelRunner):
             )
         emit_indices = sorted(emit_set)
         if emit_indices:
-            emit_index_t = torch.tensor(
-                emit_indices, dtype=torch.long, device=rows.device
-            )
-            emit_pool_rows = [pool_rows[i] for i in emit_indices]
-            emit_row_t = row_t[emit_index_t.to(device=row_t.device)]
-            emit_rows = rows.index_select(0, emit_index_t)
-            emit_steps = gen_steps.index_select(
-                0, emit_index_t.to(device=gen_steps.device)
-            )
+            if fast_path and len(emit_indices) == batch_size:
+                # Steady-state decode step: every row emits, so the batch-order
+                # tensors are used as-is. Skips the index_select chain and the
+                # index tensor built from a host list, whose pageable H2D copy
+                # stream-syncs every step (24.6% of the serving loop at c32).
+                emit_pool_rows = pool_rows
+                emit_row_t = row_t
+                emit_rows = rows
+                emit_steps = gen_steps
+                emit_next_text = next_text
+                emit_embeds = embeds
+            else:
+                emit_index_t = torch.tensor(
+                    emit_indices, dtype=torch.long, device=rows.device
+                )
+                emit_pool_rows = [pool_rows[i] for i in emit_indices]
+                emit_row_t = row_t[emit_index_t.to(device=row_t.device)]
+                emit_rows = rows.index_select(0, emit_index_t)
+                emit_steps = gen_steps.index_select(
+                    0, emit_index_t.to(device=gen_steps.device)
+                )
+                emit_next_text = next_text.index_select(
+                    0, emit_index_t.to(device=next_text.device)
+                )
+                emit_embeds = embeds.index_select(
+                    0, emit_index_t.to(device=embeds.device)
+                )
             pool.sampling_steps[emit_row_t] = (emit_steps + 1).to(
                 device=pool.sampling_steps.device, dtype=torch.int64
             )
             if has_audio_repetition_penalty:
-                keep_history = (
-                    next_text.index_select(0, emit_index_t.to(device=next_text.device))
-                    != end_id
-                )
+                keep_history = emit_next_text != end_id
                 emit_penalty_active = (
                     pool.audio_repetition_penalty[emit_row_t]
                     .to(device=keep_history.device)
@@ -403,7 +429,6 @@ class MossTTSLocalModelRunner(ModelRunner):
                     emit_row_t[keep_history.to(device=emit_row_t.device)],
                     emit_rows[keep_history.to(device=emit_rows.device)],
                 )
-            emit_embeds = embeds.index_select(0, emit_index_t.to(device=embeds.device))
             pool.feedback_embeds[emit_row_t] = emit_embeds.detach().to(
                 device=pool.feedback_embeds.device,
                 dtype=pool.feedback_embeds.dtype,
@@ -449,6 +474,20 @@ class MossTTSLocalModelRunner(ModelRunner):
         del forward_batch, schedule_batch, requests
         if launch_buf is not None and result is not None:
             result.next_token_ids = launch_buf
+
+    def _token_scalar(self, value: int, device: torch.device) -> torch.Tensor:
+        """Cached 0-dim device tensor for a token id (avoids two per-step
+        [batch]-sized fills feeding torch.where)."""
+        cache = getattr(self, "_token_scalar_cache", None)
+        if cache is None:
+            cache = {}
+            self._token_scalar_cache = cache
+        key = (int(value), device.type, device.index)
+        scalar = cache.get(key)
+        if scalar is None:
+            scalar = torch.full((), int(value), dtype=torch.long, device=device)
+            cache[key] = scalar
+        return scalar
 
     @staticmethod
     def _row_radix_token_ids(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -17,6 +18,9 @@ from typing import Any, Mapping
 import torch
 
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
+from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+    mossl_frame_graph_enabled,
+)
 from sglang_omni.models.moss_tts_local.vocoder_decoder import MossTTSLocalVocoderDecoder
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.pipeline_state import build_usage
@@ -31,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_HINT = "MOSS-TTS Local"
 _SESSION_RESERVED_OFFLINE_SLOTS = 1
+# Frame-count buckets for the non-streaming decode CUDA graphs (utterances pad
+# up to the next bucket; longer ones decode eager).
+_NONSTREAM_GRAPH_FRAME_BUCKETS = (64, 96, 128, 160, 192, 224)
 
 
 class _CodecStreamSession:
@@ -400,6 +407,8 @@ class MossTTSLocalStreamingVocoderScheduler(
         self._n_vq = int(n_vq)
         self._session: _CodecStreamSession | None = None
         self._session_used_by_streaming = False
+        self._nonstream_cg_runner: Any | None = None
+        self._nonstream_cg_lock = threading.Lock()
         self._cuda_graph = bool(cuda_graph)
         self._cuda_graph_frames = (
             [int(t) for t in cuda_graph_frames] if cuda_graph_frames else None
@@ -696,6 +705,40 @@ class MossTTSLocalStreamingVocoderScheduler(
             logger.warning(
                 "MOSS vocoder CUDA graphs did not seal at startup (low VRAM); eager vocoder"
             )
+        self._warmup_nonstream_graphs()
+
+    def _warmup_nonstream_graphs(self) -> None:
+        if self._nonstream_cg_runner is not None or not mossl_frame_graph_enabled():
+            return
+        from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
+            MossNonstreamVocoderGraphRunner,
+        )
+
+        batch_buckets = sorted(
+            {b for b in (1, 2, 4, 8) if b < self._max_batch_size}
+            | {self._max_batch_size}
+        )
+        runner = MossNonstreamVocoderGraphRunner(
+            self._codec,
+            self._nonstream_decoder,
+            n_vq=self._n_vq,
+            batch_buckets=batch_buckets,
+            frame_buckets=_NONSTREAM_GRAPH_FRAME_BUCKETS,
+            min_free_gb=self._cuda_graph_min_free_gb,
+        )
+        try:
+            runner.warmup()
+        except Exception:
+            logger.exception(
+                "MOSS nonstream vocoder CUDA-graph warmup failed; eager nonstream decode"
+            )
+            return
+        if runner.captured_keys():
+            self._nonstream_cg_runner = runner
+        else:
+            logger.warning(
+                "MOSS nonstream vocoder CUDA graphs did not capture; eager nonstream decode"
+            )
 
     def _ensure_slot(self, state: _LocalStreamState) -> None:
         if state.slot is None:
@@ -801,6 +844,13 @@ class MossTTSLocalStreamingVocoderScheduler(
             audio_codes[:, index, :length] = codes
             padding_mask[index, :length] = True
 
+        graphed = self._graphed_nonstream_decode(
+            audio_codes,
+            [int(codes.shape[1]) for codes in codes_channels_first],
+        )
+        if graphed is not None:
+            return graphed
+
         decoded = self._codec.decode(
             audio_codes,
             padding_mask=padding_mask,
@@ -819,6 +869,35 @@ class MossTTSLocalStreamingVocoderScheduler(
         return [
             audio_cpu[index, :, : int(lengths_cpu[index])].contiguous()
             for index in range(int(audio_cpu.shape[0]))
+        ]
+
+    def _graphed_nonstream_decode(
+        self,
+        audio_codes: torch.Tensor,
+        codes_lengths: list[int],
+    ) -> list[torch.Tensor] | None:
+        runner = self._nonstream_cg_runner
+        if runner is None or not mossl_frame_graph_enabled():
+            return None
+        try:
+            with self._nonstream_cg_lock:
+                out = runner.decode_padded(audio_codes, codes_lengths)
+                if out is None:
+                    return None
+                audio, audio_lengths = out
+                # One batched D2H inside the guard: an async replay error can
+                # surface here rather than in decode_padded.
+                audio_cpu = audio.detach().to("cpu", torch.float32)
+        except Exception:
+            self._nonstream_cg_runner = None
+            logger.exception(
+                "MOSS nonstream vocoder CUDA-graph replay failed; disabling, "
+                "serving eager from here"
+            )
+            raise
+        return [
+            audio_cpu[index, :, :length].contiguous()
+            for index, length in enumerate(audio_lengths)
         ]
 
     def _decode_codes_rows(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
