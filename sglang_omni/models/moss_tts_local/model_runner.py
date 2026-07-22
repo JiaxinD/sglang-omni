@@ -446,6 +446,7 @@ class MossTTSLocalModelRunner(ModelRunner):
                 rids=[requests[i].request_id for i in emit_indices],
                 pool_rows=emit_pool_rows,
                 rows=emit_rows,
+                above_load_gate=fast_path,
             )
         # Always return rows so both the sync inline path and the async launch
         # publish next_token_ids; an all-chunked batch just attaches no journal.
@@ -684,6 +685,9 @@ class MossTTSLocalModelRunner(ModelRunner):
                     is_retracted = False
                 if (callable(finished_fn) and finished_fn()) or bool(is_retracted):
                     continue
+            # Latest live step wins: the finishing step's decision reaches the
+            # result payload for the vocode load gate.
+            sched_req.data.above_load_gate = journal.above_load_gate
             req_output = outputs[sched_req.request_id]
             if req_output.data is None or int(req_output.data) == end_id:
                 continue

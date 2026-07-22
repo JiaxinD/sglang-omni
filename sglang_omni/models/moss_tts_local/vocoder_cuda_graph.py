@@ -463,15 +463,7 @@ class MossNonstreamVocoderGraphRunner:
                                 self._capture(batch_bucket, frame_bucket)
                             except Exception:
                                 self._capture_failures += 1
-                                logger.warning(
-                                    "MOSS nonstream vocoder CG capture failed for "
-                                    "B=%d T=%d (failure %d/%d); eager for this key",
-                                    batch_bucket,
-                                    frame_bucket,
-                                    self._capture_failures,
-                                    _NONSTREAM_MAX_CAPTURE_FAILURES,
-                                    exc_info=True,
-                                )
+                                self._log_capture_failure(batch_bucket, frame_bucket)
                                 if (
                                     self._capture_failures
                                     >= _NONSTREAM_MAX_CAPTURE_FAILURES
@@ -482,6 +474,29 @@ class MossNonstreamVocoderGraphRunner:
                                         "graphs after %d capture failures",
                                         self._capture_failures,
                                     )
+                                continue
+                            # Re-check AFTER the capture: one near the boundary
+                            # can eat into the promised eager headroom.
+                            enough_after, free_after = self._enough_free_vram()
+                            if not enough_after:
+                                entry = self._graphs.pop(
+                                    (batch_bucket, frame_bucket), None
+                                )
+                                if entry is not None:
+                                    try:
+                                        entry.graph.reset()
+                                    except Exception:
+                                        pass
+                                logger.warning(
+                                    "MOSS nonstream vocoder CG: capture B=%d T=%d "
+                                    "left free VRAM %.1fGB below the %.1fGB "
+                                    "reserve; rolled back, stopping captures",
+                                    batch_bucket,
+                                    frame_bucket,
+                                    free_after / 1024**3,
+                                    self._min_free_bytes / 1024**3,
+                                )
+                                return
                         if self._disabled:
                             break
         finally:
@@ -491,6 +506,17 @@ class MossNonstreamVocoderGraphRunner:
             "MOSS nonstream vocoder CUDA graphs sealed: %d keys %s",
             len(self._graphs),
             sorted(self._graphs.keys()),
+        )
+
+    def _log_capture_failure(self, batch_bucket: int, frame_bucket: int) -> None:
+        logger.warning(
+            "MOSS nonstream vocoder CG capture failed for "
+            "B=%d T=%d (failure %d/%d); eager for this key",
+            batch_bucket,
+            frame_bucket,
+            self._capture_failures,
+            _NONSTREAM_MAX_CAPTURE_FAILURES,
+            exc_info=True,
         )
 
     def captured_keys(self) -> list[tuple[int, int]]:
