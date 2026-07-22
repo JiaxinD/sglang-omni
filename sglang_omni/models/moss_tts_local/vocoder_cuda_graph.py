@@ -509,13 +509,19 @@ class MossNonstreamVocoderGraphRunner:
         entry = self._find_entry(live_batch, live_frames)
         if entry is None:
             self._eager_misses += 1
+            if self._eager_misses <= 5:
+                logger.info(
+                    "MOSS nonstream vocoder CG miss: B=%d T=%d",
+                    live_batch,
+                    live_frames,
+                )
             return None
         with torch.cuda.device(self._device):
             entry.static_codes.zero_()
             entry.static_codes[:, :live_batch, :live_frames].copy_(padded_codes)
             entry.graph.replay()
         self._graph_steps += 1
-        if self._graph_steps % 500 == 0:
+        if self._graph_steps % 25 == 0:
             logger.info(
                 "MOSS nonstream vocoder CG: %d graphed decodes, %d eager misses",
                 self._graph_steps,
