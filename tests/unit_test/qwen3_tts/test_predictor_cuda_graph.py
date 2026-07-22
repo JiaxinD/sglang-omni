@@ -24,6 +24,14 @@ from sglang_omni.vendor.sglang.layers import RMSNorm
 
 _HAS_CUDA = torch.cuda.is_available()
 
+
+@pytest.fixture(autouse=True)
+def _stub_qk_norm(monkeypatch: pytest.MonkeyPatch):
+    # apply_qk_norm reads global server args (unset in unit tests); the norm
+    # ops themselves are covered by the real RMSNorm layer norms.
+    monkeypatch.setattr(sglang_model_module, "apply_qk_norm", lambda q, k, **_: (q, k))
+
+
 HIDDEN = 8
 NUM_HEADS = 2
 NUM_KV_HEADS = 1
