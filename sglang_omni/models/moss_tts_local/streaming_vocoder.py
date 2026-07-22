@@ -734,9 +734,7 @@ class MossTTSLocalStreamingVocoderScheduler(
             n_vq=self._n_vq,
             batch_buckets=batch_buckets,
             frame_buckets=_NONSTREAM_GRAPH_FRAME_BUCKETS,
-            min_free_gb=max(
-                self._cuda_graph_min_free_gb, _NONSTREAM_GRAPH_MIN_FREE_GB
-            ),
+            min_free_gb=max(self._cuda_graph_min_free_gb, _NONSTREAM_GRAPH_MIN_FREE_GB),
         )
         try:
             runner.warmup()
