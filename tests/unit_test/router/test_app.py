@@ -586,6 +586,32 @@ def test_deleting_a_journaled_worker_keeps_the_tombstone_for_readd(
         assert readded.json()["worker"]["disabled"] is True
 
 
+def test_rejected_reenable_commits_no_part_of_the_staged_update(
+    tmp_path: Path,
+) -> None:
+    # every fallible precondition is checked before committing: a 503 on the
+    # journal must not leave a half-applied model change for the CP keepalive
+    # to publish
+    journal_path = str(tmp_path / "update_journal.json")
+    Path(journal_path).write_bytes(b"{corrupt")
+    worker_id = worker_id_from_url("http://worker-a:8101")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "worker"}, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    with TestClient(app) as client:
+        response = client.put(
+            f"/workers/{worker_id}",
+            json={"disabled": False, "model": "new-model"},
+        )
+        assert response.status_code == 503
+        listed = {w["url"]: w for w in client.get("/workers").json()["workers"]}
+        assert listed["http://worker-a:8101"]["model"] != "new-model"
+        assert listed["http://worker-a:8101"]["disabled"] is True
+
+
 def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> None:
     # discard() cannot modify an unreadable journal: the re-enable must fail
     # instead of returning 200 while every update stays blocked with 409

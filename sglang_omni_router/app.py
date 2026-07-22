@@ -454,21 +454,25 @@ def register_admin_routes(
             except ValidationError as exc:
                 return _error_response(400, str(exc))
 
+        # every fallible precondition is checked BEFORE any state is
+        # committed: a rejected request must not leave a half-applied config
+        # for the CP keepalive to publish
+        if requested_disabled is False:
+            journal = getattr(app.state, "update_journal", None)
+            if journal is not None and not journal.discard(worker.worker_id):
+                # the journal could not be durably resolved: enabling now
+                # would report success while every weight update stays
+                # blocked behind the 409 gate
+                return _error_response(
+                    503,
+                    "cannot re-enable: the weight-update journal at "
+                    f"{journal.path} is unreadable; inspect and remove or "
+                    "replace it, then retry",
+                )
+
         worker.replace_config(next_config)
 
         if requested_disabled is not None:
-            if requested_disabled is False:
-                journal = getattr(app.state, "update_journal", None)
-                if journal is not None and not journal.discard(worker.worker_id):
-                    # the journal could not be durably resolved: enabling now
-                    # would report success while every weight update stays
-                    # blocked behind the 409 gate
-                    return _error_response(
-                        503,
-                        "cannot re-enable: the weight-update journal at "
-                        f"{journal.path} is unreadable; inspect and remove or "
-                        "replace it, then retry",
-                    )
             worker.set_disabled(requested_disabled)
 
         if requested_is_dead is not None:

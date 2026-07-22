@@ -76,19 +76,28 @@ class InternalChannelState:
                 # or impostor process, not a re-register.
                 raise StaleGenerationError(hello.generation, current.generation)
         preserved_seq = 0
+        preserved_epoch = ""
+        preserved_serving = True
         if (
             current is not None
             and hello.generation == current.generation
             and hello.pid == current.pid
         ):
-            # Note (Jiaxin Deng): idempotent re-register; the DP's applied
-            # snapshot did not go backwards.
+            # Note (Jiaxin Deng): idempotent re-register (e.g. a lost
+            # heartbeat response): keep seq WITH its epoch (a seq under a
+            # blank epoch cannot satisfy the ACK barrier) and the serving
+            # flag (a shedding DP must not read serving-ready until its
+            # next heartbeat).
             preserved_seq = current.last_applied_seq
+            preserved_epoch = current.last_applied_epoch
+            preserved_serving = current.serving
         record = DataPlaneRecord(
             dp_index=hello.dp_index,
             generation=hello.generation,
             pid=hello.pid,
             last_applied_seq=preserved_seq,
+            last_applied_epoch=preserved_epoch,
+            serving=preserved_serving,
             last_seen_at=time.time(),
         )
         self.data_planes[hello.dp_index] = record

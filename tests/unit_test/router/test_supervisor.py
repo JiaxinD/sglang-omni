@@ -251,18 +251,27 @@ def test_cp_restart_unlinks_a_stale_uds_socket(tmp_path: Path) -> None:
 def test_start_rolls_back_when_a_dp_spawn_fails(tmp_path: Path) -> None:
     config = _config()
     spawned: list[FakeProcess] = []
+    listener_closed_at_signal: list[bool] = []
+
+    def _track(process: FakeProcess) -> FakeProcess:
+        original = process.terminate
+
+        def _terminate(orig=original):
+            # supervisor is defined below; the closure resolves it at call time
+            listener_closed_at_signal.append(supervisor._socket is None)
+            orig()
+
+        process.terminate = _terminate  # type: ignore[method-assign]
+        spawned.append(process)
+        return process
 
     def _spawn_dp(ctx: SupervisorContext, index: int, generation: int) -> FakeProcess:
         if index == 1:
             raise RuntimeError("spawn exploded")
-        process = FakeProcess()
-        spawned.append(process)
-        return process
+        return _track(FakeProcess())
 
     def _spawn_cp(ctx: SupervisorContext) -> FakeProcess:
-        process = FakeProcess()
-        spawned.append(process)
-        return process
+        return _track(FakeProcess())
 
     supervisor = RouterSupervisor(
         config,
@@ -280,6 +289,18 @@ def test_start_rolls_back_when_a_dp_spawn_fails(tmp_path: Path) -> None:
     assert not (tmp_path / "router_config.json").exists()
     with pytest.raises(RuntimeError, match="not started"):
         _ = supervisor.context
+    # rollback mirrors shutdown(): the listener was dropped before any child
+    # was signaled, and the real port refuses connections afterwards
+    assert listener_closed_at_signal and all(listener_closed_at_signal)
+    import socket as socket_module
+
+    probe = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    probe.settimeout(1.0)
+    try:
+        with pytest.raises(OSError):
+            probe.connect(("127.0.0.1", config.port))
+    finally:
+        probe.close()
 
 
 def test_run_forever_stops_cleanly_on_request_stop(tmp_path: Path) -> None:

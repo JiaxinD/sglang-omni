@@ -270,17 +270,23 @@ class RouterSupervisor:
             raise
 
     def _cleanup_partial_start(self) -> None:
+        # same order as shutdown(): drop the listener first and signal every
+        # started DP before awaiting any, so a blocked drain cannot leave
+        # sibling DPs unsignaled or connections queueing in an acceptorless
+        # backlog during rollback
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
         for slot in self._dp_slots.values():
-            self._stop_child(slot.process)
+            self._signal_child(slot.process)
+        for slot in self._dp_slots.values():
+            self._await_child(slot.process)
         self._dp_slots.clear()
         if self._cp_process is not None:
             self._stop_child(self._cp_process)
             self._cp_process = None
         self._close_death_pipe()
         self._close_admission_shm()
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
         self._context = None
         if self._workdir:
             for name in (

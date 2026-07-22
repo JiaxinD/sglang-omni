@@ -550,6 +550,40 @@ def _failure(worker_id: str, *, seq: int, dp: int = 0, generation: int = 1) -> d
     }
 
 
+def test_late_failure_report_cannot_revive_a_dead_worker(tmp_path: Path) -> None:
+    # PUT is_dead=true, then a delayed in-flight failure report arrives: it
+    # must not demote dead to unhealthy (which the health prober would then
+    # probe back to healthy/routable). The event is consumed by the dedup
+    # first, so a retry cannot apply it after a later explicit clear-dead.
+    app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
+    with TestClient(app) as client:
+        snapshot = _read_snapshot(snapshot_path)
+        worker_id = snapshot.workers[0].worker_id
+        assert (
+            client.put(f"/workers/{worker_id}", json={"is_dead": True}).status_code
+            == 200
+        )
+
+        response = client.post(
+            "/internal/worker_failure", json=_failure(worker_id, seq=1)
+        )
+        assert response.status_code == 200
+        assert response.json().get("ignored_dead") is True
+        assert response.json().get("worker_state") != "unhealthy"
+        listed = client.get("/workers").json()["workers"][0]
+        assert listed["health_state"] == "dead"
+
+        # operator clears dead: a RETRY of the consumed event still cannot apply
+        assert (
+            client.put(f"/workers/{worker_id}", json={"is_dead": False}).status_code
+            == 200
+        )
+        retry = client.post("/internal/worker_failure", json=_failure(worker_id, seq=1))
+        assert retry.json().get("deduplicated") is True
+        listed = client.get("/workers").json()["workers"][0]
+        assert listed["health_state"] != "unhealthy"
+
+
 def test_redelivered_failure_events_are_counted_once(tmp_path: Path) -> None:
     # a retry of one failure (same failure_seq) must not push a healthy
     # worker over the eviction threshold

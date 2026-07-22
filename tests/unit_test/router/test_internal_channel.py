@@ -133,11 +133,16 @@ def test_same_pid_reregister_is_idempotent_and_keeps_the_ack() -> None:
     app = create_internal_app()
     with TestClient(app) as client:
         client.post("/internal/register", json=_hello())
-        client.post("/internal/heartbeat", json=_beat(seq=17))
-        # dropped connection: same process registers again
+        beat = {**_beat(seq=17), "last_applied_epoch": "epoch-x", "serving": False}
+        client.post("/internal/heartbeat", json=beat)
+        # dropped heartbeat response: same process registers again. Seq must
+        # keep its epoch (a seq under a blank epoch cannot satisfy the ACK
+        # barrier) and a shedding DP must not flip back to serving-ready.
         assert client.post("/internal/register", json=_hello()).status_code == 200
         listed = client.get("/internal/data_planes").json()["data_planes"]
         assert listed[0]["last_applied_seq"] == 17
+        assert listed[0]["last_applied_epoch"] == "epoch-x"
+        assert listed[0]["serving"] is False
 
 
 def test_heartbeat_with_a_future_generation_requires_registration() -> None:

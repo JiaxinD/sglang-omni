@@ -409,6 +409,12 @@ def create_control_plane_app(
             return JSONResponse({"status": "ok", "stale_incarnation": True})
         if _failure_already_applied(report):
             return JSONResponse({"status": "ok", "deduplicated": True})
+        if worker.is_dead:
+            # Note (Jiaxin Deng): the dedup above already consumed this event
+            # id, so a retry cannot apply it after a later clear-dead. An
+            # operator's explicit dead mark must not be demoted to unhealthy
+            # (which the health prober would then probe back to healthy).
+            return JSONResponse({"status": "ok", "ignored_dead": True})
         before = (worker.is_routable, worker.state)
         worker.record_request_failure(
             failure_threshold=config.health_failure_threshold,
