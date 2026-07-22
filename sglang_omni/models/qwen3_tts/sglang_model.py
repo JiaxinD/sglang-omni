@@ -37,11 +37,23 @@ logger = logging.getLogger(__name__)
 
 QTTS_PREDICTOR_GRAPH_ENV = "SGLANG_OMNI_QTTS_PREDICTOR_GRAPH"
 _PREDICTOR_GRAPH_MAX_KEYS = 32
+_PREDICTOR_GRAPH_MAX_FAILURES = 8
+# Note: (Jiaxin Deng) 50 is on the ladder because it is the family checkpoint
+# default, keeping the dominant signature's kernel width exactly as before.
+_PREDICTOR_TOP_K_LADDER = (4, 8, 16, 32, 50, 64, 128, 256, 512, 1024)
 
 
 def _predictor_graph_env_enabled() -> bool:
     value = os.environ.get(QTTS_PREDICTOR_GRAPH_ENV, "1").strip().lower()
     return value not in ("0", "false", "off")
+
+
+def _quantize_predictor_top_k(max_top_k: int, vocab_size: int) -> int | None:
+    """Smallest ladder width covering max_top_k, or None to use the full sort."""
+    for step in _PREDICTOR_TOP_K_LADDER:
+        if step >= max_top_k:
+            return step if step < vocab_size else None
+    return None
 
 
 def _sample_seeded_categorical(
@@ -86,7 +98,16 @@ class _PredictorDecodeGraph:
         self.graph = torch.cuda.CUDAGraph()
         self.result_codes: torch.Tensor | None = None
         self.summed_embeddings: torch.Tensor | None = None
-        self._capture()
+        try:
+            self._capture()
+        except Exception:
+            # Note: (Jiaxin Deng) release the graph's private memory pool
+            # eagerly; the raising object may linger on traceback frames.
+            try:
+                self.graph.reset()
+            except Exception:
+                pass
+            raise
 
     @torch.no_grad()
     def _capture(self) -> None:
@@ -491,6 +512,7 @@ class Qwen3TTSTalker(nn.Module):
         self._predictor_graphs: dict[tuple, _PredictorDecodeGraph] = {}
         self._predictor_graph_disabled: set[tuple] = set()
         self._predictor_graph_enabled = _predictor_graph_env_enabled()
+        self._predictor_graph_failure_count = 0
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -991,10 +1013,21 @@ class Qwen3TTSTalker(nn.Module):
         self._sub_sampled_has_top_p = any(
             0.0 < float(sub_top_ps[row_idx]) < 1.0 for row_idx in self._sub_sample_rows
         )
-        self._sub_sampled_max_top_k = max(bounded_top_ks, default=0)
-        self._sub_sampled_has_unbounded_top_k = len(bounded_top_ks) != len(
-            sampled_top_ks
-        )
+        has_unbounded_top_k = len(bounded_top_ks) != len(sampled_top_ks)
+        max_top_k = 0
+        max_bounded_top_k = max(bounded_top_ks, default=0)
+        if max_bounded_top_k > 0 and not has_unbounded_top_k:
+            # Note: (Jiaxin Deng) ladder-quantized so predictor-graph keys are
+            # shared across request top_k values; per-row masks keep true k.
+            quantized = _quantize_predictor_top_k(
+                max_bounded_top_k, predictor_vocab_size
+            )
+            if quantized is None:
+                has_unbounded_top_k = True
+            else:
+                max_top_k = quantized
+        self._sub_sampled_max_top_k = max_top_k
+        self._sub_sampled_has_unbounded_top_k = has_unbounded_top_k
 
         if batch_size == 0:
             return
@@ -1227,11 +1260,19 @@ class Qwen3TTSTalker(nn.Module):
                 )
             except Exception:
                 self._predictor_graph_disabled.add(key)
+                self._predictor_graph_failure_count += 1
                 logger.warning(
                     "Disabling Qwen3-TTS predictor CUDA graph for key=%s",
                     key,
                     exc_info=True,
                 )
+                if self._predictor_graph_failure_count >= _PREDICTOR_GRAPH_MAX_FAILURES:
+                    self._predictor_graph_enabled = False
+                    logger.warning(
+                        "Disabling Qwen3-TTS predictor CUDA graphs entirely "
+                        "after %d capture failures",
+                        self._predictor_graph_failure_count,
+                    )
                 return None
             self._predictor_graphs[key] = graph
             logger.info("Captured Qwen3-TTS predictor CUDA graph for key=%s", key)
