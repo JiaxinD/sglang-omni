@@ -32,7 +32,9 @@ from sglang_omni.models.moss_tts_local.state_pool import (  # noqa: E402
 from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (  # noqa: E402
     MOSSL_FRAME_GRAPH_ENV,
     MossNonstreamVocoderGraphRunner,
+    last_ar_decode_batch,
     mossl_frame_graph_enabled,
+    publish_ar_decode_batch,
 )
 
 # ---------------------------------------------------------------------------
@@ -270,6 +272,67 @@ def test_mixed_chunked_batch_still_uses_index_fallback(
     monkeypatch.setattr(torch, "tensor", counting_tensor)
     runner._run_frame_decode(_result(batch_size), forward_batch, reqs)
     assert calls, "mixed batch should take the index-tensor fallback"
+
+
+def test_run_frame_decode_publishes_ar_batch_size():
+    """Every frame-decode step publishes its batch size to the load beacon the
+    vocoder gate reads (colocated process)."""
+    for batch_size in (1, 4):
+        runner = _make_runner(batch_size)
+        reqs = [_sched_req(f"r{i}") for i in range(batch_size)]
+        runner._run_frame_decode(_result(batch_size), types.SimpleNamespace(), reqs)
+        assert last_ar_decode_batch() == batch_size
+
+
+def _bare_scheduler():
+    import threading
+
+    from sglang_omni.models.moss_tts_local.streaming_vocoder import (
+        MossTTSLocalStreamingVocoderScheduler,
+    )
+
+    scheduler = MossTTSLocalStreamingVocoderScheduler.__new__(
+        MossTTSLocalStreamingVocoderScheduler
+    )
+    scheduler._nonstream_cg_lock = threading.Lock()
+    return scheduler
+
+
+def test_nonstream_gate_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """Load-aware gate: below the AR-batch threshold the runner is not
+    consulted (eager, zero low-load regression by construction); at/above it
+    the graphs engage; the kill switch forces eager regardless of load."""
+    from sglang_omni.models.moss_tts_local.streaming_vocoder import (
+        _NONSTREAM_GRAPH_MIN_AR_BATCH,
+    )
+
+    scheduler = _bare_scheduler()
+    consulted: list = []
+
+    def fake_decode_padded(padded_codes, codes_lengths):
+        consulted.append((tuple(padded_codes.shape), list(codes_lengths)))
+        return torch.zeros(1, 2, 100), [40]
+
+    scheduler._nonstream_cg_runner = types.SimpleNamespace(
+        decode_padded=fake_decode_padded
+    )
+    codes = torch.zeros(N_VQ, 1, 10, dtype=torch.long)
+
+    monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "1")
+    publish_ar_decode_batch(_NONSTREAM_GRAPH_MIN_AR_BATCH - 1)
+    assert scheduler._graphed_nonstream_decode(codes, [10]) is None
+    assert not consulted, "below-threshold load must stay eager"
+
+    publish_ar_decode_batch(_NONSTREAM_GRAPH_MIN_AR_BATCH)
+    out = scheduler._graphed_nonstream_decode(codes, [10])
+    assert consulted, "at-threshold load must consult the graph runner"
+    assert out is not None and out[0].shape == (2, 40)
+
+    consulted.clear()
+    monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "0")
+    publish_ar_decode_batch(_NONSTREAM_GRAPH_MIN_AR_BATCH + 16)
+    assert scheduler._graphed_nonstream_decode(codes, [10]) is None
+    assert not consulted, "kill switch must force eager regardless of load"
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +734,7 @@ def test_scheduler_kill_switch_and_replay_failure(
     eager_ref = scheduler._decode_codes_rows([r.clone() for r in rows_list])
 
     scheduler._nonstream_cg_runner = graph_runner
+    publish_ar_decode_batch(32)  # open the load gate; the kill switch still wins
 
     # Env off: the runner must not be consulted.
     monkeypatch.setenv(MOSSL_FRAME_GRAPH_ENV, "0")
