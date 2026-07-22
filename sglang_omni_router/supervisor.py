@@ -315,17 +315,14 @@ class RouterSupervisor:
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(self._config.model_dump_json())
 
-        # resolve the family from the configured host (AI_PASSIVE mirrors
-        # uvicorn's own bind): a hardcoded AF_INET would gaierror on ::/::1
-        family, _, _, _, bind_addr = socket.getaddrinfo(
-            self._config.host or None,
-            self._config.port,
-            type=socket.SOCK_STREAM,
-            flags=socket.AI_PASSIVE,
-        )[0]
+        # same family selection as uvicorn's bind_socket, so N=1 and N>=2
+        # listen identically for any given --host (a hardcoded AF_INET would
+        # gaierror on ::/::1; getaddrinfo[0] would pick an OS-dependent family
+        # for hostnames like localhost)
+        family = socket.AF_INET6 if ":" in (self._config.host or "") else socket.AF_INET
         self._socket = socket.socket(family, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.bind(bind_addr)
+        self._socket.bind((self._config.host, self._config.port))
         self._socket.listen(_LISTEN_BACKLOG)
         self._socket.set_inheritable(True)
 

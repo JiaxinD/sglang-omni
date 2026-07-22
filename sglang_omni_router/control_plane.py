@@ -390,8 +390,12 @@ def create_control_plane_app(
         return False
 
     def _stale_generation(dp_index: int, generation: int) -> JSONResponse | None:
+        # only a generation OLDER than the registered one is provably fenced.
+        # A NEWER generation is a replacement DP whose report raced ahead of
+        # its /internal/register (the loops are concurrent); 409ing it would
+        # make the DP treat itself as fenced and exit, killing a valid process.
         current = internal_state.data_planes.get(dp_index)
-        if current is not None and generation != current.generation:
+        if current is not None and generation < current.generation:
             return _error_response(
                 409,
                 f"stale generation {generation}, current is {current.generation}",

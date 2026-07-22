@@ -745,7 +745,9 @@ async def _broadcast_admin_request(
                     "an earlier weight update did not complete; verify the "
                     "journaled workers' weight versions, re-enable them "
                     "(admin-authenticated PUT /workers {disabled: false}), "
-                    "then retry",
+                    "then retry. A journaled worker no longer registered must "
+                    "be re-added under its original URL (it starts disabled) "
+                    "and re-enabled the same way",
                 )
             # Note (Jiaxin Deng): re-resolve the target set under the lock;
             # membership may have changed while waiting for a previous update.

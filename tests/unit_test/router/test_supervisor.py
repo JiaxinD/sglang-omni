@@ -100,18 +100,45 @@ def _config() -> RouterConfig:
 
 def test_supervisor_binds_an_ipv6_host(tmp_path: Path) -> None:
     # --host ::1 works through the N=1 uvicorn path; the supervisor's shared
-    # socket must resolve the family instead of hardcoding AF_INET
+    # socket must select the family the same way uvicorn does instead of
+    # hardcoding AF_INET
+    import socket
+
+    probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        probe.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback unavailable in this environment")
+    finally:
+        probe.close()
+
     config = RouterConfig(
         host="::1",
         port=_free_port(),
         workers=[WorkerConfig(url="http://127.0.0.1:8101")],
     )
-    import socket
-
     harness = Harness(config, n=1, tmp_path=tmp_path)
     harness.supervisor.start()
     try:
         assert harness.supervisor._socket.family == socket.AF_INET6
+    finally:
+        harness.supervisor.shutdown()
+
+
+def test_supervisor_binds_hostnames_as_ipv4_like_uvicorn(tmp_path: Path) -> None:
+    # a hostname host (no colon) must bind AF_INET exactly like uvicorn's
+    # family selection, not whichever family getaddrinfo lists first
+    import socket
+
+    config = RouterConfig(
+        host="localhost",
+        port=_free_port(),
+        workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+    )
+    harness = Harness(config, n=1, tmp_path=tmp_path)
+    harness.supervisor.start()
+    try:
+        assert harness.supervisor._socket.family == socket.AF_INET
     finally:
         harness.supervisor.shutdown()
 

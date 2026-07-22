@@ -87,6 +87,8 @@ class HealthChecker:
                 timeout=self._config.health_check_timeout_secs,
             )
         except httpx.HTTPError as exc:
+            if worker.is_dead:
+                return
             logger.debug(
                 f"Worker {worker.display_id} health check failed: "
                 f"{type(exc).__name__}: {exc}",
@@ -100,6 +102,10 @@ class HealthChecker:
             )
             return
 
+        if worker.is_dead:
+            # an operator marked the worker dead while this probe was in
+            # flight: its late result must not revive the explicit dead mark
+            return
         ok = 200 <= response.status_code < 300
         error = None
         if not ok:

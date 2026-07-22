@@ -81,6 +81,26 @@ async def test_health_checker_on_tick_fires_after_each_sweep() -> None:
     await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_in_flight_probe_result_cannot_revive_a_dead_worker() -> None:
+    # the dead check at probe start is not enough: an operator can mark the
+    # worker dead while the HTTP probe is in flight, and the late result must
+    # not be applied (a success would probe it back to healthy/routable)
+    config = _config()
+    workers = build_workers(config.workers)
+    worker = workers[0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        worker.mark_dead()  # operator acts while the probe is in flight
+        return httpx.Response(200, json={"status": "healthy"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    checker = HealthChecker(workers=workers, config=config, client=client)
+    await checker.check_worker_health(worker)
+    assert worker.is_dead
+    await client.aclose()
+
+
 def test_cp_publishes_snapshot_on_startup_and_crud(tmp_path: Path) -> None:
     app, snapshot_path, _ = _cp_app(tmp_path)
     with TestClient(app) as client:
@@ -548,6 +568,29 @@ def _failure(worker_id: str, *, seq: int, dp: int = 0, generation: int = 1) -> d
         "generation": generation,
         "failure_seq": seq,
     }
+
+
+def test_replacement_generation_report_racing_its_register_is_not_fenced(
+    tmp_path: Path,
+) -> None:
+    # a replacement DP's counter flush can land before its /internal/register
+    # (the loops are concurrent): a 409 would make the valid new process treat
+    # itself as fenced and exit; only an OLDER generation is provably stale
+    app, snapshot_path, _ = _cp_app(tmp_path)
+    with TestClient(app) as client:
+        client.post(
+            "/internal/register", json={"dp_index": 0, "generation": 1, "pid": 1}
+        )
+        worker_id = _read_snapshot(snapshot_path).workers[0].worker_id
+        newer = {
+            "dp_index": 0,
+            "generation": 2,
+            "counter_seq": 1,
+            "workers": [{"worker_id": worker_id, "routed_total": 1}],
+        }
+        assert client.post("/internal/counters", json=newer).status_code == 200
+        older = {**newer, "generation": 1, "counter_seq": 9}
+        assert client.post("/internal/counters", json=older).status_code == 409
 
 
 def test_late_failure_report_cannot_revive_a_dead_worker(tmp_path: Path) -> None:
