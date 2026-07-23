@@ -167,6 +167,7 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker._predictor_graph_batch_sizes = BUCKETS
     talker._predictor_graph_enabled = True
     talker._predictor_graph_failure_count = 0
+    talker._predictor_graph_pool = None
     return talker
 
 
@@ -712,6 +713,34 @@ def test_widened_top_k_masked_ranks_never_sampled():
             f"seed={seed} sampled rank outside the request's top_k=2: "
             f"{token.item()} not in {sorted(allowed)}"
         )
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_graph_keys_share_memory_pool(monkeypatch: pytest.MonkeyPatch):
+    """Distinct graph keys must capture into one model-owned memory pool."""
+    device = torch.device("cuda")
+    talker = _build_talker(device)
+    pools = []
+    real_graph = torch.cuda.graph
+
+    class _SpyGraph(real_graph):
+        def __init__(self, cuda_graph, pool=None, **kwargs):
+            pools.append(pool)
+            super().__init__(cuda_graph, pool=pool, **kwargs)
+
+    monkeypatch.setattr(torch.cuda, "graph", _SpyGraph)
+
+    layer0, hidden, positions = _step_inputs(2, device)
+    talker.prepare_decode_buffers(_uniform_requests(2))
+    _run_forward(talker, layer0, hidden, positions)
+    talker.prepare_decode_buffers(_uniform_requests(2, dosample=False))
+    _run_forward(talker, layer0, hidden, positions)
+
+    assert len(talker._predictor_graphs) == 2
+    assert len(pools) == 2
+    assert pools[0] is not None
+    assert pools[0] == pools[1]
+    assert pools[0] == talker._predictor_graph_pool
 
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="seeded sampling kernel needs CUDA")

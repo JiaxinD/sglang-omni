@@ -133,6 +133,7 @@ class _PredictorDecodeGraph:
             capture_stream.wait_stream(current_stream)
             with torch.cuda.graph(
                 self.graph,
+                pool=model._predictor_graph_memory_pool(),
                 stream=capture_stream,
                 capture_error_mode="thread_local",
             ):
@@ -515,6 +516,7 @@ class Qwen3TTSTalker(nn.Module):
         # disable_cuda_graph on during init (deferred capture), so not here.
         self._predictor_graph_enabled: bool | None = None
         self._predictor_graph_failure_count = 0
+        self._predictor_graph_pool = None
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -1219,6 +1221,13 @@ class Qwen3TTSTalker(nn.Module):
                 self._sub_sampled_max_top_k,
                 self._sub_sampled_has_unbounded_top_k,
             ) = saved
+
+    def _predictor_graph_memory_pool(self):
+        # Note: (Jiaxin Deng) one shared pool across keys; private per-graph
+        # pools would retain intermediates per key and scale with diversity.
+        if self._predictor_graph_pool is None:
+            self._predictor_graph_pool = torch.cuda.graph_pool_handle()
+        return self._predictor_graph_pool
 
     def _resolve_predictor_graph_enabled(self) -> bool:
         if not _predictor_graph_env_enabled():
