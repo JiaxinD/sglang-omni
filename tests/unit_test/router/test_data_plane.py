@@ -196,6 +196,38 @@ def test_dp_reports_eviction_relevant_failures_to_the_cp(tmp_path: Path) -> None
         )
 
 
+def test_dp_leaves_the_failure_verdict_to_the_cp(tmp_path: Path) -> None:
+    # the CP owns the health verdict: a snapshot carries state but never
+    # resets a DP-local consecutive_failures, so a DP that counted failures
+    # too would evict a worker the CP still counts as healthy
+    upstream = _Recorder(status_for={"/generate": 502})
+    internal = _Recorder()
+    app, snapshot_path = _dp_app(
+        tmp_path, upstream, internal=internal, failure_threshold=3
+    )
+    writer = SnapshotWriter(snapshot_path, cp_epoch="e")
+    with TestClient(app) as client:
+        view = app.state.worker_view
+        _snapshot(writer, _entry())
+        _wait_for(lambda: client.get("/ready").status_code == 200)
+
+        for _ in range(2):
+            assert client.post("/generate", json={}).status_code == 502
+
+        # the CP's own health probe succeeded: it reset its counter and
+        # republished the worker healthy
+        seq = _snapshot(writer, _entry(state="healthy")).seq
+        _wait_for(lambda: view.last_applied_seq == seq)
+
+        assert client.post("/generate", json={}).status_code == 502
+        assert view.workers()[0].consecutive_failures == 0
+
+        # the CP has counted one failure of three, so this worker is still
+        # routable; a DP-local count would have evicted it here
+        upstream.status_for = {}
+        assert client.post("/generate", json={}).status_code == 200
+
+
 def test_dp_heartbeats_the_applied_seq_and_reacts_to_fencing(
     tmp_path: Path,
 ) -> None:

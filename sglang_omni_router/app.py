@@ -31,6 +31,7 @@ from sglang_omni_router.proxy import ProxyHandler, filter_request_headers
 from sglang_omni_router.selector import WorkerSelector
 from sglang_omni_router.update_journal import (
     JournalUnreadableError,
+    JournalUnwritableError,
     UpdateJournal,
     default_journal_path,
 )
@@ -466,8 +467,8 @@ def register_admin_routes(
                 return _error_response(
                     503,
                     "cannot re-enable: the weight-update journal at "
-                    f"{journal.path} is unreadable; inspect and remove or "
-                    "replace it, then retry",
+                    f"{journal.path} could not be durably resolved; inspect "
+                    "and remove or replace it, then retry",
                 )
 
         worker.replace_config(next_config)
@@ -801,8 +802,20 @@ async def _broadcast_admin_request_locked(
     journal = getattr(app.state, "update_journal", None)
     if disable_targets and journal is not None:
         # Note (Jiaxin Deng): durable before disabling/publishing, so even a
-        # crash in the disable/publish window fails closed on recovery.
-        journal.begin(path, [worker.worker_id for worker in workers])
+        # crash in the disable/publish window fails closed on recovery. An
+        # update that cannot journal must not run at all: a host crash would
+        # then re-enable a possibly mixed-weight pool.
+        try:
+            journal.begin(path, [worker.worker_id for worker in workers])
+        except JournalUnwritableError as exc:
+            logger.error(f"weight_update_refused journal_not_durable error={exc}")
+            return _error_response(
+                503,
+                "cannot start the weight update: the journal at "
+                f"{journal.path} could not be durably written ({exc}); the "
+                "update is refused so a crash cannot re-enable a "
+                "mixed-weight pool",
+            )
     if disable_targets:
         for worker in workers:
             worker.set_disabled(True)
@@ -832,14 +845,23 @@ async def _broadcast_admin_request_locked(
                 not results or all(item["success"] for item in results)
             )
             _restore_admin_disabled_state(workers, previous_disabled, outcome_safe)
-            _notify_registry_change(app)
             if journal is not None:
-                if outcome_safe:
-                    journal.clear()
-                else:
-                    # Note (Jiaxin Deng): every target's weight version is
-                    # uncertain after a started broadcast; keep the whole set.
-                    journal.keep([worker.worker_id for worker in workers])
+                # Note (Jiaxin Deng): resolve the journal BEFORE publishing;
+                # the publish can raise (snapshot write), and a crash there
+                # must not leave the outcome unrecorded.
+                try:
+                    if outcome_safe:
+                        journal.clear()
+                    else:
+                        # every target's weight version is uncertain after a
+                        # started broadcast; keep the whole set
+                        journal.keep([worker.worker_id for worker in workers])
+                except JournalUnwritableError as exc:
+                    # Note (Jiaxin Deng): the in-memory outcome already stands;
+                    # a stale journal only over-disables on recovery, so log it
+                    # rather than replacing the broadcast result with a 500.
+                    logger.error(f"journal_not_durable path={journal.path} {exc}")
+            _notify_registry_change(app)
 
     success = all(item["success"] for item in results)
     if path == "/model_info":

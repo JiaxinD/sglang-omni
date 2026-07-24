@@ -21,6 +21,12 @@ PUT /workers {"disabled": false}), which discards the entry.
 Fail-closed on read: any error other than a missing file is treated as
 "a transaction may be in progress" so recovery keeps workers disabled
 rather than silently enabling potentially mixed versions.
+
+Fail-closed on write: a write that could not be made durable (including the
+parent directory fsync) raises instead of returning, so the update refuses
+rather than running with no recovery record. Non-POSIX hosts expose no
+directory handle to sync, so there durability is file-level only (the
+multi-process router is Linux-only in any case).
 """
 
 from __future__ import annotations
@@ -31,6 +37,15 @@ import os
 
 class JournalUnreadableError(Exception):
     """The journal exists but could not be read; recovery must fail closed."""
+
+
+class JournalUnwritableError(Exception):
+    """The journal could not be made durable; the caller must fail closed.
+
+    Reporting a write that never reached the disk would let a weight update
+    run with no crash-recovery record, which is the mixed-weight re-enable
+    this journal exists to prevent.
+    """
 
 
 class UpdateJournal:
@@ -85,11 +100,11 @@ class UpdateJournal:
             self.clear()
 
     def discard(self, worker_id: str) -> bool:
-        """Remove one id; False when the journal is unreadable (unresolved).
+        """Remove one id; False when the entry could not be durably resolved.
 
-        A False return means the entry could NOT be durably resolved and the
-        file needs operator inspection; callers must surface that instead of
-        reporting success while the 409 update gate stays closed.
+        A False return means the file needs operator inspection; callers must
+        surface that instead of reporting success while the 409 update gate
+        stays closed.
         """
         try:
             remaining = [wid for wid in self.pending() if wid != worker_id]
@@ -97,7 +112,10 @@ class UpdateJournal:
             # Note (Jiaxin Deng): cannot safely edit an unreadable journal;
             # leave it for an operator rather than partially clearing it.
             return False
-        self.keep(remaining)
+        try:
+            self.keep(remaining)
+        except JournalUnwritableError:
+            return False
         return True
 
     def clear(self) -> None:
@@ -105,31 +123,41 @@ class UpdateJournal:
             os.unlink(self._path)
         except FileNotFoundError:
             return
+        except OSError as exc:
+            raise JournalUnwritableError(f"{self._path}: {exc}") from exc
         self._fsync_dir()
 
     def _write(self, data: dict) -> None:
         directory = os.path.dirname(self._path) or "."
-        os.makedirs(directory, exist_ok=True)
         tmp_path = f"{self._path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self._path)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._path)
+        except OSError as exc:
+            raise JournalUnwritableError(f"{self._path}: {exc}") from exc
         self._fsync_dir()
 
     def _fsync_dir(self) -> None:
-        # Note (Jiaxin Deng): the rename/unlink is only durable across a
-        # host crash once the parent directory entry is synced.
+        # Note (Jiaxin Deng): the rename/unlink is only durable across a host
+        # crash once the parent directory entry is synced, so a failure here
+        # must not be reported as a durable write. Windows exposes no
+        # directory handle to sync; there the file fsync plus the atomic
+        # replace is the strongest guarantee available.
+        if os.name != "posix":
+            return
         directory = os.path.dirname(self._path) or "."
         try:
             fd = os.open(directory, os.O_RDONLY)
-        except OSError:
-            return
+        except OSError as exc:
+            raise JournalUnwritableError(f"{directory}: {exc}") from exc
         try:
             os.fsync(fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            raise JournalUnwritableError(f"{directory}: {exc}") from exc
         finally:
             os.close(fd)
 

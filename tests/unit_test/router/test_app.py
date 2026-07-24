@@ -17,7 +17,7 @@ from sglang_omni_router import proxy as proxy_module
 from sglang_omni_router.app import _broadcast_admin_request, create_app
 from sglang_omni_router.config import RouterConfig, WorkerConfig
 from sglang_omni_router.selector import WorkerSelector
-from sglang_omni_router.update_journal import UpdateJournal
+from sglang_omni_router.update_journal import JournalUnwritableError, UpdateJournal
 from sglang_omni_router.worker import build_workers, worker_id_from_url
 
 
@@ -527,6 +527,39 @@ def test_partial_weight_update_stays_disabled_and_journaled(tmp_path: Path) -> N
         assert UpdateJournal(journal_path).has_pending() is True
 
 
+def test_weight_update_is_refused_when_the_journal_is_not_durable(
+    tmp_path: Path,
+) -> None:
+    # a journal write that never reached the disk must not be reported as
+    # success: refuse before any target is disabled or sent, so a host crash
+    # cannot re-enable a mixed-weight pool
+    journal_path = str(tmp_path / "update_journal.json")
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, request=request)
+        if request.url.path == "/update_weights_from_disk":
+            sent.append(_request_netloc(request))
+            return httpx.Response(200, json={"success": True}, request=request)
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+
+    def _unwritable(path: str, worker_ids: list[str]) -> None:
+        raise JournalUnwritableError("no space left on device")
+
+    with TestClient(app) as client:
+        app.state.update_journal.begin = _unwritable
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+
+    assert response.status_code == 503
+    assert "could not be durably written" in response.json()["error"]["message"]
+    assert sent == []
+    assert not any(worker.disabled for worker in app.state.workers)
+
+
 def _journal_app(tmp_path: Path, journaled_ids: list[str]):
     journal_path = str(tmp_path / "update_journal.json")
     if journaled_ids:
@@ -627,7 +660,7 @@ def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> N
     with TestClient(app) as client:
         response = client.put(f"/workers/{worker_id}", json={"disabled": False})
         assert response.status_code == 503
-        assert "unreadable" in response.json()["error"]["message"]
+        assert "could not be durably resolved" in response.json()["error"]["message"]
         listed = {w["url"]: w for w in client.get("/workers").json()["workers"]}
         assert listed["http://worker-a:8101"]["disabled"] is True
 

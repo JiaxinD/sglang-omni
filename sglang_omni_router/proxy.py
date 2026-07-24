@@ -557,6 +557,17 @@ class ProxyHandler:
     ) -> None:
         if worker.is_dead:
             return
+        if self._on_worker_failure is not None:
+            # Note (Jiaxin Deng): data-plane mode. The CP owns the health
+            # verdict and its snapshot carries state but never resets a
+            # DP-local consecutive_failures, so counting here too would let a
+            # DP evict a worker the CP still counts as healthy.
+            logger.warning(
+                f"worker={worker.display_id} worker_request_failure "
+                f"status_code={status_code} error={error} reported_to=control_plane",
+            )
+            self._on_worker_failure(worker, status_code, error)
+            return
         worker.record_request_failure(
             failure_threshold=self._config.health_failure_threshold,
             status_code=status_code,
@@ -567,8 +578,6 @@ class ProxyHandler:
             f"status_code={status_code} error={error} "
             f"consecutive_failures={worker.consecutive_failures}",
         )
-        if self._on_worker_failure is not None:
-            self._on_worker_failure(worker, status_code, error)
 
     def _log_route_completion(
         self,
