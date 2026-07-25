@@ -334,8 +334,6 @@ def create_data_plane_app(
                 ],
             }
             if admission is not None and hasattr(admission, "touch"):
-                # Note (Jiaxin Deng): keep the shm slot heartbeat fresh even
-                # when idle.
                 admission.touch()
             try:
                 response = await internal_client.post(
@@ -479,8 +477,7 @@ def _register_cp_forwarding(
 
     async def _forward(request: Request) -> Response:
         # Note (Jiaxin Deng): bound the body before buffering; auth happens on
-        # the CP, so this pre-auth path must not let a huge or chunked body
-        # exhaust DP memory.
+        # the CP, so this pre-auth path must not exhaust DP memory.
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > config.max_payload_size:
             return _payload_too_large()
@@ -609,7 +606,6 @@ def create_dp_app_from_env() -> FastAPI:
         admission=admission,
         total_data_planes=total,
     )
-    # Note (Jiaxin Deng): keep the shm file object alive for the app's
-    # lifetime.
+    # Note (Jiaxin Deng): keep the shm file object alive for the app's lifetime.
     app.state.admission_shm_file = admission_file
     return app

@@ -243,9 +243,8 @@ class ProxyHandler:
             if admission is not None
             else AdmissionController(config.effective_max_inflight)
         )
-        # Note (Jiaxin Deng): data-plane mode; workers come from the
-        # snapshot-fed view and failures are reported to the CP. Both default
-        # off (single-process mode).
+        # Note (Jiaxin Deng): set only in data-plane mode; workers then come
+        # from the snapshot view and failures are reported to the CP.
         self._worker_provider = worker_provider
         self._on_worker_failure = on_worker_failure
 
@@ -558,10 +557,9 @@ class ProxyHandler:
         if worker.is_dead:
             return
         if self._on_worker_failure is not None:
-            # Note (Jiaxin Deng): data-plane mode. The CP owns the health
-            # verdict and its snapshot carries state but never resets a
-            # DP-local consecutive_failures, so counting here too would let a
-            # DP evict a worker the CP still counts as healthy.
+            # Note (Jiaxin Deng): the CP owns the health verdict; its snapshot
+            # never resets a DP-local consecutive_failures, so counting here
+            # too would let a DP evict a worker the CP still calls healthy.
             logger.warning(
                 f"worker={worker.display_id} worker_request_failure "
                 f"status_code={status_code} error={error} reported_to=control_plane",

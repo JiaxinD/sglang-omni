@@ -270,10 +270,9 @@ class RouterSupervisor:
             raise
 
     def _cleanup_partial_start(self) -> None:
-        # same order as shutdown(): drop the listener first and signal every
-        # started DP before awaiting any, so a blocked drain cannot leave
-        # sibling DPs unsignaled or connections queueing in an acceptorless
-        # backlog during rollback
+        # Note (Jiaxin Deng): same order as shutdown(): drop the listener,
+        # signal every DP, then await; a blocked drain must not leave siblings
+        # unsignaled or connections queued in an acceptorless backlog.
         if self._socket is not None:
             self._socket.close()
             self._socket = None
@@ -315,10 +314,9 @@ class RouterSupervisor:
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(self._config.model_dump_json())
 
-        # same family selection as uvicorn's bind_socket, so N=1 and N>=2
-        # listen identically for any given --host (a hardcoded AF_INET would
-        # gaierror on ::/::1; getaddrinfo[0] would pick an OS-dependent family
-        # for hostnames like localhost)
+        # Note (Jiaxin Deng): mirror uvicorn's bind_socket family choice so N=1
+        # and N>=2 listen identically; AF_INET gaierrors on ::/::1 and
+        # getaddrinfo[0] picks an OS-dependent family for names like localhost.
         family = socket.AF_INET6 if ":" in (self._config.host or "") else socket.AF_INET
         self._socket = socket.socket(family, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -548,14 +546,13 @@ class RouterSupervisor:
 
     def shutdown(self) -> None:
         # Note (Jiaxin Deng): drop the parent's listener FIRST: once the DPs
-        # exit, the kernel listening socket dies with their inherited fds and
-        # new connections are refused, instead of landing in a backlog that no
-        # acceptor will ever serve while the CP drains.
+        # exit the kernel socket dies with their inherited fds and connections
+        # are refused, instead of queueing in a backlog nobody will serve.
         if self._socket is not None:
             self._socket.close()
             self._socket = None
-        # signal every DP so none keeps accepting from the shared socket
-        # while its siblings drain, then reap together
+        # Note (Jiaxin Deng): signal every DP before awaiting any, so none keeps
+        # accepting from the shared socket while its siblings drain.
         for slot in self._dp_slots.values():
             self._signal_child(slot.process)
         for slot in self._dp_slots.values():

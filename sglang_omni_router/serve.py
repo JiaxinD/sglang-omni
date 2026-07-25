@@ -289,12 +289,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         check_file_descriptor_limit(config, strict=args.strict_limits)
         if args.router_processes > 1:
-            # Note (Jiaxin Deng): CP/DP split; the supervisor owns the public
-            # socket, the managed-worker launcher, and the process tree.
+            # Note (Jiaxin Deng): the children rebuild the app from the config
+            # file, so the admin key and log level travel via the environment.
             if args.admin_api_key:
                 os.environ["SGLANG_OMNI_ADMIN_KEY"] = args.admin_api_key
-            # Note (Jiaxin Deng): propagate the log level so CP/DP children
-            # are not stuck on the hard-coded default.
             os.environ["SGLANG_OMNI_ROUTER_LOG_LEVEL"] = log_level
             logger.info(
                 f"Starting SGLang-Omni Router (multi-process) on "

@@ -2,31 +2,23 @@
 """Weight-update transaction journal (CP crash recovery).
 
 A weight update is a distributed transaction: targets are disabled, the
-barrier waits for the DPs, the broadcast runs, and disabled state is
-restored. A CP crash mid-transaction loses the in-memory registry, and a
-freshly built replacement would re-enable workers whose weight versions may
-now differ (some accepted the update, some did not).
+barrier waits for the DPs, the broadcast runs, disabled state is restored. A
+CP crash mid-transaction loses the in-memory registry, and a freshly built
+replacement would re-enable workers whose weight versions may now differ.
 
-The journal makes that failure closed. Before disabling and publishing, the
-target set is fsynced to a STABLE state path (keyed by host:port, so it
-survives a full supervisor restart, not just a CP respawn inside one
-supervisor). It is cleared only when the transaction reaches a KNOWN
-outcome: the broadcast completed (the caller sees per-worker results) or the
-ACK barrier aborted before anything was sent. If the CP dies after the
-broadcast started but before results are known, the journal persists and a
-restarting CP re-disables the journaled workers and logs; an operator
-verifies weight versions and re-enables them (an admin-authenticated
-PUT /workers {"disabled": false}), which discards the entry.
+The journal makes that failure closed. The target set is fsynced to a stable
+per-endpoint path (keyed by host:port, so it survives a full supervisor
+restart) before disabling, and cleared only on a known outcome: the broadcast
+completed, or the ACK barrier aborted before anything was sent. A surviving
+entry keeps its workers disabled until an operator verifies weight versions
+and re-enables them (an admin-authenticated PUT /workers {"disabled": false}),
+which discards the entry.
 
-Fail-closed on read: any error other than a missing file is treated as
-"a transaction may be in progress" so recovery keeps workers disabled
-rather than silently enabling potentially mixed versions.
-
-Fail-closed on write: a write that could not be made durable (including the
-parent directory fsync) raises instead of returning, so the update refuses
-rather than running with no recovery record. Non-POSIX hosts expose no
-directory handle to sync, so there durability is file-level only (the
-multi-process router is Linux-only in any case).
+Read and write both fail closed: an unreadable journal counts as "a
+transaction may be in progress", and a write that could not be made durable
+(including the parent directory fsync) raises rather than returning. Non-POSIX
+hosts expose no directory handle to sync, so there durability is file-level
+only (the multi-process router is Linux-only in any case).
 """
 
 from __future__ import annotations
@@ -142,11 +134,9 @@ class UpdateJournal:
         self._fsync_dir()
 
     def _fsync_dir(self) -> None:
-        # Note (Jiaxin Deng): the rename/unlink is only durable across a host
-        # crash once the parent directory entry is synced, so a failure here
-        # must not be reported as a durable write. Windows exposes no
-        # directory handle to sync; there the file fsync plus the atomic
-        # replace is the strongest guarantee available.
+        # Note (Jiaxin Deng): a rename/unlink is only durable across a host
+        # crash once the parent directory entry is synced; non-POSIX hosts
+        # expose no directory handle, so there the file fsync is the cap.
         if os.name != "posix":
             return
         directory = os.path.dirname(self._path) or "."

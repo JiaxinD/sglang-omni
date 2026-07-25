@@ -59,14 +59,11 @@ def recover_worker_pool_from_journal(
 ) -> None:
     """Fail closed on an unresolved weight-update journal at startup.
 
-    An update that died mid-transaction leaves its targets journaled: keep them
-    disabled until an operator verifies weight versions and re-enables them
-    (which discards the entry), rather than re-enabling potentially mixed
-    weights. An unreadable journal disables the whole pool. A journaled worker
-    absent from the registry (e.g. a dynamically added worker after a full
-    supervisor restart) keeps its entry as a tombstone: re-registering that
-    stable ID creates the worker disabled, and only an authenticated re-enable
-    resolves it.
+    Journaled targets stay disabled until an operator verifies weight versions
+    and re-enables them (which discards the entry), rather than re-enabling
+    potentially mixed weights. An unreadable journal disables the whole pool; a
+    journaled worker missing from the registry keeps its entry as a tombstone,
+    so re-registering that stable ID creates the worker disabled.
     """
     try:
         unresolved = journal.pending()
@@ -354,9 +351,9 @@ def register_admin_routes(
                 status_code=404,
                 content={"error": {"message": "worker not found"}},
             )
-        # same DP-counter overlay as the /workers listing: on the CP the local
-        # Worker never handles data traffic, so its own counters are not the
-        # ones a caller wants
+        # Note (Jiaxin Deng): same DP-counter overlay as the /workers listing;
+        # on the CP the local Worker never handles data traffic, so its own
+        # counters are not the ones a caller wants.
         overlay = getattr(app.state, "worker_stats_overlay", None)
         payload = worker.to_dict()
         if overlay is not None:
@@ -455,15 +452,14 @@ def register_admin_routes(
             except ValidationError as exc:
                 return _error_response(400, str(exc))
 
-        # every fallible precondition is checked BEFORE any state is
-        # committed: a rejected request must not leave a half-applied config
-        # for the CP keepalive to publish
+        # Note (Jiaxin Deng): every fallible precondition is checked before any
+        # state is committed, so a rejected request cannot leave a half-applied
+        # config for the CP keepalive to publish.
         if requested_disabled is False:
             journal = getattr(app.state, "update_journal", None)
             if journal is not None and not journal.discard(worker.worker_id):
-                # the journal could not be durably resolved: enabling now
-                # would report success while every weight update stays
-                # blocked behind the 409 gate
+                # enabling on an unresolved journal reports success while
+                # every weight update stays blocked behind the 409 gate
                 return _error_response(
                     503,
                     "cannot re-enable: the weight-update journal at "
@@ -599,8 +595,8 @@ def register_data_routes(
     *,
     gate: Callable[[], Response | None] | None = None,
 ) -> None:
-    # Note (Jiaxin Deng): gate is the data-plane pre-check (stale-snapshot
-    # shedding); a returned response short-circuits the relay, None is a no-op.
+    # Note (Jiaxin Deng): gate is the data-plane stale-snapshot shed check;
+    # unset in single-process mode.
     async def _forward(request: Request, path: str) -> Response:
         if gate is not None:
             gated = gate()
@@ -652,8 +648,6 @@ def _pool_summary(
         if overlay is None:
             payload["workers"] = [worker.to_dict() for worker in workers]
         else:
-            # Note (Jiaxin Deng): CP mode merges the DP counter aggregate over
-            # the local fields.
             payload["workers"] = [
                 {**worker.to_dict(), **overlay(worker)} for worker in workers
             ]
@@ -795,16 +789,14 @@ async def _broadcast_admin_request_locked(
     headers = filter_request_headers(request)
     previous_disabled = {worker.worker_id: worker.disabled for worker in workers}
     # Note (Jiaxin Deng): `results` drives the journal/restore logic. None =
-    # crashed after the broadcast started (fail closed); [] = ACK barrier
-    # aborted before anything was sent (restore fully); list = broadcast
-    # completed (restore only if every target succeeded).
+    # crashed after the broadcast started (fail closed); [] = aborted before
+    # anything was sent; list = completed (restore only if all succeeded).
     results: list[dict[str, Any]] | None = None
     journal = getattr(app.state, "update_journal", None)
     if disable_targets and journal is not None:
-        # Note (Jiaxin Deng): durable before disabling/publishing, so even a
-        # crash in the disable/publish window fails closed on recovery. An
-        # update that cannot journal must not run at all: a host crash would
-        # then re-enable a possibly mixed-weight pool.
+        # Note (Jiaxin Deng): journal before disabling/publishing so a crash in
+        # that window fails closed on recovery; an update that cannot journal
+        # must not run, or a host crash re-enables a mixed-weight pool.
         try:
             journal.begin(path, [worker.worker_id for worker in workers])
         except JournalUnwritableError as exc:

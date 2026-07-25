@@ -95,8 +95,7 @@ class SlotView:
 
 
 def admission_file_size(slots: int) -> int:
-    # Note (Jiaxin Deng): one extra supervisor-owned retired slot after the
-    # DP slots.
+    # Note (Jiaxin Deng): the extra slot is the supervisor-owned retired fold.
     return (slots + 1) * SLOT_SIZE
 
 
@@ -285,8 +284,8 @@ class SharedAdmission:
                 self._fenced()
                 return False
         except SeqlockUnstableError:
-            # own slot unstable (mid-fold by the supervisor): writing now
-            # would race the fold, so this shed cannot be counted
+            # Note (Jiaxin Deng): own slot mid-fold by the supervisor; writing
+            # now would race the fold, so this shed cannot be counted.
             logger.warning("own admission slot unstable; shedding until reclaim")
             return False
         try:

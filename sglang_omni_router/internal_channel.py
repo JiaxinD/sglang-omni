@@ -83,11 +83,9 @@ class InternalChannelState:
             and hello.generation == current.generation
             and hello.pid == current.pid
         ):
-            # Note (Jiaxin Deng): idempotent re-register (e.g. a lost
-            # heartbeat response): keep seq WITH its epoch (a seq under a
-            # blank epoch cannot satisfy the ACK barrier) and the serving
-            # flag (a shedding DP must not read serving-ready until its
-            # next heartbeat).
+            # Note (Jiaxin Deng): idempotent re-register keeps seq WITH its
+            # epoch (a seq under a blank epoch cannot satisfy the ACK barrier)
+            # and the serving flag (a shedding DP is not ready until it says so).
             preserved_seq = current.last_applied_seq
             preserved_epoch = current.last_applied_epoch
             preserved_serving = current.serving

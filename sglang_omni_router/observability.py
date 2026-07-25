@@ -36,9 +36,9 @@ _COUNTER_KEYS = ("routed_total", "successful_total", "failed_total")
 
 class WorkerCounters(BaseModel):
     worker_id: str
-    # the DP-side worker object's incarnation: a deleted-and-re-added URL is a
-    # fresh object whose cumulatives restart at zero, so the ledger must
-    # retire the old segment instead of clamping the new one to nothing
+    # Note (Jiaxin Deng): a deleted-and-re-added URL is a fresh DP-side object
+    # whose cumulatives restart at zero, so the ledger must retire the old
+    # segment instead of clamping the new one to nothing.
     incarnation: str = ""
     routed_total: int = Field(default=0, ge=0)
     successful_total: int = Field(default=0, ge=0)
@@ -103,16 +103,15 @@ class DataPlaneCounterLedger:
         for item in report.workers:
             ledger = per_worker.get(item.worker_id)
             if ledger is not None and ledger.incarnation != item.incarnation:
-                # a fresh DP worker object at the same stable id (deleted and
-                # re-added URL): retire the old segment, else the high-water
-                # clamp freezes the display until the new object catches up
+                # Note (Jiaxin Deng): fresh object at the same stable id; retire
+                # the old segment, else the high-water clamp freezes the display
+                # until the new object catches up.
                 self._retire_worker(item.worker_id, ledger)
                 ledger = None
             if ledger is None:
                 # Note (Jiaxin Deng): first sight under this (dp, generation)
-                # takes the whole cumulative as the since-CP-start baseline;
-                # a replaced incarnation restarts at zero, so its baseline is
-                # zero and everything it reports counts.
+                # takes the whole cumulative as the since-CP-start baseline; a
+                # replaced incarnation restarts at zero, so it counts in full.
                 first_contact = entry is None
                 per_worker[item.worker_id] = _WorkerLedger(
                     baseline={
@@ -129,8 +128,6 @@ class DataPlaneCounterLedger:
                 # lower the display.
                 ledger.high_water[key] = max(ledger.high_water[key], getattr(item, key))
             ledger.current_active = item.current_active
-        # Note (Jiaxin Deng): workers missing from the report keep their
-        # last contribution.
 
         self._entries[report.dp_index] = _LedgerEntry(
             generation=report.generation,

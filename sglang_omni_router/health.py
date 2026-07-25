@@ -103,8 +103,8 @@ class HealthChecker:
             return
 
         if worker.is_dead:
-            # an operator marked the worker dead while this probe was in
-            # flight: its late result must not revive the explicit dead mark
+            # Note (Jiaxin Deng): an operator marked the worker dead while this
+            # probe was in flight; a late result must not revive it.
             return
         ok = 200 <= response.status_code < 300
         error = None

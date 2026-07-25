@@ -122,12 +122,10 @@ class SnapshotReader:
             with open(self._path, encoding="utf-8") as f:
                 snapshot = WorkerSnapshot.model_validate_json(f.read())
         except (OSError, ValueError):
-            # Note (Jiaxin Deng): torn/invalid content keeps the last good
-            # snapshot; the fingerprint is not advanced, so it retries.
+            # Note (Jiaxin Deng): the fingerprint is not advanced, so a torn
+            # file is retried on the next poll.
             return False
         if snapshot.version != SNAPSHOT_SCHEMA_VERSION:
-            # Note (Jiaxin Deng): a valid JSON from an incompatible schema
-            # must not replace the last good view.
             return False
         self._last_fingerprint = fingerprint
         if (

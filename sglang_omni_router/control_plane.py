@@ -75,10 +75,10 @@ class WorkerFailureReport(BaseModel):
     # Note (Jiaxin Deng): the incarnation pins the report to the observed
     # worker; a failure from a deleted-and-re-added URL must not evict the new one.
     incarnation: str = ""
-    # Note (Jiaxin Deng): retries of one failure reuse one failure_seq, so
-    # re-delivery cannot count a single failure toward eviction twice.
     dp_index: int = PydanticField(ge=0)
     generation: int = PydanticField(ge=1)
+    # Note (Jiaxin Deng): retries of one failure reuse one failure_seq, so
+    # re-delivery cannot count a single failure toward eviction twice.
     failure_seq: int = PydanticField(ge=1)
 
 
@@ -291,9 +291,9 @@ def create_control_plane_app(
             for record in internal_state.data_planes.values()
             if now - record.last_seen_at <= dp_liveness_secs
         ]
-        # Note (Jiaxin Deng): serving-ready = live + applied this epoch +
-        # self-reports serving + still owns its admission slot, so a crashed
-        # generation drops out immediately instead of lingering.
+        # Note (Jiaxin Deng): serving-ready also requires still owning the
+        # admission slot, so a crashed generation drops out immediately
+        # instead of lingering as ready.
         slot_generations: dict[int, int] = {}
         admission_error = None
         admission_slots = None
@@ -390,10 +390,9 @@ def create_control_plane_app(
         return False
 
     def _stale_generation(dp_index: int, generation: int) -> JSONResponse | None:
-        # only a generation OLDER than the registered one is provably fenced.
-        # A NEWER generation is a replacement DP whose report raced ahead of
-        # its /internal/register (the loops are concurrent); 409ing it would
-        # make the DP treat itself as fenced and exit, killing a valid process.
+        # Note (Jiaxin Deng): only an OLDER generation is provably fenced. A
+        # NEWER one is a replacement DP racing ahead of its /internal/register;
+        # 409ing it would make that valid process treat itself as fenced and exit.
         current = internal_state.data_planes.get(dp_index)
         if current is not None and generation < current.generation:
             return _error_response(
@@ -414,10 +413,9 @@ def create_control_plane_app(
         if _failure_already_applied(report):
             return JSONResponse({"status": "ok", "deduplicated": True})
         if worker.is_dead:
-            # Note (Jiaxin Deng): the dedup above already consumed this event
-            # id, so a retry cannot apply it after a later clear-dead. An
-            # operator's explicit dead mark must not be demoted to unhealthy
-            # (which the health prober would then probe back to healthy).
+            # Note (Jiaxin Deng): dedup above already consumed this event id,
+            # so a retry cannot apply it after a later clear-dead. An operator's
+            # dead mark must not be demoted to unhealthy and then probed back.
             return JSONResponse({"status": "ok", "ignored_dead": True})
         before = (worker.is_routable, worker.state)
         worker.record_request_failure(
@@ -425,9 +423,9 @@ def create_control_plane_app(
             status_code=report.status_code,
             error=report.error,
         )
-        # publish only on a snapshot-visible transition: a counter increment
-        # on an already-unhealthy worker must not serialize a full snapshot
-        # per failure (the keepalive covers periodic liveness writes)
+        # Note (Jiaxin Deng): publish only on a snapshot-visible transition; a
+        # counter bump on an already-unhealthy worker must not serialize a full
+        # snapshot per failure (the keepalive covers periodic liveness writes).
         if (worker.is_routable, worker.state) != before:
             publish()
         return JSONResponse(
