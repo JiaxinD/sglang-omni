@@ -192,3 +192,77 @@ def test_admission_shm_is_wired_end_to_end(supervisor) -> None:
     _wait_until(
         lambda: _health().get("admission_slots", [{}])[0].get("generation") == 2
     )
+
+
+def _has_exited(pid: int) -> bool:
+    """True when the pid is gone or a zombie.
+
+    Children orphaned by a dead supervisor are reparented to PID 1, which in a
+    container often does not reap; an exited orphan then lingers as a zombie
+    and both kill(pid, 0) and Popen.poll() still report it as running.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            return f.read().rsplit(") ", 1)[1].split(" ", 1)[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def test_children_exit_on_supervisor_death_even_with_a_stuck_relay() -> None:
+    # a SIGKILLed supervisor runs no teardown, so each child must exit on the
+    # death-pipe EOF; otherwise an orphan keeps serving on the inherited public
+    # listener. A request that never completes must not hold that exit off.
+    import socket
+    import threading
+
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    upstream.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    upstream.bind(("127.0.0.1", 0))
+    upstream.listen(8)
+    held: list[socket.socket] = []
+    stop = threading.Event()
+
+    def _accept_and_never_answer() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = upstream.accept()
+            except OSError:
+                return
+            conn.recv(65536)  # read the request, never reply
+            held.append(conn)
+
+    threading.Thread(target=_accept_and_never_answer, daemon=True).start()
+    config = RouterConfig(
+        host="127.0.0.1",
+        port=_free_port(),
+        workers=[WorkerConfig(url=f"http://127.0.0.1:{upstream.getsockname()[1]}")],
+    )
+    instance = RouterSupervisor(config, router_processes=1)
+    instance.start()
+    children = [slot.process.pid for slot in instance.dp_slots.values()]
+    children.append(instance.cp_process.pid)
+    base = f"http://127.0.0.1:{config.port}"
+    try:
+        _wait_until(lambda: httpx.get(f"{base}/live", timeout=2.0).status_code == 200)
+        stuck = threading.Thread(
+            target=lambda: httpx.post(
+                f"{base}/v1/chat/completions",
+                json={"model": "m", "messages": []},
+                timeout=60.0,
+            ),
+            daemon=True,
+        )
+        stuck.start()
+        time.sleep(1.0)  # let the relay reach the upstream that never answers
+
+        # the supervisor holds the only write end; closing it is exactly what
+        # its SIGKILL does to the children
+        os.close(instance._death_pipe_write)
+        instance._death_pipe_write = None
+        _wait_until(
+            lambda: all(_has_exited(pid) for pid in children) or None, timeout=30.0
+        )
+    finally:
+        stop.set()
+        upstream.close()
+        instance.shutdown()
