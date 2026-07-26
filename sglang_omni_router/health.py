@@ -80,6 +80,10 @@ class HealthChecker:
         if worker.is_dead:
             return
 
+        # Note (Jiaxin Deng): pin the state this probe was started against; an
+        # operator mark_dead/clear_dead in flight bumps the epoch, so a late
+        # result is dropped even if the worker looks live again by then.
+        epoch = worker.health_epoch
         url = f"{worker.url}{self._config.health_check_endpoint}"
         try:
             response = await self._client.get(
@@ -87,7 +91,7 @@ class HealthChecker:
                 timeout=self._config.health_check_timeout_secs,
             )
         except httpx.HTTPError as exc:
-            if worker.is_dead:
+            if worker.health_epoch != epoch:
                 return
             logger.debug(
                 f"Worker {worker.display_id} health check failed: "
@@ -102,9 +106,7 @@ class HealthChecker:
             )
             return
 
-        if worker.is_dead:
-            # Note (Jiaxin Deng): an operator marked the worker dead while this
-            # probe was in flight; a late result must not revive it.
+        if worker.health_epoch != epoch:
             return
         ok = 200 <= response.status_code < 300
         error = None

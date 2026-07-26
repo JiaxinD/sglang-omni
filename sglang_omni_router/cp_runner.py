@@ -18,6 +18,7 @@ from sglang_omni_router.control_plane import create_control_plane_app
 from sglang_omni_router.internal_channel import INTERNAL_TOKEN_ENV
 from sglang_omni_router.supervisor import (
     ADMISSION_SHM_ENV,
+    CHILD_GRACEFUL_SHUTDOWN_SECS,
     CP_EPOCH_ENV,
     EXPECTED_DPS_ENV,
     INTERNAL_TCP_URL_ENV,
@@ -43,7 +44,12 @@ def main() -> None:
     log_level = os.environ.get(LOG_LEVEL_ENV, "warning").lower()
     uds = os.environ.get(INTERNAL_UDS_ENV)
     if uds:
-        uvicorn.run(app, uds=uds, log_level=log_level)
+        uvicorn.run(
+            app,
+            uds=uds,
+            log_level=log_level,
+            timeout_graceful_shutdown=CHILD_GRACEFUL_SHUTDOWN_SECS,
+        )
         return
     tcp_url = os.environ.get(INTERNAL_TCP_URL_ENV)
     if not tcp_url:
@@ -52,7 +58,13 @@ def main() -> None:
             "cp_runner is only meant to be spawned by the router supervisor"
         )
     port = int(tcp_url.rsplit(":", 1)[1])
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level=log_level)
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level=log_level,
+        timeout_graceful_shutdown=CHILD_GRACEFUL_SHUTDOWN_SECS,
+    )
 
 
 if __name__ == "__main__":

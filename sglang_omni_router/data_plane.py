@@ -66,11 +66,30 @@ class DataPlaneWorkerView:
 
     def __init__(self) -> None:
         self._workers: dict[str, Worker] = {}
+        self._retiring: list[Worker] = []
         self.last_applied_seq = 0
         self.last_applied_epoch = ""
 
     def workers(self) -> list[Worker]:
         return list(self._workers.values())
+
+    def reportable_workers(self) -> list[Worker]:
+        # Note (Jiaxin Deng): routing uses workers(); counter flushes use this,
+        # so a request still running on a replaced or deleted worker object
+        # still reaches the CP ledger when it completes.
+        return list(self._workers.values()) + list(self._retiring)
+
+    def drained_retired(self) -> list[Worker]:
+        return [worker for worker in self._retiring if worker.active_requests == 0]
+
+    def release_retired(self, reported: list[Worker]) -> None:
+        """Drop retired workers whose final counters the CP acknowledged."""
+        done = {id(worker) for worker in reported}
+        self._retiring = [worker for worker in self._retiring if id(worker) not in done]
+
+    def _retire(self, worker: Worker) -> None:
+        if worker.active_requests > 0 or worker.routed_requests > 0:
+            self._retiring.append(worker)
 
     def apply(self, snapshot: WorkerSnapshot) -> None:
         seen: set[str] = set()
@@ -90,6 +109,8 @@ class DataPlaneWorkerView:
                 # Note (Jiaxin Deng): a new incarnation gets a FRESH Worker, so
                 # an in-flight request holding the old object cannot
                 # misattribute a late failure to the new worker (ABA).
+                if worker is not None:
+                    self._retire(worker)
                 worker = Worker(config=config)
                 if entry.incarnation:
                     worker.incarnation = entry.incarnation
@@ -106,7 +127,7 @@ class DataPlaneWorkerView:
             worker.disabled = entry.disabled
         for url in list(self._workers):
             if url not in seen:
-                del self._workers[url]
+                self._retire(self._workers.pop(url))
         self.last_applied_seq = snapshot.seq
         self.last_applied_epoch = getattr(snapshot, "cp_epoch", "")
 
@@ -317,6 +338,10 @@ def create_data_plane_app(
         while True:
             await asyncio.sleep(counter_flush_interval_secs)
             counter_seq += 1
+            # snapshot the drained retirees BEFORE building the payload: one
+            # that finishes mid-post was reported with stale totals and must
+            # survive to the next flush
+            drained = view.drained_retired()
             payload = {
                 "dp_index": dp_index,
                 "generation": generation,
@@ -330,7 +355,7 @@ def create_data_plane_app(
                         "failed_total": worker.failed_requests,
                         "current_active": worker.active_requests,
                     }
-                    for worker in view.workers()
+                    for worker in view.reportable_workers()
                 ],
             }
             if admission is not None and hasattr(admission, "touch"):
@@ -345,6 +370,8 @@ def create_data_plane_app(
                     logger.critical("counter report fenced by a newer generation")
                     on_fenced()
                     return
+                if response.status_code < 300:
+                    view.release_retired(drained)
             except httpx.HTTPError:
                 # Note (Jiaxin Deng): totals are cumulative; the next flush
                 # carries everything, so a dropped report loses nothing.
@@ -425,19 +452,27 @@ def create_data_plane_app(
 
 # Note (Jiaxin Deng): the admin surface and aggregate /health live on the CP;
 # a DP relays verbatim. Auth is not checked here: the CP re-checks it.
-_FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("/health", ("GET",)),
-    ("/workers", ("GET", "POST")),
-    ("/workers/{worker_path:path}", ("GET", "PUT", "DELETE")),
-    ("/model_info", ("GET", "POST")),
-    ("/pause_generation", ("POST",)),
-    ("/continue_generation", ("POST",)),
-    ("/update_weights_from_disk", ("POST",)),
-    ("/update_weights_from_tensor", ("POST",)),
-    ("/init_weights_update_group", ("POST",)),
-    ("/destroy_weights_update_group", ("POST",)),
-    ("/update_weights_from_distributed", ("POST",)),
-    ("/weights_checker", ("GET", "POST")),
+# Note (Jiaxin Deng): (path, methods, route name) mirroring the single-process
+# handlers. FastAPI derives the operation id from the route name and path, so
+# reusing the names keeps the published schema identical across
+# --router-processes; a client generated against N=1 still works against N>=2.
+_FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("/health", ("GET",), "health"),
+    ("/workers", ("GET",), "list_workers"),
+    ("/workers", ("POST",), "create_worker"),
+    ("/workers/{worker_id:path}", ("GET",), "get_worker"),
+    ("/workers/{worker_id:path}", ("PUT",), "update_worker"),
+    ("/workers/{worker_id:path}", ("DELETE",), "delete_worker"),
+    ("/model_info", ("GET",), "model_info"),
+    ("/model_info", ("POST",), "model_info_post"),
+    ("/pause_generation", ("POST",), "pause_generation"),
+    ("/continue_generation", ("POST",), "continue_generation"),
+    ("/update_weights_from_disk", ("POST",), "update_weights_from_disk"),
+    ("/update_weights_from_tensor", ("POST",), "update_weights_from_tensor"),
+    ("/init_weights_update_group", ("POST",), "init_weights_update_group"),
+    ("/destroy_weights_update_group", ("POST",), "destroy_weights_update_group"),
+    ("/update_weights_from_distributed", ("POST",), "update_weights_from_distributed"),
+    ("/weights_checker", ("GET", "POST"), "weights_checker"),
 )
 
 # Note (Jiaxin Deng): the body is re-framed as fixed-length bytes, so a client
@@ -525,8 +560,14 @@ def _register_cp_forwarding(
             headers=response_headers,
         )
 
-    for path, methods in _FORWARDED_CP_ROUTES:
-        app.api_route(path, methods=list(methods))(_forward)
+    async def _forward_worker(request: Request, worker_id: str) -> Response:
+        # declared only so the path parameter is published under the same name
+        # the single-process routes use; the raw path is what gets forwarded
+        return await _forward(request)
+
+    for path, methods, name in _FORWARDED_CP_ROUTES:
+        handler = _forward_worker if "{worker_id" in path else _forward
+        app.add_api_route(path, handler, methods=list(methods), name=name)
 
 
 def _internal_headers(token: str | None) -> dict[str, str]:

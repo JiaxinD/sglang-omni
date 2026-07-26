@@ -111,6 +111,61 @@ def test_shed_on_a_sibling_stuck_slot_counts_as_a_rejection() -> None:
     assert SlotCodec(buf, 1).read(fail_fast=True).rejected_total == 1
 
 
+def test_unstable_sibling_is_cached_not_respun_on_every_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # a DP killed mid-write leaves its slot odd until the supervisor reclaims
+    # it (up to one poll interval); every request in that window must shed
+    # without re-spinning the seqlock budget and without its own log line,
+    # while still being counted, and must admit again once the slot is healed
+    import logging
+
+    import sglang_omni_router.admission_shm as shm
+
+    buf = _buf(2)
+    stuck = SlotCodec(buf, 0)
+    stuck.write(
+        inflight=0, peak_sum=0, rejected_total=0, generation=1, pid=1, heartbeat_ts=1.0
+    )
+    seq = struct.unpack_from("<q", buf, 0)[0]
+    struct.pack_into("<q", buf, 0, seq + 1)  # slot 0 left odd: writer died
+
+    now = [1000.0]
+    b = _admission(buf, 1, clock=lambda: now[0])
+
+    failed_probes: list[int] = []
+    original_read = shm.SlotCodec.read
+
+    def counting_read(self, *, fail_fast: bool = False):
+        try:
+            return original_read(self, fail_fast=fail_fast)
+        except shm.SeqlockUnstableError:
+            failed_probes.append(self._offset)
+            raise
+
+    monkeypatch.setattr(shm.SlotCodec, "read", counting_read)
+
+    burst = 200
+    with caplog.at_level(logging.WARNING):
+        for _ in range(burst):
+            assert b.try_acquire() is False
+
+        assert len(failed_probes) == 1  # probed once, the rest shed from cache
+        unstable_logs = [
+            record
+            for record in caplog.records
+            if "sibling admission slot unstable" in record.getMessage()
+        ]
+        assert len(unstable_logs) == 1  # one transition, not one per request
+        assert SlotCodec(buf, 1).read(fail_fast=True).rejected_total == burst
+
+        # supervisor reclaims the dead slot: service resumes on the next probe
+        SlotCodec(buf, 0).reclaim(now=0.0)
+        now[0] += 1.0
+        assert b.try_acquire() is True
+        assert len(failed_probes) == 1
+
+
 def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

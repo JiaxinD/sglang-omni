@@ -3171,9 +3171,11 @@ def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
         assert all(w["failed_requests"] == 0 for w in workers)
 
 
-def test_worker_crud_holds_the_update_lock_through_its_mutation() -> None:
-    # the reject-while-updating guard is only sound if CRUD owns the lock
-    # across its awaits; otherwise a weight update can interleave mid-mutation
+def test_worker_registration_probes_outside_the_update_lock() -> None:
+    # the lock that CRUD shares with weight updates must cover the authoritative
+    # mutation, not an arbitrary worker's /health: a blackholed candidate would
+    # otherwise 409 every other CRUD call and stall an RL update for the full
+    # health timeout
     import threading
 
     health_started = threading.Event()
@@ -3200,9 +3202,13 @@ def test_worker_crud_holds_the_update_lock_through_its_mutation() -> None:
         )
         creator.start()
         assert health_started.wait(timeout=5.0)
-        # mid-mutation (inside the new worker's health check): the lock is held
-        assert app.state.admin_update_lock.locked() is True
+        # the staged worker is being probed: the lock is free, so a weight
+        # update or another CRUD call is not blocked behind this network call
+        assert app.state.admin_update_lock.locked() is False
         release_health.set()
         creator.join(timeout=5.0)
         assert result == [200]
         assert app.state.admin_update_lock.locked() is False
+        assert any(
+            worker.url == "http://127.0.0.1:8199" for worker in app.state.workers
+        )

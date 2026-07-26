@@ -449,7 +449,7 @@ def test_watch_supervisor_liveness_sigterms_on_pipe_eof(
         "sglang_omni_router.supervisor.os.kill",
         lambda pid, sig: killed.append((pid, sig)),
     )
-    watch_supervisor_liveness()
+    watch_supervisor_liveness(sleep=lambda _: None, hard_exit=lambda: None)
     time_module.sleep(0.05)
     assert killed == []  # supervisor alive: watcher blocks quietly
 
@@ -459,6 +459,44 @@ def test_watch_supervisor_liveness_sigterms_on_pipe_eof(
         time_module.sleep(0.02)
     assert len(killed) == 1
     os.close(read_fd)
+
+
+def test_watch_supervisor_liveness_hard_exits_when_sigterm_does_not_land(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a request that never completes outlives the self-SIGTERM, and the dead
+    # supervisor cannot escalate; without the child's own deadline the orphan
+    # keeps the inherited public listener bound forever
+    import os
+    import signal as signal_module
+
+    from sglang_omni_router.supervisor import (
+        _ORPHAN_HARD_EXIT_SECS,
+        DEATH_PIPE_FD_ENV,
+        watch_supervisor_liveness,
+    )
+
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)  # supervisor already gone: the read end is at EOF
+    signals: list[tuple[int, int]] = []
+    slept: list[float] = []
+    hard_exits: list[str] = []
+    monkeypatch.setenv(DEATH_PIPE_FD_ENV, str(read_fd))
+    monkeypatch.setattr(
+        "sglang_omni_router.supervisor.os.kill",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    thread = watch_supervisor_liveness(
+        sleep=slept.append, hard_exit=lambda: hard_exits.append("hard")
+    )
+    thread.join(timeout=3.0)
+    os.close(read_fd)
+
+    assert not thread.is_alive()
+    assert [sig for _, sig in signals] == [signal_module.SIGTERM]
+    assert slept == [_ORPHAN_HARD_EXIT_SECS]  # bounded wait, then escalation
+    assert hard_exits == ["hard"]
 
 
 def test_context_carries_the_death_pipe_and_shutdown_closes_it(

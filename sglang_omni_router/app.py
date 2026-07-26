@@ -292,16 +292,24 @@ def register_admin_routes(
             worker_config = WorkerConfig(**worker_config_kwargs)
         except ValidationError as exc:
             return _error_response(400, str(exc))
+        # Note (Jiaxin Deng): probe the staged worker BEFORE taking the registry
+        # lock. That lock also excludes weight updates, so holding it across an
+        # arbitrary worker's /health would let one blackholed candidate stall
+        # every other CRUD call and any RL update for the full health timeout.
+        worker = Worker(config=worker_config)
+        await app.state.health_checker.check_worker_health(worker)
+
         lock, rejected = _registry_lock_or_reject(app)
         if rejected is not None:
             return rejected
         if lock is not None:
             await lock.acquire()
         try:
-            if any(worker.url == worker_config.url for worker in workers):
+            # revalidate under the lock: membership and the journal can both
+            # have changed while the probe was in flight
+            if any(existing.url == worker_config.url for existing in workers):
                 return _error_response(409, "worker already registered")
 
-            worker = Worker(config=worker_config)
             if _worker_id_is_journaled(app, worker.worker_id):
                 # Note (Jiaxin Deng): this stable ID has an unresolved weight
                 # update (tombstone); it may carry mixed weights, so it starts
@@ -319,7 +327,6 @@ def register_admin_routes(
                     "registration; the upstream client is sized at startup and can "
                     "under-feed the grown pool"
                 )
-            await app.state.health_checker.check_worker_health(worker)
             logger.info(
                 f"worker_registered worker={worker.display_id} url={worker.url} "
                 f"model={worker.model or '-'} "
@@ -393,7 +400,7 @@ def register_admin_routes(
         if lock is not None:
             await lock.acquire()
         try:
-            return await _apply_worker_update(
+            response, reprobe = await _apply_worker_update(
                 worker_id,
                 payload,
                 requested_is_dead,
@@ -403,6 +410,13 @@ def register_admin_routes(
         finally:
             if lock is not None:
                 lock.release()
+
+        if reprobe is None:
+            return response
+        # the clear-dead refresh runs unlocked, then republishes the result
+        await app.state.health_checker.check_worker_health(reprobe)
+        _notify_registry_change(app)
+        return JSONResponse({"status": "ok", "worker": reprobe.to_dict()})
 
     def _discard_needs_admin_auth(resolved_worker_id: str) -> bool:
         # Note (Jiaxin Deng): discarding a journal entry asserts the weights
@@ -421,7 +435,8 @@ def register_admin_routes(
         requested_is_dead: bool | None,
         requested_disabled: bool | None,
         request: Request,
-    ) -> JSONResponse:
+    ) -> tuple[JSONResponse, Worker | None]:
+        """Returns the response and, when set, a worker to re-probe unlocked."""
         worker = _find_worker(workers, worker_id)
         if (
             requested_disabled is False
@@ -431,9 +446,9 @@ def register_admin_routes(
             try:
                 await _auth(authorization=request.headers.get("authorization"))
             except HTTPException as exc:
-                return _error_response(exc.status_code, str(exc.detail))
+                return _error_response(exc.status_code, str(exc.detail)), None
         if worker is None:
-            return _error_response(404, "worker not found")
+            return _error_response(404, "worker not found"), None
         next_config = worker.config
 
         if "capabilities" in payload or "model" in payload:
@@ -450,7 +465,7 @@ def register_admin_routes(
                     ),
                 )
             except ValidationError as exc:
-                return _error_response(400, str(exc))
+                return _error_response(400, str(exc)), None
 
         # Note (Jiaxin Deng): every fallible precondition is checked before any
         # state is committed, so a rejected request cannot leave a half-applied
@@ -460,11 +475,14 @@ def register_admin_routes(
             if journal is not None and not journal.discard(worker.worker_id):
                 # enabling on an unresolved journal reports success while
                 # every weight update stays blocked behind the 409 gate
-                return _error_response(
-                    503,
-                    "cannot re-enable: the weight-update journal at "
-                    f"{journal.path} could not be durably resolved; inspect "
-                    "and remove or replace it, then retry",
+                return (
+                    _error_response(
+                        503,
+                        "cannot re-enable: the weight-update journal at "
+                        f"{journal.path} could not be durably resolved; inspect "
+                        "and remove or replace it, then retry",
+                    ),
+                    None,
                 )
 
         worker.replace_config(next_config)
@@ -472,12 +490,16 @@ def register_admin_routes(
         if requested_disabled is not None:
             worker.set_disabled(requested_disabled)
 
+        reprobe: Worker | None = None
         if requested_is_dead is not None:
             if requested_is_dead:
                 worker.mark_dead()
             else:
                 worker.clear_dead()
-                await app.state.health_checker.check_worker_health(worker)
+                # Note (Jiaxin Deng): the refresh probe runs after the lock is
+                # released; it is a network call, and this lock also excludes
+                # weight updates.
+                reprobe = worker
 
         logger.info(
             f"worker_updated worker={worker.display_id} url={worker.url} "
@@ -486,7 +508,7 @@ def register_admin_routes(
             f"health_state={worker.state} disabled={worker.disabled}",
         )
         _notify_registry_change(app)
-        return JSONResponse({"status": "ok", "worker": worker.to_dict()})
+        return JSONResponse({"status": "ok", "worker": worker.to_dict()}), reprobe
 
     @app.delete("/workers/{worker_id:path}")
     async def delete_worker(worker_id: str) -> JSONResponse:

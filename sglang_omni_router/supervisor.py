@@ -63,6 +63,11 @@ LOG_LEVEL_ENV = "SGLANG_OMNI_ROUTER_LOG_LEVEL"
 
 _LISTEN_BACKLOG = 2048
 _SHUTDOWN_GRACE_SECS = 10.0
+# Bound on how long a child's uvicorn may drain in-flight requests on SIGTERM.
+CHILD_GRACEFUL_SHUTDOWN_SECS = 5
+# Note (Jiaxin Deng): a dead supervisor cannot escalate, so the child arms its
+# own hard exit; twice the drain bound leaves the graceful path room to win.
+_ORPHAN_HARD_EXIT_SECS = 2 * CHILD_GRACEFUL_SHUTDOWN_SECS
 
 
 class ChildProcess(Protocol):
@@ -130,17 +135,23 @@ class SupervisorFailure(RuntimeError):
     """A slot kept dying immediately; the supervisor fails closed."""
 
 
-def watch_supervisor_liveness() -> None:
+def watch_supervisor_liveness(
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    hard_exit: Callable[[], None] = lambda: os._exit(1),
+) -> threading.Thread | None:
     """Child-side: exit when the supervisor dies for ANY reason.
 
     The supervisor holds the write end of a pipe; every child watches the
     inherited read end from a daemon thread. A supervisor crash or SIGKILL
     closes the write end, the read returns EOF, and the child SIGTERMs
     itself instead of serving as an orphan on the still-open public socket.
+    A request that never completes would survive that SIGTERM, so the same
+    thread escalates to a hard exit after _ORPHAN_HARD_EXIT_SECS.
     """
     fd_value = os.environ.get(DEATH_PIPE_FD_ENV)
     if not fd_value:
-        return
+        return None
 
     def _watch() -> None:
         try:
@@ -149,8 +160,12 @@ def watch_supervisor_liveness() -> None:
         except OSError:
             pass
         os.kill(os.getpid(), signal.SIGTERM)
+        sleep(_ORPHAN_HARD_EXIT_SECS)
+        hard_exit()
 
-    threading.Thread(target=_watch, daemon=True).start()
+    thread = threading.Thread(target=_watch, daemon=True)
+    thread.start()
+    return thread
 
 
 def _default_spawn_dp(

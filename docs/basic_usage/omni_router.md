@@ -197,6 +197,7 @@ The table below lists the router command-line arguments.
 | `--health-check-endpoint` | `/health` | Worker endpoint used by background health checks. |
 | `--log-level` | `info` | Router and Uvicorn log level. |
 | `--strict-limits` | off | Fail startup instead of warning when the `nofile` soft limit is too low for the resolved upstream pool size (`max(--max-connections, --max-inflight)`). |
+| `--router-processes` | `1` | Number of data-plane relay processes. `1` keeps the single-process router below; `N >= 2` enables the [multi-process router](#multi-process-router-controldata-plane-split) (Linux only, and rejected at startup together with an explicit `--policy least_request`). |
 
 Routing policies:
 

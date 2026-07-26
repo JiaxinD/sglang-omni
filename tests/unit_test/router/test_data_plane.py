@@ -79,6 +79,79 @@ def _wait_for(predicate, timeout: float = 3.0):
     raise AssertionError("condition not met in time")
 
 
+def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
+    tmp_path: Path,
+) -> None:
+    # changing only --router-processes must not break generated clients: the
+    # forwarded admin routes keep the single-process operation ids and the
+    # worker_id path parameter name
+    from sglang_omni_router.app import create_app
+
+    single = create_app(
+        _config(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
+        ),
+    )
+    dp = _dp_app_forwarding_to_cp(tmp_path, _CPRecorder())
+
+    def _ops(app):
+        spec = app.openapi()
+        return {
+            (path, method): op.get("operationId")
+            for path, item in spec["paths"].items()
+            for method, op in item.items()
+        }
+
+    single_ops, dp_ops = _ops(single), _ops(dp)
+    shared = set(single_ops) & set(dp_ops)
+    assert ("/workers/{worker_id}", "get") in shared  # not {worker_path}
+    for key in shared:
+        assert dp_ops[key] == single_ops[key], key
+
+    def _duplicates(ops):
+        ids = [op for op in ops.values() if op]
+        return {op for op in ids if ids.count(op) > 1}
+
+    # the split must not introduce a collision the single-process schema does
+    # not already have (/weights_checker shares one id in both, pre-existing)
+    assert _duplicates(dp_ops) <= _duplicates(single_ops)
+
+
+def test_replaced_incarnation_stays_reportable_until_its_request_drains() -> None:
+    # DELETE then re-add of the same URL replaces the Worker object; a request
+    # still running on the old one records its completion there, so the retired
+    # object must keep reaching the CP ledger until it drains
+    view = DataPlaneWorkerView()
+
+    class _First:
+        seq = 1
+        workers = [_entry(incarnation="inc-a")]
+
+    view.apply(_First())
+    old = view.workers()[0]
+    old.increment_active()  # a request is in flight on incarnation A
+
+    class _Second:
+        seq = 2
+        workers = [_entry(incarnation="inc-b")]
+
+    view.apply(_Second())
+    new = view.workers()[0]
+    assert new is not old  # fresh object for the new incarnation
+    assert view.workers() == [new]  # routing only ever sees the live one
+    assert old in view.reportable_workers()  # but counters still flow
+    assert view.drained_retired() == []  # not drained: a request is running
+
+    old.decrement_active()
+    old.record_routed_request(status_code=200)
+    drained = view.drained_retired()
+    assert drained == [old]
+    assert old in view.reportable_workers()  # reported once more, then released
+    view.release_retired(drained)
+    assert view.reportable_workers() == [new]
+
+
 def test_view_apply_preserves_counters_and_tracks_membership() -> None:
     view = DataPlaneWorkerView()
 

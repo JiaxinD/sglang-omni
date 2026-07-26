@@ -843,6 +843,40 @@ def test_least_request_selects_lowest_active_request_count() -> None:
     )
 
 
+def test_round_robin_keeps_stagger_after_candidate_pool_shrinks() -> None:
+    workers = build_workers(
+        [
+            WorkerConfig(url="http://127.0.0.1:8101"),
+            WorkerConfig(url="http://127.0.0.1:8102"),
+        ]
+    )
+    for worker in workers:
+        worker.state = "healthy"
+
+    selectors = [WorkerSelector("round_robin", rr_offset=index) for index in range(2)]
+
+    picks = [
+        selector.select(workers, required_capabilities={"speech"}).url
+        for selector in selectors
+    ]
+    assert picks[0] != picks[1]
+
+    workers[1].state = "unhealthy"
+    for selector in selectors:
+        assert (
+            selector.select(workers, required_capabilities={"speech"}).url
+            == "http://127.0.0.1:8101"
+        )
+    workers[1].state = "healthy"
+
+    for _ in range(4):
+        picks = [
+            selector.select(workers, required_capabilities={"speech"}).url
+            for selector in selectors
+        ]
+        assert picks[0] != picks[1]
+
+
 def test_worker_request_guard_cleans_up_count() -> None:
     worker = build_workers([WorkerConfig(url="http://127.0.0.1:8101")])[0]
 

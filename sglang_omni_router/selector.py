@@ -65,6 +65,9 @@ class WorkerSelector:
         raise ValueError(f"unsupported routing policy: {self.policy}")
 
     def _select_round_robin(self, candidates: list[Worker]) -> Worker:
+        # Note (Jiaxin Deng): the cursor stays monotonic and is reduced only when
+        # indexing, so a temporarily shrunken candidate list cannot collapse every
+        # data plane's cursor to 0 and erase the rr_offset stagger.
         worker = candidates[self._rr_index % len(candidates)]
-        self._rr_index = (self._rr_index + 1) % len(candidates)
+        self._rr_index += 1
         return worker

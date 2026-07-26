@@ -101,6 +101,47 @@ async def test_in_flight_probe_result_cannot_revive_a_dead_worker() -> None:
     await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_stale_probe_cannot_demote_a_worker_revived_after_dead_clear() -> None:
+    # ABA: probe A starts, the operator marks the worker dead then clears it,
+    # probe B makes it healthy again, and only then does probe A fail; rechecking
+    # is_dead does not catch this because the worker is not dead any more
+    config = _config()
+    workers = build_workers(config.workers)
+    worker = workers[0]
+
+    probe_a_started = asyncio.Event()
+    probe_a_may_finish = asyncio.Event()
+    requests = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            probe_a_started.set()
+            await probe_a_may_finish.wait()
+            raise httpx.ConnectError("probe A failed after the worker came back")
+        return httpx.Response(200, json={"status": "healthy"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    checker = HealthChecker(workers=workers, config=config, client=client)
+
+    probe_a = asyncio.create_task(checker.check_worker_health(worker))
+    await probe_a_started.wait()
+
+    worker.mark_dead()
+    worker.clear_dead()
+    await checker.check_worker_health(worker)
+    assert worker.is_healthy
+
+    probe_a_may_finish.set()
+    await probe_a
+
+    assert worker.is_healthy
+    assert worker.consecutive_failures == 0
+    await client.aclose()
+
+
 def test_cp_publishes_snapshot_on_startup_and_crud(tmp_path: Path) -> None:
     app, snapshot_path, _ = _cp_app(tmp_path)
     with TestClient(app) as client:

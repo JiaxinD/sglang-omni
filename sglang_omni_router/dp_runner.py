@@ -14,6 +14,7 @@ import socket
 import uvicorn
 
 from sglang_omni_router.supervisor import (
+    CHILD_GRACEFUL_SHUTDOWN_SECS,
     LOG_LEVEL_ENV,
     SOCKET_FD_ENV,
     watch_supervisor_liveness,
@@ -29,6 +30,7 @@ def main() -> None:
         factory=True,
         log_level=os.environ.get(LOG_LEVEL_ENV, "warning").lower(),
         access_log=False,
+        timeout_graceful_shutdown=CHILD_GRACEFUL_SHUTDOWN_SECS,
     )
     server = uvicorn.Server(config)
     server.run(sockets=[listen_socket])

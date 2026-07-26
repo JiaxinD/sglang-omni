@@ -79,6 +79,10 @@ _SEQ_FORMAT = "<q"
 _READ_SPIN_LIMIT = 1_000
 _READ_BACKOFF_SECS = 0.0001
 _READ_BACKOFF_LIMIT = 20_000
+# Note (Jiaxin Deng): a slot stays odd until supervisor reclaim, so probing it
+# per request would burn the spin budget (and a log line) on every request for
+# a whole poll interval; cache the fail-closed shed and re-probe at this rate.
+_UNSTABLE_REPROBE_SECS = 0.05
 
 assert struct.calcsize(_SLOT_FORMAT) == SLOT_SIZE
 
@@ -251,6 +255,8 @@ class SharedAdmission:
         self._inflight = 0
         self._peak_sum = 0
         self._rejected_total = 0
+        self._sibling_unstable = False
+        self._sibling_probed_at = 0.0
         self._write_own()  # claim the slot
 
     def _write_own(self) -> None:
@@ -274,6 +280,23 @@ class SharedAdmission:
     def _total_inflight(self) -> int:
         return sum(codec.read(fail_fast=True).inflight for codec in self._codecs)
 
+    def _shed_from_cached_unstable(self) -> bool:
+        return (
+            self._sibling_unstable
+            and self._clock() - self._sibling_probed_at < _UNSTABLE_REPROBE_SECS
+        )
+
+    def _mark_sibling_unstable(self) -> None:
+        self._sibling_probed_at = self._clock()
+        if not self._sibling_unstable:
+            self._sibling_unstable = True
+            logger.warning("sibling admission slot unstable; shedding until reclaim")
+
+    def _mark_sibling_stable(self) -> None:
+        if self._sibling_unstable:
+            self._sibling_unstable = False
+            logger.warning("sibling admission slots readable again; resuming admission")
+
     @property
     def inflight(self) -> int:
         return self._total_inflight()
@@ -288,16 +311,21 @@ class SharedAdmission:
             # now would race the fold, so this shed cannot be counted.
             logger.warning("own admission slot unstable; shedding until reclaim")
             return False
-        try:
-            total = self._total_inflight()
-        except SeqlockUnstableError:
-            # Note (Jiaxin Deng): a sibling slot is stuck mid-write (writer
-            # crashed); shed instead of blocking the event loop. The own slot
-            # is intact, so the rejection is counted like any other shed.
-            logger.warning("sibling admission slot unstable; shedding until reclaim")
+        # Note (Jiaxin Deng): a sibling slot is stuck mid-write (writer
+        # crashed); shed instead of blocking the event loop. The own slot is
+        # intact, so the rejection is counted like any other shed.
+        if self._shed_from_cached_unstable():
             self._rejected_total += 1
             self._write_own()
             return False
+        try:
+            total = self._total_inflight()
+        except SeqlockUnstableError:
+            self._mark_sibling_unstable()
+            self._rejected_total += 1
+            self._write_own()
+            return False
+        self._mark_sibling_stable()
         if total >= self._max_inflight:
             self._rejected_total += 1
             self._write_own()
