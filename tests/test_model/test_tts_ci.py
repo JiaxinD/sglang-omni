@@ -831,9 +831,7 @@ def test_voice_cloning_high_concurrency(
 ) -> None:
     hc_thresholds = _THRESHOLDS.non_stream_hc_speed
     if hc_thresholds is None:
-        pytest.skip(
-            f"preset {_MODEL_NAME} has no high-concurrency speed thresholds"
-        )
+        pytest.skip(f"preset {_MODEL_NAME} has no high-concurrency speed thresholds")
     _print_stage(
         "TTS speed",
         "non-streaming",
@@ -903,9 +901,7 @@ def test_voice_cloning_direct_worker_capacity(
 ) -> None:
     direct_thresholds = _THRESHOLDS.non_stream_hc_direct_speed
     if direct_thresholds is None:
-        pytest.skip(
-            f"preset {_MODEL_NAME} has no direct-worker capacity thresholds"
-        )
+        pytest.skip(f"preset {_MODEL_NAME} has no direct-worker capacity thresholds")
     _print_stage(
         "TTS speed",
         "non-streaming",
