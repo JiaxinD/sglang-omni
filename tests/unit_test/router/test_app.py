@@ -480,8 +480,8 @@ def test_admin_routes_broadcast_to_live_workers_and_preserve_query() -> None:
 def test_single_process_recovers_an_unresolved_weight_update_fail_closed(
     tmp_path: Path,
 ) -> None:
-    # a single-process router that died mid weight-update must fail closed:
-    # recover the journaled target disabled and 409 a retry.
+    # Note (Jiaxin Deng): a single-process router that died mid weight-update must fail
+    # closed: recover the journaled target disabled and 409 a retry.
     journal_path = str(tmp_path / "update_journal.json")
     worker_id = worker_id_from_url("http://worker-a:8101")
     UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
@@ -534,8 +534,8 @@ def test_partial_weight_update_stays_disabled_and_journaled(tmp_path: Path) -> N
 def test_weight_update_is_refused_when_the_journal_is_not_durable(
     tmp_path: Path,
 ) -> None:
-    # a journal write that never reached the disk must not be reported as
-    # success: refuse before any target is disabled or sent, so a host crash
+    # Note (Jiaxin Deng): a journal write that never reached the disk must not be
+    # reported as success: refuse before any target is disabled or sent, so a host crash
     # cannot re-enable a mixed-weight pool
     journal_path = str(tmp_path / "update_journal.json")
     sent: list[str] = []
@@ -580,24 +580,26 @@ def _journal_app(tmp_path: Path, journaled_ids: list[str]):
 def test_absent_journaled_worker_survives_restart_as_a_tombstone(
     tmp_path: Path,
 ) -> None:
-    # a dynamically added worker is absent after a full restart (the registry
-    # rebuilds from static config): its journal entry must survive as a
+    # Note (Jiaxin Deng): a dynamically added worker is absent after a full restart (the
+    # registry rebuilds from static config): its journal entry must survive as a
     # tombstone, and re-registering that stable ID must create it disabled
     dynamic_url = "http://worker-dyn:8103"
     dynamic_id = worker_id_from_url(dynamic_url)
     app, journal_path = _journal_app(tmp_path, [dynamic_id])
     with TestClient(app) as client:
-        # recovery kept the tombstone and the 409 gate stays closed
+        # Note (Jiaxin Deng): recovery kept the tombstone and the 409 gate stays closed
         assert UpdateJournal(journal_path).pending() == [dynamic_id]
         response = client.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 409
 
-        # re-registering the journaled stable ID creates the worker disabled
+        # Note (Jiaxin Deng): re-registering the journaled stable ID creates the worker
+        # disabled
         created = client.post("/workers", json={"url": dynamic_url})
         assert created.status_code == 200
         assert created.json()["worker"]["disabled"] is True
 
-        # an authenticated re-enable resolves the tombstone and unblocks updates
+        # Note (Jiaxin Deng): an authenticated re-enable resolves the tombstone and
+        # unblocks updates
         assert (
             client.put(f"/workers/{dynamic_id}", json={"disabled": False}).status_code
             == 200
@@ -616,7 +618,7 @@ def test_deleting_a_journaled_worker_keeps_the_tombstone_for_readd(
     app, journal_path = _journal_app(tmp_path, [worker_id])
     with TestClient(app) as client:
         assert client.delete(f"/workers/{worker_id}").status_code == 200
-        # deletion must not erase the tombstone
+        # Note (Jiaxin Deng): deletion must not erase the tombstone
         assert UpdateJournal(journal_path).pending() == [worker_id]
         readded = client.post("/workers", json={"url": "http://worker-a:8101"})
         assert readded.status_code == 200
@@ -626,8 +628,8 @@ def test_deleting_a_journaled_worker_keeps_the_tombstone_for_readd(
 def test_rejected_reenable_commits_no_part_of_the_staged_update(
     tmp_path: Path,
 ) -> None:
-    # every fallible precondition is checked before committing: a 503 on the
-    # journal must not leave a half-applied model change for the CP keepalive
+    # Note (Jiaxin Deng): every fallible precondition is checked before committing: a
+    # 503 on the journal must not leave a half-applied model change for the CP keepalive
     # to publish
     journal_path = str(tmp_path / "update_journal.json")
     Path(journal_path).write_bytes(b"{corrupt")
@@ -650,8 +652,8 @@ def test_rejected_reenable_commits_no_part_of_the_staged_update(
 
 
 def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> None:
-    # discard() cannot modify an unreadable journal: the re-enable must fail
-    # instead of returning 200 while every update stays blocked with 409
+    # Note (Jiaxin Deng): discard() cannot modify an unreadable journal: the re-enable
+    # must fail instead of returning 200 while every update stays blocked with 409
     journal_path = str(tmp_path / "update_journal.json")
     Path(journal_path).write_bytes(b"{corrupt")
     worker_id = worker_id_from_url("http://worker-a:8101")
@@ -672,8 +674,8 @@ def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> N
 def test_journal_survives_a_host_reboot_that_wipes_the_per_run_workdir(
     tmp_path: Path,
 ) -> None:
-    # remote workers outlive the router host, so an unresolved update must
-    # still be found after a reboot, not just after a process restart
+    # Note (Jiaxin Deng): remote workers outlive the router host, so an unresolved
+    # update must still be found after a reboot, not just after a process restart
     state_dir = tmp_path / "persistent"
     workdir = tempfile.mkdtemp(prefix="sglang-omni-router-")
     dynamic_url = "http://worker-dyn:8103"
@@ -702,8 +704,8 @@ def test_journal_survives_a_host_reboot_that_wipes_the_per_run_workdir(
     assert journal_path.is_relative_to(state_dir)
     assert not journal_path.is_relative_to(workdir)
 
-    # the supervisor and its per-run workdir are gone; only the state dir is
-    # carried across the reboot
+    # Note (Jiaxin Deng): the supervisor and its per-run workdir are gone; only the
+    # state dir is carried across the reboot
     shutil.rmtree(workdir)
     after = create_app(
         _router_config(router_state_dir=str(state_dir)), client=async_client
@@ -3191,8 +3193,8 @@ def test_route_registration_split_exposes_exact_route_sets() -> None:
 
 
 def test_worker_crud_stays_unauthenticated_even_with_admin_key() -> None:
-    # current behavior, frozen: worker CRUD carries no admin auth while the
-    # weight-update/broadcast routes do; the route split must not change this.
+    # Note (Jiaxin Deng): current behavior, frozen: worker CRUD carries no admin auth
+    # while the weight-update/broadcast routes do; the route split must not change this.
     app = _admin_router_app(admin_api_key=_ROUTER_ADMIN_API_KEY)
     with TestClient(app) as client:
         created = client.post("/workers", json={"url": "http://127.0.0.1:8199"})
@@ -3207,8 +3209,8 @@ def test_worker_crud_stays_unauthenticated_even_with_admin_key() -> None:
 
 
 def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
-    # PoolTimeout means THIS router's pool is exhausted; it must shed with a
-    # retryable 503 and must not feed the worker-eviction signal
+    # Note (Jiaxin Deng): PoolTimeout means THIS router's pool is exhausted; it must
+    # shed with a retryable 503 and must not feed the worker-eviction signal
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "healthy"})
@@ -3224,14 +3226,15 @@ def test_pool_timeout_is_router_local_not_a_worker_failure() -> None:
         workers = client.get("/workers").json()["workers"]
         assert all(w["consecutive_failures"] == 0 for w in workers)
         assert all(w["health_state"] != "unhealthy" for w in workers)
-        # router-local exhaustion must not inflate the worker's failure count
+        # Note (Jiaxin Deng): router-local exhaustion must not inflate the worker's
+        # failure count
         assert all(w["failed_requests"] == 0 for w in workers)
 
 
 def test_worker_registration_probes_outside_the_update_lock() -> None:
-    # the lock that CRUD shares with weight updates must cover the authoritative
-    # mutation, not an arbitrary worker's /health: a blackholed candidate would
-    # otherwise 409 every other CRUD call and stall an RL update for the full
+    # Note (Jiaxin Deng): the lock that CRUD shares with weight updates must cover the
+    # authoritative mutation, not an arbitrary worker's /health: a blackholed candidate
+    # would otherwise 409 every other CRUD call and stall an RL update for the full
     # health timeout
     import threading
 
@@ -3259,8 +3262,8 @@ def test_worker_registration_probes_outside_the_update_lock() -> None:
         )
         creator.start()
         assert health_started.wait(timeout=5.0)
-        # the staged worker is being probed: the lock is free, so a weight
-        # update or another CRUD call is not blocked behind this network call
+        # Note (Jiaxin Deng): the staged worker is being probed: the lock is free, so a
+        # weight update or another CRUD call is not blocked behind this network call
         assert app.state.admin_update_lock.locked() is False
         release_health.set()
         creator.join(timeout=5.0)

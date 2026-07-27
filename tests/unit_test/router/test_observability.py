@@ -38,8 +38,8 @@ def _report(
 
 
 def test_first_contact_establishes_the_baseline() -> None:
-    # since-CP-start: the first report only sets the baseline; growth after
-    # first contact is what gets displayed
+    # Note (Jiaxin Deng): since-CP-start: the first report only sets the baseline;
+    # growth after first contact is what gets displayed
     ledger = DataPlaneCounterLedger()
     assert ledger.apply(_report(1, 20), now=0.0) is True
     assert ledger.totals("w0")["routed_total"] == 0
@@ -48,8 +48,8 @@ def test_first_contact_establishes_the_baseline() -> None:
 
 
 def test_cp_restart_restarts_the_window_coherently() -> None:
-    # a fresh ledger (CP restart) takes a surviving DP's cumulative as
-    # baseline: the display restarts at zero
+    # Note (Jiaxin Deng): a fresh ledger (CP restart) takes a surviving DP's cumulative
+    # as baseline: the display restarts at zero
     old_cp = DataPlaneCounterLedger()
     old_cp.apply(_report(1, 0), now=0.0)
     old_cp.apply(_report(9, 120), now=0.0)
@@ -66,16 +66,16 @@ def test_cumulative_reports_are_idempotent_and_ordered() -> None:
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 0), now=0.0)
     assert ledger.apply(_report(2, 5), now=0.0) is True
-    # duplicate delivery of the same seq: dropped, totals unchanged
+    # Note (Jiaxin Deng): duplicate delivery of the same seq: dropped, totals unchanged
     assert ledger.apply(_report(2, 5), now=0.0) is False
-    # out-of-order older seq: dropped even with different numbers
+    # Note (Jiaxin Deng): out-of-order older seq: dropped even with different numbers
     assert ledger.apply(_report(1, 3), now=0.0) is False
     assert ledger.totals("w0")["routed_total"] == 5
 
 
 def test_a_regressed_cumulative_cannot_lower_the_display() -> None:
-    # e.g. a worker URL deleted and re-added on the DP resets its counters;
-    # the display clamps to the high-water mark instead of falling
+    # Note (Jiaxin Deng): e.g. a worker URL deleted and re-added on the DP resets its
+    # counters; the display clamps to the high-water mark instead of falling
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 0), now=0.0)
     ledger.apply(_report(2, 10), now=0.0)
@@ -87,7 +87,7 @@ def test_workers_missing_from_a_report_keep_their_contribution() -> None:
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 0), now=0.0)
     ledger.apply(_report(2, 7), now=0.0)
-    # next report omits w0 entirely (e.g. deleted from the registry)
+    # Note (Jiaxin Deng): next report omits w0 entirely (e.g. deleted from the registry)
     ledger.apply(
         CounterReport(dp_index=0, generation=1, counter_seq=3, workers=[]),
         now=0.0,
@@ -96,7 +96,7 @@ def test_workers_missing_from_a_report_keep_their_contribution() -> None:
 
 
 def test_generation_bump_retires_the_old_contribution() -> None:
-    # displayed totals must never move backwards across a DP restart
+    # Note (Jiaxin Deng): displayed totals must never move backwards across a DP restart
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 2, generation=1), now=0.0)  # baseline 2
     ledger.apply(_report(7, 10, generation=1), now=0.0)  # contribution 8
@@ -118,23 +118,24 @@ def test_active_gauge_sums_only_live_entries() -> None:
     ledger.apply(_report(1, 1, dp=0, active=2), now=100.0)
     ledger.apply(_report(1, 1, dp=1, active=3), now=102.0)
     assert ledger.active_gauge("w0", now=102.5) == 5
-    # dp 0's report is now stale: its in-flight work is gone with it
+    # Note (Jiaxin Deng): dp 0's report is now stale: its in-flight work is gone with it
     assert ledger.active_gauge("w0", now=103.5) == 3
 
 
 def test_incarnation_change_retires_the_old_segment_and_counts_the_new() -> None:
-    # DELETE then POST of the same URL on the DP is a fresh worker object whose
-    # cumulatives restart at zero; without retiring the old segment the
+    # Note (Jiaxin Deng): DELETE then POST of the same URL on the DP is a fresh worker
+    # object whose cumulatives restart at zero; without retiring the old segment the
     # high-water clamp would freeze the display until the new object caught up
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 0, incarnation="inc-a"), now=0.0)  # baseline 0
     ledger.apply(_report(2, 10, incarnation="inc-a"), now=1.0)
     assert ledger.totals("w0")["routed_total"] == 10
 
-    # same stable id, new incarnation, cumulative restarted at 3
+    # Note (Jiaxin Deng): same stable id, new incarnation, cumulative restarted at 3
     ledger.apply(_report(3, 3, incarnation="inc-b"), now=2.0)
     totals = ledger.totals("w0")
-    # old segment retired (10) + new segment fully counted (3), not clamped
+    # Note (Jiaxin Deng): old segment retired (10) + new segment fully counted (3), not
+    # clamped
     assert totals["routed_total"] == 13
     ledger.apply(_report(4, 5, incarnation="inc-b"), now=3.0)
     assert ledger.totals("w0")["routed_total"] == 15

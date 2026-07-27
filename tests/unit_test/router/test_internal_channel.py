@@ -37,8 +37,8 @@ def test_register_then_heartbeat_updates_last_applied_seq() -> None:
 
 
 def test_heartbeat_before_register_asks_for_registration() -> None:
-    # 428, not 409: an unknown dp (e.g. after a CP restart) must re-register,
-    # a fence here would make a whole fleet kill itself on a fast CP restart
+    # Note (Jiaxin Deng): 428, not 409: an unknown dp (e.g. after a CP restart) must re-
+    # register, a fence here would make a whole fleet kill itself on a fast CP restart
     app = create_internal_app()
     with TestClient(app) as client:
         response = client.post("/internal/heartbeat", json=_beat())
@@ -46,8 +46,8 @@ def test_heartbeat_before_register_asks_for_registration() -> None:
 
 
 def test_stale_generation_is_fenced_out() -> None:
-    # After the supervisor restarts a DP slot with a newer generation, calls
-    # from the old process must be rejected, never applied.
+    # Note (Jiaxin Deng): After the supervisor restarts a DP slot with a newer
+    # generation, calls from the old process must be rejected, never applied.
     app = create_internal_app()
     with TestClient(app) as client:
         assert (
@@ -135,8 +135,8 @@ def test_same_pid_reregister_is_idempotent_and_keeps_the_ack() -> None:
         client.post("/internal/register", json=_hello())
         beat = {**_beat(seq=17), "last_applied_epoch": "epoch-x", "serving": False}
         client.post("/internal/heartbeat", json=beat)
-        # dropped heartbeat response: same process registers again. Seq must
-        # keep its epoch (a seq under a blank epoch cannot satisfy the ACK
+        # Note (Jiaxin Deng): dropped heartbeat response: same process registers again.
+        # Seq must keep its epoch (a seq under a blank epoch cannot satisfy the ACK
         # barrier) and a shedding DP must not flip back to serving-ready.
         assert client.post("/internal/register", json=_hello()).status_code == 200
         listed = client.get("/internal/data_planes").json()["data_planes"]

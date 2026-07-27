@@ -32,7 +32,6 @@ def test_snapshot_round_trip(tmp_path: Path) -> None:
         "http://127.0.0.1:8101",
         "http://127.0.0.1:8102",
     ]
-    # unchanged file: no reload
     assert reader.maybe_reload() is False
 
 
@@ -61,7 +60,6 @@ def test_reader_keeps_last_good_snapshot_on_torn_file(tmp_path: Path) -> None:
     assert reader.maybe_reload() is False
     assert reader.snapshot == good
 
-    # the writer recovers with the next publish and the reader picks it up
     writer.publish(_workers(1))
     assert reader.maybe_reload() is True
     assert reader.snapshot.seq == 2
@@ -94,7 +92,8 @@ def test_reader_accepts_a_new_cp_epoch_with_a_restarted_seq(
     restarted = SnapshotWriter(path, cp_epoch="epoch-b")
     restarted.publish(_workers())
     restarted.publish(_workers(1))
-    # seq went 2 -> 2 across epochs; the new epoch must still be applied
+    # Note (Jiaxin Deng): seq went 2 -> 2 across epochs; the new epoch must still be
+    # applied
     assert reader.maybe_reload() is True
     assert reader.snapshot.cp_epoch == "epoch-b"
     assert reader.snapshot.seq == 2
@@ -120,7 +119,8 @@ def test_writer_unlink_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_reader_rejects_an_incompatible_schema_version(tmp_path: Path) -> None:
-    # valid JSON from another schema version must not replace the good view
+    # Note (Jiaxin Deng): valid JSON from another schema version must not replace the
+    # good view
     path = str(tmp_path / "snap.json")
     writer = SnapshotWriter(path, cp_epoch="epoch-a")
     writer.publish(_workers())
@@ -157,8 +157,8 @@ def test_writer_cleans_its_temp_file_when_the_replace_fails(
 def test_reader_detects_rapid_republish_despite_coarse_mtime(
     tmp_path: Path,
 ) -> None:
-    # Kernel file timestamps are tick-granular: two publishes inside one tick
-    # share an mtime, so mtime alone must not be the change signal.
+    # Note (Jiaxin Deng): Kernel file timestamps are tick-granular: two publishes inside
+    # one tick share an mtime, so mtime alone must not be the change signal.
     path = str(tmp_path / "snap.json")
     writer = SnapshotWriter(path, cp_epoch="epoch-a")
     writer.publish(_workers())

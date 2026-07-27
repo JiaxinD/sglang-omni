@@ -75,7 +75,7 @@ def _data_planes(instance: RouterSupervisor) -> list[dict]:
         with _internal_client(instance) as client:
             return client.get("/internal/data_planes").json()["data_planes"]
     except httpx.HTTPError:
-        # CP still booting (UDS not bound yet) or restarting
+        # Note (Jiaxin Deng): CP still booting (UDS not bound yet) or restarting
         return []
 
 
@@ -90,7 +90,7 @@ def test_two_dps_share_the_data_socket_and_register(supervisor) -> None:
             return False
 
     _wait_until(_live)
-    # both DPs register and heartbeat over the UDS channel
+    # Note (Jiaxin Deng): both DPs register and heartbeat over the UDS channel
     records = _wait_until(
         lambda: (lambda planes: planes if len(planes) == 2 else None)(
             _data_planes(instance)
@@ -99,8 +99,8 @@ def test_two_dps_share_the_data_socket_and_register(supervisor) -> None:
     assert sorted(record["dp_index"] for record in records) == [0, 1]
     assert all(record["generation"] == 1 for record in records)
 
-    # the data port keeps answering while both children accept from the
-    # shared queue
+    # Note (Jiaxin Deng): the data port keeps answering while both children accept from
+    # the shared queue
     for _ in range(20):
         assert httpx.get(url, timeout=2.0).status_code == 200
 
@@ -125,7 +125,7 @@ def test_killed_dp_is_respawned_with_a_bumped_generation(supervisor) -> None:
         )(_data_planes(instance))
     )
     assert any(r["generation"] == 2 for r in records)
-    # data port still serves after the respawn
+    # Note (Jiaxin Deng): data port still serves after the respawn
     url = f"http://127.0.0.1:{config.port}/live"
     _wait_until(lambda: httpx.get(url, timeout=2.0).status_code == 200)
 
@@ -158,7 +158,7 @@ def test_admin_crud_via_the_data_port_reaches_the_cp(supervisor) -> None:
     urls = {worker["url"] for worker in listed.json()["workers"]}
     assert urls == {"http://127.0.0.1:1", "http://127.0.0.1:2"}
 
-    # the aggregate /health also rides the forwarding path to the CP
+    # Note (Jiaxin Deng): the aggregate /health also rides the forwarding path to the CP
     health = httpx.get(f"{base}/health", timeout=5.0)
     assert health.status_code in (200, 503)
     assert "data_planes" in health.json()
@@ -182,8 +182,8 @@ def test_admission_shm_is_wired_end_to_end(supervisor) -> None:
     assert payload["admission"]["inflight"] == 0
     assert payload["live_data_planes"] == 2
 
-    # SIGKILL one DP: the supervisor reclaims its slot after the reap and the
-    # respawned generation-2 process claims it again
+    # Note (Jiaxin Deng): SIGKILL one DP: the supervisor reclaims its slot after the
+    # reap and the respawned generation-2 process claims it again
     victim = instance.dp_slots[0].process
     os.kill(victim.pid, signal.SIGKILL)
     _wait_until(lambda: victim.poll() is not None)
@@ -209,9 +209,9 @@ def _has_exited(pid: int) -> bool:
 
 
 def test_children_exit_on_supervisor_death_even_with_a_stuck_relay() -> None:
-    # a SIGKILLed supervisor runs no teardown, so each child must exit on the
-    # death-pipe EOF; otherwise an orphan keeps serving on the inherited public
-    # listener. A request that never completes must not hold that exit off.
+    # Note (Jiaxin Deng): a SIGKILLed supervisor runs no teardown, so each child must
+    # exit on the death-pipe EOF; otherwise an orphan keeps serving on the inherited
+    # public listener. A request that never completes must not hold that exit off.
     import socket
     import threading
 
@@ -255,8 +255,8 @@ def test_children_exit_on_supervisor_death_even_with_a_stuck_relay() -> None:
         stuck.start()
         time.sleep(1.0)  # let the relay reach the upstream that never answers
 
-        # the supervisor holds the only write end; closing it is exactly what
-        # its SIGKILL does to the children
+        # Note (Jiaxin Deng): the supervisor holds the only write end; closing it is
+        # exactly what its SIGKILL does to the children
         os.close(instance._death_pipe_write)
         instance._death_pipe_write = None
         _wait_until(

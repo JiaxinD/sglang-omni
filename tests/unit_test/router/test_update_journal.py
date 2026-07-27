@@ -44,9 +44,10 @@ def test_unreadable_journal_fails_closed(tmp_path: Path) -> None:
     journal = UpdateJournal(str(path))
     with pytest.raises(JournalUnreadableError):
         journal.pending()
-    # has_pending must fail closed (assume a transaction is in progress)
+    # Note (Jiaxin Deng): has_pending must fail closed (assume a transaction is in
+    # progress)
     assert journal.has_pending() is True
-    # discard must not silently clobber an unreadable journal
+    # Note (Jiaxin Deng): discard must not silently clobber an unreadable journal
     journal.discard("w0")
     assert path.exists()
 
@@ -73,7 +74,8 @@ def test_discard_removes_one_entry(tmp_path: Path) -> None:
 def test_begin_fails_closed_when_the_write_is_not_durable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # a swallowed fsync error would let the update run with no recovery record
+    # Note (Jiaxin Deng): a swallowed fsync error would let the update run with no
+    # recovery record
     journal = UpdateJournal(str(tmp_path / "j.json"))
 
     def _fail(fd: int) -> None:
@@ -88,7 +90,8 @@ def test_begin_fails_closed_when_the_write_is_not_durable(
 def test_begin_fails_closed_when_the_directory_fsync_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # the rename is durable only once the parent directory entry is synced
+    # Note (Jiaxin Deng): the rename is durable only once the parent directory entry is
+    # synced
     journal = UpdateJournal(str(tmp_path / "j.json"))
     real_fsync = os.fsync
 
@@ -140,8 +143,8 @@ def test_default_path_is_stable_by_endpoint() -> None:
 def test_default_path_never_uses_a_temp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # a temp directory survives a process restart but not a host reboot, and
-    # the remote workers outlive the router host
+    # Note (Jiaxin Deng): a temp directory survives a process restart but not a host
+    # reboot, and the remote workers outlive the router host
     system_tmp = tempfile.gettempdir()
     sentinel = str(tmp_path / "temp-dir-sentinel")
     monkeypatch.setattr(tempfile, "gettempdir", lambda: sentinel)
@@ -242,8 +245,8 @@ def test_ensure_state_dir_fails_closed_when_it_is_not_writable(tmp_path: Path) -
 def test_ensure_state_dir_survives_a_concurrently_removed_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # routers on different ports share one state directory; one cleaning up
-    # first must not make the other refuse to start
+    # Note (Jiaxin Deng): routers on different ports share one state directory; one
+    # cleaning up first must not make the other refuse to start
     state_dir = tmp_path / "state"
 
     def _vanished(path: str) -> None:
@@ -256,7 +259,8 @@ def test_ensure_state_dir_survives_a_concurrently_removed_probe(
 def test_an_unusable_state_dir_does_not_fall_back_to_a_temp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # falling back would look durable while a reboot silently drops the record
+    # Note (Jiaxin Deng): falling back would look durable while a reboot silently drops
+    # the record
     fake_tmp = tmp_path / "tempdir"
     fake_tmp.mkdir()
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fake_tmp))

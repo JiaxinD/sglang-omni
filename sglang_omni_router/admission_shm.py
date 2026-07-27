@@ -70,9 +70,8 @@ def _warn_if_unverified_platform() -> None:
 
 
 SLOT_SIZE = 64
-# seq | inflight | peak_sum | rejected | generation | pid | heartbeat_ts | reserved
 _SLOT_FORMAT = "<qqqqqqdq"
-_FIELDS_FORMAT = "<qqqqqdq"  # everything after seq
+_FIELDS_FORMAT = "<qqqqqdq"
 _SEQ_FORMAT = "<q"
 # Note (Jiaxin Deng): a live writer finishes in microseconds; a slot left odd
 # by a dead writer resolves at supervisor reclaim, so readers eventually raise.

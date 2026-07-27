@@ -338,9 +338,8 @@ def create_data_plane_app(
         while True:
             await asyncio.sleep(counter_flush_interval_secs)
             counter_seq += 1
-            # snapshot the drained retirees BEFORE building the payload: one
-            # that finishes mid-post was reported with stale totals and must
-            # survive to the next flush
+            # Note (Jiaxin Deng): snapshot before building the payload, so a
+            # retiree that drains mid-post survives to the next flush.
             drained = view.drained_retired()
             payload = {
                 "dp_index": dp_index,
@@ -450,12 +449,10 @@ def create_data_plane_app(
     return app
 
 
-# Note (Jiaxin Deng): the admin surface and aggregate /health live on the CP;
-# a DP relays verbatim. Auth is not checked here: the CP re-checks it.
-# Note (Jiaxin Deng): (path, methods, route name) mirroring the single-process
-# handlers. FastAPI derives the operation id from the route name and path, so
-# reusing the names keeps the published schema identical across
-# --router-processes; a client generated against N=1 still works against N>=2.
+# Note (Jiaxin Deng): a DP relays these verbatim and does not check auth; the
+# CP owns the admin surface and re-checks it. The route names mirror the
+# single-process handlers so the published schema stays identical across
+# --router-processes, and a client generated against N=1 still works at N>=2.
 _FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("/health", ("GET",), "health"),
     ("/workers", ("GET",), "list_workers"),
@@ -561,8 +558,8 @@ def _register_cp_forwarding(
         )
 
     async def _forward_worker(request: Request, worker_id: str) -> Response:
-        # declared only so the path parameter is published under the same name
-        # the single-process routes use; the raw path is what gets forwarded
+        # Note (Jiaxin Deng): worker_id is unused; it exists so the published
+        # schema names the path parameter as the single-process routes do.
         return await _forward(request)
 
     for path, methods, name in _FORWARDED_CP_ROUTES:

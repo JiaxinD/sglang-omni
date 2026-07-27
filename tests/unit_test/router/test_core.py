@@ -1202,8 +1202,8 @@ def test_router_state_dir_reaches_the_router_config(tmp_path: Path) -> None:
 def test_startup_fails_closed_when_the_state_dir_is_unusable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # no temp-directory fallback: refuse to serve rather than run weight
-    # updates whose journal cannot survive a reboot
+    # Note (Jiaxin Deng): no temp-directory fallback: refuse to serve rather than run
+    # weight updates whose journal cannot survive a reboot
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory", encoding="utf-8")
     unusable = str(blocker / "state")
@@ -1240,8 +1240,9 @@ def test_router_processes_multiprocess_runs_the_supervisor(
         stopped_by_interrupt = False
 
     monkeypatch.setattr(serve_module, "RouterSupervisor", _FakeSupervisor)
-    # setenv-then-delenv makes monkeypatch own SGLANG_OMNI_ADMIN_KEY, so the
-    # key serve.main writes into os.environ is restored at teardown.
+    # Note (Jiaxin Deng): setenv-then-delenv makes monkeypatch own
+    # SGLANG_OMNI_ADMIN_KEY, so the key serve.main writes into os.environ is restored at
+    # teardown.
     monkeypatch.setenv("SGLANG_OMNI_ADMIN_KEY", "__owned_by_monkeypatch__")
     monkeypatch.delenv("SGLANG_OMNI_ADMIN_KEY")
     serve_module.main(
@@ -1257,7 +1258,8 @@ def test_router_processes_multiprocess_runs_the_supervisor(
     assert calls["router_processes"] == 2
     assert calls["config"].workers[0].url == "http://127.0.0.1:8101"
     assert calls["started"] and calls["ran"]
-    # a CLI-provided admin key must reach the CP child through the env
+    # Note (Jiaxin Deng): a CLI-provided admin key must reach the CP child through the
+    # env
     import os
 
     assert os.environ["SGLANG_OMNI_ADMIN_KEY"] == "cli-admin-key"

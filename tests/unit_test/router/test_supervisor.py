@@ -99,9 +99,9 @@ def _config() -> RouterConfig:
 
 
 def test_supervisor_binds_an_ipv6_host(tmp_path: Path) -> None:
-    # --host ::1 works through the N=1 uvicorn path; the supervisor's shared
-    # socket must select the family the same way uvicorn does instead of
-    # hardcoding AF_INET
+    # Note (Jiaxin Deng): --host ::1 works through the N=1 uvicorn path; the
+    # supervisor's shared socket must select the family the same way uvicorn does
+    # instead of hardcoding AF_INET
     import socket
 
     probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -126,8 +126,8 @@ def test_supervisor_binds_an_ipv6_host(tmp_path: Path) -> None:
 
 
 def test_supervisor_binds_hostnames_as_ipv4_like_uvicorn(tmp_path: Path) -> None:
-    # a hostname host (no colon) must bind AF_INET exactly like uvicorn's
-    # family selection, not whichever family getaddrinfo lists first
+    # Note (Jiaxin Deng): a hostname host (no colon) must bind AF_INET exactly like
+    # uvicorn's family selection, not whichever family getaddrinfo lists first
     import socket
 
     config = RouterConfig(
@@ -146,8 +146,8 @@ def test_supervisor_binds_hostnames_as_ipv4_like_uvicorn(tmp_path: Path) -> None
 def test_shutdown_closes_the_listener_before_draining_children(
     tmp_path: Path,
 ) -> None:
-    # if the parent held the listener until after the CP drained, connections
-    # would keep landing in the backlog after every acceptor was gone
+    # Note (Jiaxin Deng): if the parent held the listener until after the CP drained,
+    # connections would keep landing in the backlog after every acceptor was gone
     harness = Harness(_config(), n=2, tmp_path=tmp_path)
     harness.supervisor.start()
     listener_closed_at_signal: list[bool] = []
@@ -194,7 +194,8 @@ def test_dead_dp_is_reaped_before_reclaim_and_respawned_with_next_generation(
     first.die(code=137)
     harness.supervisor.poll_once()
 
-    # reclaimed exactly once, only after the reap, with the old generation
+    # Note (Jiaxin Deng): reclaimed exactly once, only after the reap, with the old
+    # generation
     assert exits == [(1, 1, 137, True)]
     assert harness.supervisor.dp_slots[1].generation == 2
     assert [(i, g) for i, g, _ in harness.dp_spawns] == [(0, 1), (1, 1), (1, 2)]
@@ -269,7 +270,8 @@ def test_cp_restart_unlinks_a_stale_uds_socket(tmp_path: Path) -> None:
     harness.cp_spawns[0][1].die()
     harness.supervisor.poll_once()
 
-    # the replacement CP must be able to bind: the stale file is gone
+    # Note (Jiaxin Deng): the replacement CP must be able to bind: the stale file is
+    # gone
     assert not uds_path.exists()
     assert len(harness.cp_spawns) == 2
     harness.supervisor.shutdown()
@@ -284,7 +286,8 @@ def test_start_rolls_back_when_a_dp_spawn_fails(tmp_path: Path) -> None:
         original = process.terminate
 
         def _terminate(orig=original):
-            # supervisor is defined below; the closure resolves it at call time
+            # Note (Jiaxin Deng): supervisor is defined below; the closure resolves it
+            # at call time
             listener_closed_at_signal.append(supervisor._socket is None)
             orig()
 
@@ -311,13 +314,13 @@ def test_start_rolls_back_when_a_dp_spawn_fails(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="spawn exploded"):
         supervisor.start()
 
-    # everything already spawned was stopped, artifacts are gone
+    # Note (Jiaxin Deng): everything already spawned was stopped, artifacts are gone
     assert all(process.returncode is not None for process in spawned)
     assert not (tmp_path / "router_config.json").exists()
     with pytest.raises(RuntimeError, match="not started"):
         _ = supervisor.context
-    # rollback mirrors shutdown(): the listener was dropped before any child
-    # was signaled, and the real port refuses connections afterwards
+    # Note (Jiaxin Deng): rollback mirrors shutdown(): the listener was dropped before
+    # any child was signaled, and the real port refuses connections afterwards
     assert listener_closed_at_signal and all(listener_closed_at_signal)
     import socket as socket_module
 
@@ -346,7 +349,7 @@ def test_run_forever_stops_cleanly_on_request_stop(tmp_path: Path) -> None:
     harness.supervisor.run_forever(poll_interval_secs=0.01)
 
     assert len(polls) == 2
-    # shutdown ran: all children stopped
+    # Note (Jiaxin Deng): shutdown ran: all children stopped
     assert all(p.returncode is not None for _, _, p in harness.dp_spawns)
     assert harness.cp_spawns[0][1].returncode is not None
 
@@ -377,7 +380,7 @@ def test_run_forever_shutdown_survives_an_unrestorable_previous_handler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # a C-level previous handler reads back as None and cannot be
+    # Note (Jiaxin Deng): a C-level previous handler reads back as None and cannot be
     # reinstalled; that must not skip shutdown() and leak workdir/shm/UDS
     import sglang_omni_router.supervisor as sup
 
@@ -399,7 +402,8 @@ def test_run_forever_shutdown_survives_an_unrestorable_previous_handler(
     harness.supervisor.poll_once = _poll_then_stop  # type: ignore[method-assign]
     harness.supervisor.run_forever(poll_interval_secs=0.01)
 
-    # shutdown still ran and stopped every child despite the un-restorable handler
+    # Note (Jiaxin Deng): shutdown still ran and stopped every child despite the un-
+    # restorable handler
     assert all(p.returncode is not None for _, _, p in harness.dp_spawns)
     assert harness.cp_spawns[0][1].returncode is not None
 
@@ -421,7 +425,8 @@ def test_child_env_sets_exactly_one_internal_transport(
 ) -> None:
     from sglang_omni_router.supervisor import INTERNAL_TCP_URL_ENV, INTERNAL_UDS_ENV
 
-    # a stale UDS variable inherited from the parent must not leak through
+    # Note (Jiaxin Deng): a stale UDS variable inherited from the parent must not leak
+    # through
     monkeypatch.setenv(INTERNAL_UDS_ENV, "/stale/internal.sock")
     harness = Harness(_config(), n=1, tmp_path=tmp_path)  # TCP fallback mode
     harness.supervisor.start()
@@ -464,8 +469,8 @@ def test_watch_supervisor_liveness_sigterms_on_pipe_eof(
 def test_watch_supervisor_liveness_hard_exits_when_sigterm_does_not_land(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # a request that never completes outlives the self-SIGTERM, and the dead
-    # supervisor cannot escalate; without the child's own deadline the orphan
+    # Note (Jiaxin Deng): a request that never completes outlives the self-SIGTERM, and
+    # the dead supervisor cannot escalate; without the child's own deadline the orphan
     # keeps the inherited public listener bound forever
     import os
     import signal as signal_module
@@ -541,7 +546,7 @@ def test_supervisor_rejects_least_request_with_multiple_processes(
     )
     with pytest.raises(ValueError, match="round_robin"):
         RouterSupervisor(config, router_processes=2, workdir=str(tmp_path))
-    # single process keeps supporting least_request
+    # Note (Jiaxin Deng): single process keeps supporting least_request
     RouterSupervisor(config, router_processes=1, workdir=str(tmp_path))
 
 
@@ -556,7 +561,7 @@ def test_supervisor_creates_and_reclaims_admission_slots(tmp_path: Path) -> None
     assert (tmp_path / "admission.shm").stat().st_size == admission_file_size(2)
     assert harness.supervisor.context.child_env()[ADMISSION_SHM_ENV] == shm_path
 
-    # a DP claims its slot and dies holding in-flight budget
+    # Note (Jiaxin Deng): a DP claims its slot and dies holding in-flight budget
     shm = harness.supervisor._admission_mmap
     SlotCodec(shm, 1).write(
         inflight=5,
@@ -570,7 +575,7 @@ def test_supervisor_creates_and_reclaims_admission_slots(tmp_path: Path) -> None
     harness.dp_spawns[1][2].die()
     harness.supervisor.poll_once()
 
-    # reclaimed after the reap, before the replacement runs
+    # Note (Jiaxin Deng): reclaimed after the reap, before the replacement runs
     view = SlotCodec(shm, 1).read()
     assert view.inflight == 0
     assert view.generation == 0

@@ -306,8 +306,8 @@ def register_admin_routes(
         if lock is not None:
             await lock.acquire()
         try:
-            # revalidate under the lock: membership and the journal can both
-            # have changed while the probe was in flight
+            # Note (Jiaxin Deng): membership and the journal can both have
+            # changed while the probe ran unlocked.
             if any(existing.url == worker_config.url for existing in workers):
                 return _error_response(409, "worker already registered")
 
@@ -414,7 +414,6 @@ def register_admin_routes(
 
         if reprobe is None:
             return response
-        # the clear-dead refresh runs unlocked, then republishes the result
         await app.state.health_checker.check_worker_health(reprobe)
         _notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker": reprobe.to_dict()})
@@ -474,8 +473,8 @@ def register_admin_routes(
         if requested_disabled is False:
             journal = getattr(app.state, "update_journal", None)
             if journal is not None and not journal.discard(worker.worker_id):
-                # enabling on an unresolved journal reports success while
-                # every weight update stays blocked behind the 409 gate
+                # Note (Jiaxin Deng): reporting success here would leave every
+                # weight update blocked behind the 409 gate.
                 return (
                     _error_response(
                         503,
@@ -868,8 +867,9 @@ async def _broadcast_admin_request_locked(
                     if outcome_safe:
                         journal.clear()
                     else:
-                        # every target's weight version is uncertain after a
-                        # started broadcast; keep the whole set
+                        # Note (Jiaxin Deng): once the broadcast started every
+                        # target's weight version is uncertain, not just the
+                        # ones that failed.
                         journal.keep([worker.worker_id for worker in workers])
                 except JournalUnwritableError as exc:
                     # Note (Jiaxin Deng): the in-memory outcome already stands;

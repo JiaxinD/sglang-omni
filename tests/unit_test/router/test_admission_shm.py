@@ -39,7 +39,7 @@ def test_bound_is_enforced_across_processes() -> None:
 
     assert a.try_acquire() and a.try_acquire()
     assert b.try_acquire()
-    # bound reached across slots: both sides shed
+    # Note (Jiaxin Deng): bound reached across slots: both sides shed
     assert b.try_acquire() is False
     assert a.try_acquire() is False
 
@@ -49,7 +49,8 @@ def test_bound_is_enforced_across_processes() -> None:
 
 
 def test_soft_bound_overshoot_is_at_most_n_minus_one() -> None:
-    # simulate the stale-read race: B captured the sum before A's increment
+    # Note (Jiaxin Deng): simulate the stale-read race: B captured the sum before A's
+    # increment
     buf = _buf()
     a = _admission(buf, 0, bound=3)
     b = _admission(buf, 1, bound=3)
@@ -61,7 +62,8 @@ def test_soft_bound_overshoot_is_at_most_n_minus_one() -> None:
     b._total_inflight = lambda: stale_total  # type: ignore[method-assign]
     assert b.try_acquire() is True  # stale check admits: sum = 4 = bound + 1
 
-    # overshoot is bounded by N-1 and a fresh reader immediately sheds
+    # Note (Jiaxin Deng): overshoot is bounded by N-1 and a fresh reader immediately
+    # sheds
     assert AdmissionAggregateView(buf, 3).to_dict(3)["inflight"] == 4  # 3 + (2-1)
     assert c.try_acquire() is False
 
@@ -77,7 +79,7 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
         pid=42,
         heartbeat_ts=1.0,
     )
-    # simulate a writer dying mid-write: odd seq + garbage fields
+    # Note (Jiaxin Deng): simulate a writer dying mid-write: odd seq + garbage fields
     seq = struct.unpack_from("<q", buf, 0)[0]
     struct.pack_into("<q", buf, 0, seq + 1)  # odd: write in progress
     struct.pack_into("<q", buf, 8, 999_999)  # garbage inflight
@@ -88,7 +90,6 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
     time.sleep(0.05)
     assert results == []  # reader is retrying, not returning garbage
 
-    # writer completes: consistent fields, even seq
     struct.pack_into("<q", buf, 8, 2)
     struct.pack_into("<q", buf, 0, seq + 2)
     reader.join(timeout=3.0)
@@ -96,8 +97,8 @@ def test_seqlock_reader_never_returns_a_torn_slot() -> None:
 
 
 def test_shed_on_a_sibling_stuck_slot_counts_as_a_rejection() -> None:
-    # the client received a rejection, so /health must count it: the own slot
-    # is intact even though a sibling's writer died mid-write
+    # Note (Jiaxin Deng): the client received a rejection, so /health must count it: the
+    # own slot is intact even though a sibling's writer died mid-write
     buf = _buf(2)
     stuck = SlotCodec(buf, 0)
     stuck.write(
@@ -114,10 +115,10 @@ def test_shed_on_a_sibling_stuck_slot_counts_as_a_rejection() -> None:
 def test_unstable_sibling_is_cached_not_respun_on_every_request(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # a DP killed mid-write leaves its slot odd until the supervisor reclaims
-    # it (up to one poll interval); every request in that window must shed
-    # without re-spinning the seqlock budget and without its own log line,
-    # while still being counted, and must admit again once the slot is healed
+    # Note (Jiaxin Deng): a DP killed mid-write leaves its slot odd until the supervisor
+    # reclaims it (up to one poll interval); every request in that window must shed
+    # without re-spinning the seqlock budget and without its own log line, while still
+    # being counted, and must admit again once the slot is healed
     import logging
 
     import sglang_omni_router.admission_shm as shm
@@ -159,7 +160,8 @@ def test_unstable_sibling_is_cached_not_respun_on_every_request(
         assert len(unstable_logs) == 1  # one transition, not one per request
         assert SlotCodec(buf, 1).read(fail_fast=True).rejected_total == burst
 
-        # supervisor reclaims the dead slot: service resumes on the next probe
+        # Note (Jiaxin Deng): supervisor reclaims the dead slot: service resumes on the
+        # next probe
         SlotCodec(buf, 0).reclaim(now=0.0)
         now[0] += 1.0
         assert b.try_acquire() is True
@@ -169,8 +171,9 @@ def test_unstable_sibling_is_cached_not_respun_on_every_request(
 def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # a DP killed mid-write leaves its slot odd until reclaim; event-loop
-    # aggregate readers must fail fast (spin, never sleep) instead of blocking.
+    # Note (Jiaxin Deng): a DP killed mid-write leaves its slot odd until reclaim;
+    # event-loop aggregate readers must fail fast (spin, never sleep) instead of
+    # blocking.
     import sglang_omni_router.admission_shm as shm
 
     sleeps: list[float] = []
@@ -189,7 +192,7 @@ def test_cp_aggregate_reads_fail_fast_and_never_block_the_event_loop(
         view.per_slot()
     with pytest.raises(shm.SeqlockUnstableError):
         view.to_dict(4)
-    # the DP-side aggregate read (DP /health) must be fail-fast too
+    # Note (Jiaxin Deng): the DP-side aggregate read (DP /health) must be fail-fast too
     admission = _admission(buf, 1)
     with pytest.raises(shm.SeqlockUnstableError):
         admission.to_dict()
@@ -202,7 +205,8 @@ def test_fenced_process_cannot_acquire_or_release() -> None:
     a = _admission(buf, 0, on_fenced=lambda: fenced.append(True))
     assert a.try_acquire() is True
 
-    # supervisor reclaims the slot (only ever after reaping the owner)
+    # Note (Jiaxin Deng): supervisor reclaims the slot (only ever after reaping the
+    # owner)
     SlotCodec(buf, 0).reclaim(now=0.0)
 
     assert a.try_acquire() is False
@@ -211,7 +215,7 @@ def test_fenced_process_cannot_acquire_or_release() -> None:
     view = SlotCodec(buf, 0).read()
     assert view.generation == 0
     assert view.inflight == 0
-    # fence rejections are not admission rejections
+    # Note (Jiaxin Deng): fence rejections are not admission rejections
     assert AdmissionAggregateView(buf, 3).to_dict(4)["rejected_total"] == 0
 
 
@@ -249,8 +253,8 @@ def test_to_dict_matches_the_single_process_surface() -> None:
 
 
 def test_release_below_zero_is_clamped_not_asserted() -> None:
-    # not an assert (stripped under python -O): a stray release is clamped
-    # and logged, never driving the shared in-flight count negative
+    # Note (Jiaxin Deng): not an assert (stripped under python -O): a stray release is
+    # clamped and logged, never driving the shared in-flight count negative
     buf = _buf()
     a = _admission(buf, 0)
     a.release()  # no in-flight: ignored, not fatal
@@ -270,8 +274,8 @@ def test_aggregate_view_reports_per_slot_details() -> None:
 
 
 def test_reclaim_normalizes_a_slot_left_odd_by_a_mid_write_crash() -> None:
-    # a DP that died between the two seq bumps leaves an odd seq; the
-    # supervisor's reclaim must restore an even, readable slot
+    # Note (Jiaxin Deng): a DP that died between the two seq bumps leaves an odd seq;
+    # the supervisor's reclaim must restore an even, readable slot
     buf = _buf(1)
     codec = SlotCodec(buf, 0)
     codec.write(
@@ -298,7 +302,7 @@ def test_fail_fast_read_sheds_instead_of_blocking() -> None:
 
     buf = _buf()
     a = _admission(buf, 0, bound=4)
-    # sibling slot 1 is stuck odd (its writer crashed mid-write)
+    # Note (Jiaxin Deng): sibling slot 1 is stuck odd (its writer crashed mid-write)
     seq = struct.unpack_from("<q", buf, SLOT_SIZE)[0]
     struct.pack_into("<q", buf, SLOT_SIZE, seq + 1)
 
@@ -316,7 +320,8 @@ def test_retired_slot_keeps_rejected_and_peak_across_reclaim() -> None:
     assert a.try_acquire() is True
     assert a.try_acquire() is False  # rejected_total = 1, peak = 1
 
-    # supervisor folds before reclaiming (what _fold_and_reclaim_slot does)
+    # Note (Jiaxin Deng): supervisor folds before reclaiming (what
+    # _fold_and_reclaim_slot does)
     view = SlotCodec(buf, 0).read()
     retired = SlotCodec(buf, retired_slot_index(3))
     accumulated = retired.read()
@@ -351,8 +356,9 @@ def test_platform_warning_fires_off_x86(
 
 
 def test_fold_is_atomic_across_the_two_slot_transfer() -> None:
-    # a reader between retired.write_fields and dying.reclaim must not double
-    # count: the retired slot stays mid-write (odd) across both, so it retries
+    # Note (Jiaxin Deng): a reader between retired.write_fields and dying.reclaim must
+    # not double count: the retired slot stays mid-write (odd) across both, so it
+    # retries
     from sglang_omni_router.admission_shm import (
         SeqlockUnstableError,
         retired_slot_index,
@@ -376,11 +382,11 @@ def test_fold_is_atomic_across_the_two_slot_transfer() -> None:
         pid=0,
         heartbeat_ts=0.0,
     )
-    # a reader hitting the aggregate now must not see 7 (dying) + 7 (retired)
+    # Note (Jiaxin Deng): a reader hitting the aggregate now must not see 7 (dying) + 7
+    # (retired)
     with pytest.raises(SeqlockUnstableError):
         AdmissionAggregateView(buf, 3).to_dict(10)
 
     dying.reclaim()
     retired.end_write(marker)
-    # fold complete: exactly 7, counted once
     assert AdmissionAggregateView(buf, 3).to_dict(10)["rejected_total"] == 7

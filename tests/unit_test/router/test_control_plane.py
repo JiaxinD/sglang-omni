@@ -83,8 +83,8 @@ async def test_health_checker_on_tick_fires_after_each_sweep() -> None:
 
 @pytest.mark.asyncio
 async def test_in_flight_probe_result_cannot_revive_a_dead_worker() -> None:
-    # the dead check at probe start is not enough: an operator can mark the
-    # worker dead while the HTTP probe is in flight, and the late result must
+    # Note (Jiaxin Deng): the dead check at probe start is not enough: an operator can
+    # mark the worker dead while the HTTP probe is in flight, and the late result must
     # not be applied (a success would probe it back to healthy/routable)
     config = _config()
     workers = build_workers(config.workers)
@@ -103,9 +103,9 @@ async def test_in_flight_probe_result_cannot_revive_a_dead_worker() -> None:
 
 @pytest.mark.asyncio
 async def test_stale_probe_cannot_demote_a_worker_revived_after_dead_clear() -> None:
-    # ABA: probe A starts, the operator marks the worker dead then clears it,
-    # probe B makes it healthy again, and only then does probe A fail; rechecking
-    # is_dead does not catch this because the worker is not dead any more
+    # Note (Jiaxin Deng): ABA: probe A starts, the operator marks the worker dead then
+    # clears it, probe B makes it healthy again, and only then does probe A fail;
+    # rechecking is_dead does not catch this because the worker is not dead any more
     config = _config()
     workers = build_workers(config.workers)
     worker = workers[0]
@@ -172,7 +172,8 @@ def test_cp_publishes_snapshot_on_startup_and_crud(tmp_path: Path) -> None:
         assert client.delete(f"/workers/{worker_id}").status_code == 200
         after_delete = _read_snapshot(snapshot_path)
         assert [w.url for w in after_delete.workers] == ["http://worker-a:8101"]
-    # The supervisor owns cleanup; the CP leaves this state for crash recovery.
+    # Note (Jiaxin Deng): The supervisor owns cleanup; the CP leaves this state for
+    # crash recovery.
     assert Path(snapshot_path).exists()
 
 
@@ -220,8 +221,8 @@ def test_cp_restart_recovers_worker_crud(tmp_path: Path) -> None:
 def test_cp_journal_lands_in_the_configured_state_dir_not_the_workdir(
     tmp_path: Path,
 ) -> None:
-    # the CP owns the journal at N >= 2; it must resolve the durable state
-    # directory rather than the per-run workdir the supervisor tears down
+    # Note (Jiaxin Deng): the CP owns the journal at N >= 2; it must resolve the durable
+    # state directory rather than the per-run workdir the supervisor tears down
     state_dir = tmp_path / "persistent"
     workdir = tmp_path / "run-1"
     workdir.mkdir()
@@ -269,8 +270,8 @@ def test_worker_failure_report_evicts_at_threshold_and_republishes(
 def test_repeat_failures_on_an_unhealthy_worker_do_not_republish(
     tmp_path: Path,
 ) -> None:
-    # only a snapshot-visible transition republishes; a counter increment on
-    # an already-unhealthy worker must not serialize a snapshot per failure
+    # Note (Jiaxin Deng): only a snapshot-visible transition republishes; a counter
+    # increment on an already-unhealthy worker must not serialize a snapshot per failure
     app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
     with TestClient(app) as client:
         snapshot = _read_snapshot(snapshot_path)
@@ -318,7 +319,7 @@ def test_weight_update_waits_for_dp_ack_then_broadcasts(tmp_path: Path) -> None:
         client.post(
             "/internal/register", json={"dp_index": 0, "generation": 1, "pid": 1}
         )
-        # ack everything the CP will ever publish in this test
+        # Note (Jiaxin Deng): ack everything the CP will ever publish in this test
         client.post(
             "/internal/heartbeat",
             json={
@@ -358,7 +359,6 @@ def test_weight_update_fails_closed_when_a_live_dp_never_acks(
         response = client.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 503
         assert "aborted" in response.json()["error"]["message"]
-        # no broadcast was sent and the disable flip was fully restored
         assert "/update_weights_from_disk" not in upstream.calls
         workers = client.get("/workers").json()["workers"]
         assert all(worker["disabled"] is False for worker in workers)
@@ -368,8 +368,8 @@ def test_weight_update_fails_closed_when_a_live_dp_never_acks(
 def test_a_registered_dp_gone_silent_holds_the_barrier_without_an_expected_count(
     tmp_path: Path,
 ) -> None:
-    # no supervisor-provided fleet size: a registered-then-silent DP may
-    # still serve from a stale snapshot, so it must hold the barrier closed.
+    # Note (Jiaxin Deng): no supervisor-provided fleet size: a registered-then-silent DP
+    # may still serve from a stale snapshot, so it must hold the barrier closed.
     upstream = _Upstream()
     app, snapshot_path, _ = _cp_app(
         tmp_path, upstream=upstream, dp_ack_timeout_secs=0.2, dp_liveness_secs=5.0
@@ -420,7 +420,8 @@ def test_cp_aggregates_dp_counters_into_worker_listings(tmp_path: Path) -> None:
                 ],
             }
 
-        # first contact = baseline; growth after it is what gets displayed
+        # Note (Jiaxin Deng): first contact = baseline; growth after it is what gets
+        # displayed
         assert (
             client.post("/internal/counters", json=_report(1, 0, 0, 0, 0)).status_code
             == 200
@@ -436,15 +437,16 @@ def test_cp_aggregates_dp_counters_into_worker_listings(tmp_path: Path) -> None:
         assert listed["failed_requests"] == 1
         assert listed["active_requests"] == 2
 
-        # the detail endpoint carries the same DP-counter overlay: the
-        # CP-local worker object never handles data traffic
+        # Note (Jiaxin Deng): the detail endpoint carries the same DP-counter overlay:
+        # the CP-local worker object never handles data traffic
         detail = client.get(f"/workers/{worker_id}").json()
         assert detail["routed_requests"] == 7
         assert detail["successful_requests"] == 6
         assert detail["failed_requests"] == 1
         assert detail["active_requests"] == 2
 
-        # stale generation is fenced with 409 (pydantic bound: use gen >= 1)
+        # Note (Jiaxin Deng): stale generation is fenced with 409 (pydantic bound: use
+        # gen >= 1)
         stale = {**_report(9, 9, 9, 0, 0), "generation": 1}
         client.post(
             "/internal/counters", json={**_report(1, 1, 1, 0, 0), "generation": 2}
@@ -470,8 +472,8 @@ def _ack_everything(client, dp_index: int = 0) -> None:
 
 
 def test_a_stale_epoch_seq_cannot_acknowledge_the_barrier(tmp_path: Path) -> None:
-    # cross-epoch aliasing: seq 10_000 from a PREVIOUS CP's numbering must
-    # not satisfy this CP's barrier
+    # Note (Jiaxin Deng): cross-epoch aliasing: seq 10_000 from a PREVIOUS CP's
+    # numbering must not satisfy this CP's barrier
     upstream = _Upstream()
     app, _, _ = _cp_app(tmp_path, upstream=upstream, dp_ack_timeout_secs=0.2)
     with TestClient(app) as client:
@@ -496,8 +498,8 @@ def test_a_stale_epoch_seq_cannot_acknowledge_the_barrier(tmp_path: Path) -> Non
 def test_barrier_fails_closed_while_an_expected_dp_is_absent(
     tmp_path: Path,
 ) -> None:
-    # a serving DP the CP has not heard from (e.g. right after a CP restart)
-    # is not an implicit ACK
+    # Note (Jiaxin Deng): a serving DP the CP has not heard from (e.g. right after a CP
+    # restart) is not an implicit ACK
     upstream = _Upstream()
     app, _, _ = _cp_app(
         tmp_path,
@@ -556,13 +558,13 @@ def test_cp_health_reports_degraded_and_unhealthy_dp_states(
 ) -> None:
     app, _, _ = _cp_app(tmp_path, expected_data_planes=2)
     with TestClient(app) as client:
-        # no DP has registered: nothing can serve -> 503
+        # Note (Jiaxin Deng): no DP has registered: nothing can serve -> 503
         response = client.get("/health")
         assert response.status_code == 503
         assert response.json()["status"] == "unhealthy"
 
-        # registered but never applied THIS epoch's snapshot: still not
-        # serving-ready (it would shed as snapshot_stale)
+        # Note (Jiaxin Deng): registered but never applied THIS epoch's snapshot: still
+        # not serving-ready (it would shed as snapshot_stale)
         client.post(
             "/internal/register", json={"dp_index": 0, "generation": 1, "pid": 1}
         )
@@ -571,7 +573,7 @@ def test_cp_health_reports_degraded_and_unhealthy_dp_states(
         assert response.json()["status"] == "unhealthy"
         assert response.json()["missing_data_planes"] == [0, 1]
 
-        # one of two DPs serving-ready: degraded -> 200
+        # Note (Jiaxin Deng): one of two DPs serving-ready: degraded -> 200
         _ready_heartbeat(client, 0, 1)
         response = client.get("/health")
         assert response.status_code == 200
@@ -579,13 +581,14 @@ def test_cp_health_reports_degraded_and_unhealthy_dp_states(
         assert response.json()["serving_ready_data_planes"] == 1
         assert response.json()["missing_data_planes"] == [1]
 
-        # full roster -> healthy
+        # Note (Jiaxin Deng): full roster -> healthy
         _ready_heartbeat(client, 1, 2)
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 
-        # identity, not cardinality: an unexpected index does not fill a hole
+        # Note (Jiaxin Deng): identity, not cardinality: an unexpected index does not
+        # fill a hole
         _ready_heartbeat(client, 99, 3)
         payload = client.get("/health").json()
         assert payload["status"] == "healthy"
@@ -616,8 +619,8 @@ def test_cp_health_aggregates_the_admission_shm(tmp_path: Path) -> None:
             )
             payload = client.get("/health").json()
             assert payload["admission"]["inflight"] == 1
-            # the CP reports the bound from ITS config (same source as the
-            # DPs in production); the slot array only carries the counts
+            # Note (Jiaxin Deng): the CP reports the bound from ITS config (same source
+            # as the DPs in production); the slot array only carries the counts
             assert payload["admission"]["max_inflight"] == 128
             assert payload["admission_slots"][0]["generation"] == 1
             assert payload["admission_slots"][1]["generation"] == 0
@@ -637,9 +640,10 @@ def _failure(worker_id: str, *, seq: int, dp: int = 0, generation: int = 1) -> d
 def test_replacement_generation_report_racing_its_register_is_not_fenced(
     tmp_path: Path,
 ) -> None:
-    # a replacement DP's counter flush can land before its /internal/register
-    # (the loops are concurrent): a 409 would make the valid new process treat
-    # itself as fenced and exit; only an OLDER generation is provably stale
+    # Note (Jiaxin Deng): a replacement DP's counter flush can land before its
+    # /internal/register (the loops are concurrent): a 409 would make the valid new
+    # process treat itself as fenced and exit; only an OLDER generation is provably
+    # stale
     app, snapshot_path, _ = _cp_app(tmp_path)
     with TestClient(app) as client:
         client.post(
@@ -658,10 +662,10 @@ def test_replacement_generation_report_racing_its_register_is_not_fenced(
 
 
 def test_late_failure_report_cannot_revive_a_dead_worker(tmp_path: Path) -> None:
-    # PUT is_dead=true, then a delayed in-flight failure report arrives: it
-    # must not demote dead to unhealthy (which the health prober would then
-    # probe back to healthy/routable). The event is consumed by the dedup
-    # first, so a retry cannot apply it after a later explicit clear-dead.
+    # Note (Jiaxin Deng): PUT is_dead=true, then a delayed in-flight failure report
+    # arrives: it must not demote dead to unhealthy (which the health prober would then
+    # probe back to healthy/routable). The event is consumed by the dedup first, so a
+    # retry cannot apply it after a later explicit clear-dead.
     app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
     with TestClient(app) as client:
         snapshot = _read_snapshot(snapshot_path)
@@ -680,7 +684,8 @@ def test_late_failure_report_cannot_revive_a_dead_worker(tmp_path: Path) -> None
         listed = client.get("/workers").json()["workers"][0]
         assert listed["health_state"] == "dead"
 
-        # operator clears dead: a RETRY of the consumed event still cannot apply
+        # Note (Jiaxin Deng): operator clears dead: a RETRY of the consumed event still
+        # cannot apply
         assert (
             client.put(f"/workers/{worker_id}", json={"is_dead": False}).status_code
             == 200
@@ -692,8 +697,8 @@ def test_late_failure_report_cannot_revive_a_dead_worker(tmp_path: Path) -> None
 
 
 def test_redelivered_failure_events_are_counted_once(tmp_path: Path) -> None:
-    # a retry of one failure (same failure_seq) must not push a healthy
-    # worker over the eviction threshold
+    # Note (Jiaxin Deng): a retry of one failure (same failure_seq) must not push a
+    # healthy worker over the eviction threshold
     app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=2)
     with TestClient(app) as client:
         worker_id = _read_snapshot(snapshot_path).workers[0].worker_id
@@ -707,7 +712,8 @@ def test_redelivered_failure_events_are_counted_once(tmp_path: Path) -> None:
         workers = client.get("/workers").json()["workers"]
         assert workers[0]["health_state"] != "unhealthy"
 
-        # a genuinely distinct second event does evict at threshold 2
+        # Note (Jiaxin Deng): a genuinely distinct second event does evict at threshold
+        # 2
         client.post("/internal/worker_failure", json=_failure(worker_id, seq=2))
         workers = client.get("/workers").json()["workers"]
         assert workers[0]["health_state"] == "unhealthy"
@@ -718,7 +724,8 @@ def test_cp_restart_recovers_an_unresolved_update_fail_closed(
 ) -> None:
     from sglang_omni_router.update_journal import UpdateJournal
 
-    # a previous CP died mid-broadcast: its journal survives in the workdir
+    # Note (Jiaxin Deng): a previous CP died mid-broadcast: its journal survives in the
+    # workdir
     snapshot_path = str(tmp_path / "workers.json")
     journal_path = str(tmp_path / "update_journal.json")
     journal = UpdateJournal(journal_path)
@@ -735,19 +742,21 @@ def test_cp_restart_recovers_an_unresolved_update_fail_closed(
         journal_path=journal_path,
     )
     with TestClient(app) as tc:
-        # the journaled target is kept disabled (fail closed), even though a
-        # fresh registry plus healthy probes would have re-enabled it
+        # Note (Jiaxin Deng): the journaled target is kept disabled (fail closed), even
+        # though a fresh registry plus healthy probes would have re-enabled it
         snapshot = _read_snapshot(snapshot_path)
         assert snapshot.workers[0].disabled is True
         assert snapshot.workers[0].routable is False
 
-        # a retry of the update is rejected while the journal is unresolved
+        # Note (Jiaxin Deng): a retry of the update is rejected while the journal is
+        # unresolved
         response = tc.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 409
         assert "did not complete" in response.json()["error"]["message"]
         assert "/update_weights_from_disk" not in upstream.calls
 
-        # operator verified the weights: re-enable resolves the journal
+        # Note (Jiaxin Deng): operator verified the weights: re-enable resolves the
+        # journal
         assert (
             tc.put(f"/workers/{worker_id}", json={"disabled": False}).status_code == 200
         )
@@ -773,8 +782,8 @@ def test_a_completed_update_leaves_no_journal(tmp_path: Path) -> None:
 def test_stale_incarnation_failures_cannot_evict_a_readded_worker(
     tmp_path: Path,
 ) -> None:
-    # ABA: a request routed through incarnation A fails after the URL was
-    # deleted and re-added as incarnation B; the old report must not act on B
+    # Note (Jiaxin Deng): ABA: a request routed through incarnation A fails after the
+    # URL was deleted and re-added as incarnation B; the old report must not act on B
     app, snapshot_path, _ = _cp_app(tmp_path, failure_threshold=1)
     with TestClient(app) as client:
         worker_id = _read_snapshot(snapshot_path).workers[0].worker_id
@@ -835,23 +844,24 @@ def test_health_excludes_non_serving_and_slot_mismatched_dps(
 
     with open(shm_path, "r+b") as f:
         buf = mmap_module.mmap(f.fileno(), 0)
-        # slot 0 claimed by generation 1; slot 1 never claimed (crashed
-        # before its replacement registered)
+        # Note (Jiaxin Deng): slot 0 claimed by generation 1; slot 1 never claimed
+        # (crashed before its replacement registered)
         SharedAdmission(buf, slots=2, own_index=0, max_inflight=8, generation=1, pid=11)
         app, _, _ = _cp_app(
             tmp_path, expected_data_planes=2, admission_shm_path=shm_path
         )
         with TestClient(app) as client:
             _ready_heartbeat(client, 0, 11)
-            # dp1's record claims generation 1 but its slot is unclaimed:
-            # it must not count as serving (the process is gone)
+            # Note (Jiaxin Deng): dp1's record claims generation 1 but its slot is
+            # unclaimed: it must not count as serving (the process is gone)
             _ready_heartbeat(client, 1, 12)
             payload = client.get("/health").json()
             assert payload["serving_ready_data_planes"] == 1
             assert payload["missing_data_planes"] == [1]
             assert payload["status"] == "degraded"
 
-            # a DP that self-reports not-serving (snapshot_stale) drops out
+            # Note (Jiaxin Deng): a DP that self-reports not-serving (snapshot_stale)
+            # drops out
             client.post(
                 "/internal/heartbeat",
                 json={
@@ -870,8 +880,8 @@ def test_health_excludes_non_serving_and_slot_mismatched_dps(
 
 
 def test_broadcast_crash_keeps_targets_disabled_and_journaled(tmp_path: Path) -> None:
-    # results=None (broadcast started, outcome unknown) must keep ALL targets
-    # disabled and journaled - not only for init_weights_update_group
+    # Note (Jiaxin Deng): results=None (broadcast started, outcome unknown) must keep
+    # ALL targets disabled and journaled - not only for init_weights_update_group
     from sglang_omni_router.app import _restore_admin_disabled_state
     from sglang_omni_router.worker import build_workers
 
@@ -889,8 +899,8 @@ def test_broadcast_crash_keeps_targets_disabled_and_journaled(tmp_path: Path) ->
 def test_completed_update_restores_a_previously_disabled_worker_without_journal(
     tmp_path: Path,
 ) -> None:
-    # a worker disabled BEFORE the update must not be left journaled after a
-    # clean completion (else every future update wedges on the 409 gate)
+    # Note (Jiaxin Deng): a worker disabled BEFORE the update must not be left journaled
+    # after a clean completion (else every future update wedges on the 409 gate)
     upstream = _Upstream()
     journal_path = str(tmp_path / "j.json")
     app, snapshot_path, _ = _cp_app(
@@ -905,7 +915,6 @@ def test_completed_update_restores_a_previously_disabled_worker_without_journal(
             client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
             == 200
         )
-        # journal cleared, pre-disabled worker still disabled, updates not wedged
         assert not Path(journal_path).exists()
         assert (
             client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
@@ -916,10 +925,10 @@ def test_completed_update_restores_a_previously_disabled_worker_without_journal(
 def test_recovery_keeps_absent_journaled_workers_as_tombstones(
     tmp_path: Path,
 ) -> None:
-    # a journaled id absent from the registry (dynamic worker after a full
-    # restart) must survive recovery as a tombstone: dropping it would erase
-    # the only evidence its update partially applied, and a later
-    # re-registration of the same stable id would serve mixed weights
+    # Note (Jiaxin Deng): a journaled id absent from the registry (dynamic worker after
+    # a full restart) must survive recovery as a tombstone: dropping it would erase the
+    # only evidence its update partially applied, and a later re-registration of the
+    # same stable id would serve mixed weights
     from sglang_omni_router.update_journal import UpdateJournal
 
     journal_path = str(tmp_path / "j.json")
@@ -963,8 +972,8 @@ def test_re_enabling_a_journaled_worker_requires_admin_auth(tmp_path: Path) -> N
         admin_api_key="secret-key",
     )
     with TestClient(app) as client:
-        # discarding a journal entry via re-enable is admin-sensitive even
-        # though ordinary worker CRUD is not
+        # Note (Jiaxin Deng): discarding a journal entry via re-enable is admin-
+        # sensitive even though ordinary worker CRUD is not
         assert (
             client.put(f"/workers/{worker_id}", json={"disabled": False}).status_code
             == 401
@@ -995,7 +1004,8 @@ def test_health_reports_admission_error_instead_of_500_when_shm_unstable(
     with open(shm_path, "r+b") as f:
         buf = mmap_module.mmap(f.fileno(), 0)
         SharedAdmission(buf, slots=2, own_index=0, max_inflight=8, generation=1, pid=11)
-        # wedge the retired slot mid-write (a fold that never completes)
+        # Note (Jiaxin Deng): wedge the retired slot mid-write (a fold that never
+        # completes)
         from sglang_omni_router.admission_shm import SlotCodec
 
         SlotCodec(buf, retired_slot_index(2)).begin_write()

@@ -63,7 +63,6 @@ LOG_LEVEL_ENV = "SGLANG_OMNI_ROUTER_LOG_LEVEL"
 
 _LISTEN_BACKLOG = 2048
 _SHUTDOWN_GRACE_SECS = 10.0
-# Bound on how long a child's uvicorn may drain in-flight requests on SIGTERM.
 CHILD_GRACEFUL_SHUTDOWN_SECS = 5
 # Note (Jiaxin Deng): a dead supervisor cannot escalate, so the child arms its
 # own hard exit; twice the drain bound leaves the graceful path room to win.

@@ -82,8 +82,8 @@ def _wait_for(predicate, timeout: float = 3.0):
 def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
     tmp_path: Path,
 ) -> None:
-    # changing only --router-processes must not break generated clients: the
-    # forwarded admin routes keep the single-process operation ids and the
+    # Note (Jiaxin Deng): changing only --router-processes must not break generated
+    # clients: the forwarded admin routes keep the single-process operation ids and the
     # worker_id path parameter name
     from sglang_omni_router.app import create_app
 
@@ -113,15 +113,16 @@ def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
         ids = [op for op in ops.values() if op]
         return {op for op in ids if ids.count(op) > 1}
 
-    # the split must not introduce a collision the single-process schema does
-    # not already have (/weights_checker shares one id in both, pre-existing)
+    # Note (Jiaxin Deng): the split must not introduce a collision the single-process
+    # schema does not already have (/weights_checker shares one id in both, pre-
+    # existing)
     assert _duplicates(dp_ops) <= _duplicates(single_ops)
 
 
 def test_replaced_incarnation_stays_reportable_until_its_request_drains() -> None:
-    # DELETE then re-add of the same URL replaces the Worker object; a request
-    # still running on the old one records its completion there, so the retired
-    # object must keep reaching the CP ledger until it drains
+    # Note (Jiaxin Deng): DELETE then re-add of the same URL replaces the Worker object;
+    # a request still running on the old one records its completion there, so the
+    # retired object must keep reaching the CP ledger until it drains
     view = DataPlaneWorkerView()
 
     class _First:
@@ -225,11 +226,11 @@ def test_dp_sheds_when_the_snapshot_goes_stale_and_recovers(
         _snapshot(writer, _entry())
         _wait_for(lambda: client.get("/ready").status_code == 200)
 
-        # CP goes silent: past max age new requests are shed
+        # Note (Jiaxin Deng): CP goes silent: past max age new requests are shed
         _wait_for(lambda: client.post("/generate", json={}).status_code == 503)
         assert client.get("/ready").json()["reason"] == "snapshot_stale"
 
-        # CP comes back: one republish restores service
+        # Note (Jiaxin Deng): CP comes back: one republish restores service
         _snapshot(writer, _entry())
         _wait_for(lambda: client.post("/generate", json={}).status_code == 200)
 
@@ -261,7 +262,8 @@ def test_dp_reports_eviction_relevant_failures_to_the_cp(tmp_path: Path) -> None
                 if path == "/internal/worker_failure"
             ]
 
-        # every distinct failure is reported: the CP threshold counts events
+        # Note (Jiaxin Deng): every distinct failure is reported: the CP threshold
+        # counts events
         reports = _wait_for(lambda: _reports() if len(_reports()) >= 2 else None)
         assert len(reports) == 2
         assert all(
@@ -270,9 +272,9 @@ def test_dp_reports_eviction_relevant_failures_to_the_cp(tmp_path: Path) -> None
 
 
 def test_dp_leaves_the_failure_verdict_to_the_cp(tmp_path: Path) -> None:
-    # the CP owns the health verdict: a snapshot carries state but never
-    # resets a DP-local consecutive_failures, so a DP that counted failures
-    # too would evict a worker the CP still counts as healthy
+    # Note (Jiaxin Deng): the CP owns the health verdict: a snapshot carries state but
+    # never resets a DP-local consecutive_failures, so a DP that counted failures too
+    # would evict a worker the CP still counts as healthy
     upstream = _Recorder(status_for={"/generate": 502})
     internal = _Recorder()
     app, snapshot_path = _dp_app(
@@ -287,16 +289,16 @@ def test_dp_leaves_the_failure_verdict_to_the_cp(tmp_path: Path) -> None:
         for _ in range(2):
             assert client.post("/generate", json={}).status_code == 502
 
-        # the CP's own health probe succeeded: it reset its counter and
-        # republished the worker healthy
+        # Note (Jiaxin Deng): the CP's own health probe succeeded: it reset its counter
+        # and republished the worker healthy
         seq = _snapshot(writer, _entry(state="healthy")).seq
         _wait_for(lambda: view.last_applied_seq == seq)
 
         assert client.post("/generate", json={}).status_code == 502
         assert view.workers()[0].consecutive_failures == 0
 
-        # the CP has counted one failure of three, so this worker is still
-        # routable; a DP-local count would have evicted it here
+        # Note (Jiaxin Deng): the CP has counted one failure of three, so this worker is
+        # still routable; a DP-local count would have evicted it here
         upstream.status_for = {}
         assert client.post("/generate", json={}).status_code == 200
 
@@ -424,14 +426,15 @@ def test_dp_forwards_admin_and_health_routes_to_the_cp_with_fidelity(
         assert cp.requests[-1].method == "GET"
 
         assert tc.delete("/workers/some%2Fid").status_code == 418
-        # raw_path is the wire form; percent-encoding must survive the hop
+        # Note (Jiaxin Deng): raw_path is the wire form; percent-encoding must survive
+        # the hop
         assert cp.requests[-1].url.raw_path == b"/workers/some%2Fid"
 
 
 def test_dp_strips_hop_by_hop_headers_when_forwarding_to_the_cp(
     tmp_path: Path,
 ) -> None:
-    # the DP re-frames the body as fixed-length bytes, so a client
+    # Note (Jiaxin Deng): the DP re-frames the body as fixed-length bytes, so a client
     # Transfer-Encoding must not ride along (smuggling ambiguity at the CP)
     cp = _CPRecorder(status=200)
     app = _dp_app_forwarding_to_cp(tmp_path, cp)
@@ -454,7 +457,8 @@ def test_dp_strips_hop_by_hop_headers_when_forwarding_to_the_cp(
         assert "te" not in forwarded_keys
         assert "upgrade" not in forwarded_keys
         assert "proxy-connection" not in forwarded_keys
-        # a non-hop-by-hop header (the admin key the CP re-checks) is preserved
+        # Note (Jiaxin Deng): a non-hop-by-hop header (the admin key the CP re-checks)
+        # is preserved
         assert forwarded.headers["authorization"] == "Bearer k"
 
 
@@ -552,7 +556,8 @@ def test_failure_reports_retry_with_a_bound_then_give_up(tmp_path: Path) -> None
         _snapshot(writer, _entry())
         _wait_for(lambda: client.get("/ready").status_code == 200)
         assert client.post("/generate", json={}).status_code == 502
-        # two transport failures, then the bounded third attempt lands
+        # Note (Jiaxin Deng): two transport failures, then the bounded third attempt
+        # lands
         _wait_for(
             lambda: any(
                 path == "/internal/worker_failure" for path, _ in internal.requests
@@ -582,7 +587,8 @@ def test_dp_reregisters_on_428_instead_of_fencing(tmp_path: Path) -> None:
                 pid = jsonlib.loads(request.content)["pid"]
                 if pid not in self.registered_pids:
                     return httpx.Response(428, json={"detail": "register first"})
-                # simulate the CP forgetting us once, after the first beat
+                # Note (Jiaxin Deng): simulate the CP forgetting us once, after the
+                # first beat
                 self.registered_pids.discard(pid)
                 return httpx.Response(200, json={"status": "ok"})
             return httpx.Response(200, json={"status": "ok"})
@@ -593,8 +599,8 @@ def test_dp_reregisters_on_428_instead_of_fencing(tmp_path: Path) -> None:
         tmp_path, upstream, internal=internal, on_fenced=lambda: fenced.append(True)
     )
     with TestClient(app):
-        # register -> heartbeat(200, then forgotten) -> heartbeat(428)
-        # -> register again: at least two registrations, and never fenced
+        # Note (Jiaxin Deng): register -> heartbeat(200, then forgotten) ->
+        # heartbeat(428) -> register again: at least two registrations, and never fenced
         _wait_for(
             lambda: sum(
                 1 for path, _ in internal.requests if path == "/internal/register"
@@ -651,9 +657,7 @@ def test_forwarded_admin_bodies_are_bounded_before_buffering(
         response = tc.post("/update_weights_from_disk", content=big)
         assert response.status_code == 413
         assert response.json()["error"]["type"] == "payload_too_large"
-        # nothing was buffered onward: the CP never saw the request
         assert all(path != "/update_weights_from_disk" for path, _ in internal.requests)
-        # small bodies still forward
         assert tc.post("/update_weights_from_disk", content=b"ok").status_code == 200
 
 
@@ -682,7 +686,8 @@ def test_dp_client_limits_split_keepalives_across_processes() -> None:
         max_connections=100,
     )
     limits = dp_client_limits(config, total_data_planes=4)
-    # full pool per DP (skew tolerance), keepalives split (idle-fd budget)
+    # Note (Jiaxin Deng): full pool per DP (skew tolerance), keepalives split (idle-fd
+    # budget)
     assert limits.max_connections == config.upstream_pool_size
     assert limits.max_keepalive_connections == 25
     single = dp_client_limits(config, total_data_planes=1)
@@ -717,7 +722,8 @@ def test_dp_uses_the_injected_shared_admission(tmp_path: Path) -> None:
         _snapshot(writer, _entry())
         _wait_for(lambda: tc.get("/ready").status_code == 200)
         response = tc.post("/generate", json={})
-        # the sibling's in-flight fills the GLOBAL bound: this DP sheds
+        # Note (Jiaxin Deng): the sibling's in-flight fills the GLOBAL bound: this DP
+        # sheds
         assert response.status_code == 503
         assert response.json()["error"]["type"] == "overloaded_error"
 
@@ -746,8 +752,8 @@ def test_selector_rr_offset_staggers_first_picks() -> None:
 
 
 def test_dp_relays_sse_byte_identically(tmp_path: Path) -> None:
-    # the DP app must relay an event stream byte-for-byte through the
-    # snapshot-fed relay path
+    # Note (Jiaxin Deng): the DP app must relay an event stream byte-for-byte through
+    # the snapshot-fed relay path
     chunks = [
         b'data: {"choices": [{"delta": {"content": "he"}}]}\n\n',
         b'data: {"choices": [{"delta": {"audio": {"data": "AAAA"}}}]}\n\n',
@@ -789,8 +795,8 @@ def test_dp_relays_sse_byte_identically(tmp_path: Path) -> None:
 
 
 def test_incarnation_change_replaces_the_worker_object() -> None:
-    # a new incarnation must yield a FRESH Worker object, so an in-flight
-    # request holding the old one cannot misattribute a late failure (ABA)
+    # Note (Jiaxin Deng): a new incarnation must yield a FRESH Worker object, so an in-
+    # flight request holding the old one cannot misattribute a late failure (ABA)
     view = DataPlaneWorkerView()
 
     class _Snap:
@@ -839,8 +845,8 @@ def test_incarnation_unchanged_preserves_the_worker_object_and_counters() -> Non
 
 
 def test_dp_does_not_report_non_gateway_failures_to_the_cp(tmp_path: Path) -> None:
-    # eviction is gateway-only (502/504): a 503 is a per-request failure,
-    # not an eviction signal, so it must not fire a worker_failure report
+    # Note (Jiaxin Deng): eviction is gateway-only (502/504): a 503 is a per-request
+    # failure, not an eviction signal, so it must not fire a worker_failure report
     import time as _time
 
     upstream = _Recorder(status_for={"/generate": 503})
