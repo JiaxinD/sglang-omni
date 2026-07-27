@@ -145,10 +145,12 @@ def create_control_plane_app(
     writer = SnapshotWriter(snapshot_path, cp_epoch)
     internal_state = InternalChannelState()
     ledger = DataPlaneCounterLedger()
-    # Note (Jiaxin Deng): a stable path (keyed by host:port); the journal must
-    # survive a full supervisor restart, not just a CP respawn.
+    # Note (Jiaxin Deng): a durable path (keyed by host:port) outside the
+    # per-run workdir; the journal must survive a host reboot, not just a CP
+    # respawn, because the remote workers do.
     journal = UpdateJournal(
-        journal_path or default_journal_path(config.host, config.port)
+        journal_path
+        or default_journal_path(config.host, config.port, config.router_state_dir)
     )
 
     admission_view: AdmissionAggregateView | None = None

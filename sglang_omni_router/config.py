@@ -142,6 +142,7 @@ class RouterConfig(BaseModel):
     health_check_timeout_secs: int = 5
     health_check_interval_secs: int = 10
     health_check_endpoint: str = "/health"
+    router_state_dir: str | None = None
 
     @field_validator("port")
     @classmethod
@@ -244,6 +245,7 @@ def build_router_config(
     health_check_timeout_secs: int = 5,
     health_check_interval_secs: int = 10,
     health_check_endpoint: str = "/health",
+    router_state_dir: str | None = None,
 ) -> RouterConfig:
     if workers is not None and worker_urls:
         raise ValueError("worker_urls and workers cannot both be provided")
@@ -267,6 +269,7 @@ def build_router_config(
         health_check_timeout_secs=health_check_timeout_secs,
         health_check_interval_secs=health_check_interval_secs,
         health_check_endpoint=health_check_endpoint,
+        router_state_dir=router_state_dir,
     )
 
 

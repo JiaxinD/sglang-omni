@@ -195,6 +195,7 @@ The table below lists the router command-line arguments.
 | `--health-check-timeout-secs` | `5` | Timeout for one worker health-check request. |
 | `--health-check-interval-secs` | `10` | Interval between background worker health checks. |
 | `--health-check-endpoint` | `/health` | Worker endpoint used by background health checks. |
+| `--router-state-dir` | `$SGLANG_OMNI_ROUTER_STATE_DIR`, else `$XDG_STATE_HOME/sglang-omni-router`, else `~/.local/state/sglang-omni-router` | Directory for [durable router state](#durable-router-state) (the weight-update journal), which must survive a host reboot. Mount it on a persistent volume in a container. |
 | `--log-level` | `info` | Router and Uvicorn log level. |
 | `--strict-limits` | off | Fail startup instead of warning when the `nofile` soft limit is too low for the resolved upstream pool size (`max(--max-connections, --max-inflight)`). |
 | `--router-processes` | `1` | Number of data-plane relay processes. `1` keeps the single-process router below; `N >= 2` enables the [multi-process router](#multi-process-router-controldata-plane-split) (Linux only, and rejected at startup together with an explicit `--policy least_request`). |
@@ -457,6 +458,47 @@ point with:
 ```bash
 python -m sglang_omni_router.serve --help
 ```
+
+## Durable Router State
+
+`--router-state-dir` holds the control-plane state that must outlive both a
+router restart and a reboot of the router host. Today that is the weight-update
+journal: when an update is interrupted after some workers were already updated,
+the journal keeps the affected workers disabled until an operator verifies
+their weight versions and re-enables them
+(`PUT /workers/{worker_id} {"disabled": false}`). Workers run on their own
+hosts and outlive the router, so losing the journal would let a fresh router
+re-enable a pool whose weights no longer match.
+
+Resolution order:
+
+1. `--router-state-dir`
+2. `SGLANG_OMNI_ROUTER_STATE_DIR`
+3. `$XDG_STATE_HOME/sglang-omni-router`
+4. `~/.local/state/sglang-omni-router`
+
+The directory is created owner-only (`0700`, journal file `0600`) and is keyed
+by the router's `host:port`, so several routers on one machine keep separate
+journals. Startup fails if the directory cannot be created or written: there is
+no temp-directory fallback, which would look durable while a reboot silently
+dropped the record.
+
+In a container, mount it on a persistent volume:
+
+```bash
+docker run -v /srv/sglang-omni-router:/var/lib/sglang-omni-router ... \
+  python -m sglang_omni_router.serve \
+    --router-state-dir /var/lib/sglang-omni-router \
+    --worker-urls http://127.0.0.1:8011
+```
+
+What this directory does **not** manage:
+
+- Per-run runtime files (serialized config, internal socket, worker snapshot,
+  admission shared memory) stay in a temporary per-run workdir. They are
+  rebuilt at startup and are meant to disappear with the process tree.
+- Logs. The router writes to stdout/stderr; persist them with your container
+  runtime, systemd, or log collector.
 
 ## Multi-Process Router (Control/Data-Plane Split)
 

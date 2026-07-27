@@ -217,6 +217,29 @@ def test_cp_restart_recovers_worker_crud(tmp_path: Path) -> None:
         assert _read_snapshot(snapshot_path).cp_epoch == "epoch-restarted"
 
 
+def test_cp_journal_lands_in_the_configured_state_dir_not_the_workdir(
+    tmp_path: Path,
+) -> None:
+    # the CP owns the journal at N >= 2; it must resolve the durable state
+    # directory rather than the per-run workdir the supervisor tears down
+    state_dir = tmp_path / "persistent"
+    workdir = tmp_path / "run-1"
+    workdir.mkdir()
+    config = _config().model_copy(update={"router_state_dir": str(state_dir)})
+
+    app = create_control_plane_app(
+        config,
+        snapshot_path=str(workdir / "workers.json"),
+        cp_epoch="epoch-1",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(_Upstream().handler)),
+    )
+
+    with TestClient(app):
+        journal_path = Path(app.state.update_journal.path)
+    assert journal_path.is_relative_to(state_dir)
+    assert not journal_path.is_relative_to(workdir)
+
+
 def test_worker_failure_report_evicts_at_threshold_and_republishes(
     tmp_path: Path,
 ) -> None:

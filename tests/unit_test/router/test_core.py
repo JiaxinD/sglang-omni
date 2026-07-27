@@ -1187,6 +1187,40 @@ def test_router_processes_rejects_non_positive(
     assert "--router-processes must be >= 1" in capsys.readouterr().err
 
 
+def test_router_state_dir_reaches_the_router_config(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--worker-urls",
+            "http://127.0.0.1:8101",
+            "--router-state-dir",
+            str(tmp_path / "state"),
+        ]
+    )
+    assert build_config_from_args(args).router_state_dir == str(tmp_path / "state")
+
+
+def test_startup_fails_closed_when_the_state_dir_is_unusable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # no temp-directory fallback: refuse to serve rather than run weight
+    # updates whose journal cannot survive a reboot
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    unusable = str(blocker / "state")
+
+    with pytest.raises(SystemExit):
+        serve_module.main(
+            [
+                "--worker-urls",
+                "http://127.0.0.1:8101",
+                "--router-state-dir",
+                unusable,
+            ]
+        )
+
+    assert unusable in capsys.readouterr().err
+
+
 def test_router_processes_multiprocess_runs_the_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -4,6 +4,8 @@ import asyncio
 import gc
 import json
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ def _router_config(
     health_failure_threshold: int = 1,
     health_check_timeout_secs: int = 5,
     worker_configs: list[WorkerConfig] | None = None,
+    router_state_dir: str | None = None,
 ) -> RouterConfig:
     return RouterConfig(
         workers=worker_configs
@@ -47,6 +50,7 @@ def _router_config(
         health_success_threshold=1,
         health_failure_threshold=health_failure_threshold,
         health_check_timeout_secs=health_check_timeout_secs,
+        router_state_dir=router_state_dir,
     )
 
 
@@ -663,6 +667,59 @@ def test_reenable_fails_when_the_journal_cannot_be_resolved(tmp_path: Path) -> N
         assert "could not be durably resolved" in response.json()["error"]["message"]
         listed = {w["url"]: w for w in client.get("/workers").json()["workers"]}
         assert listed["http://worker-a:8101"]["disabled"] is True
+
+
+def test_journal_survives_a_host_reboot_that_wipes_the_per_run_workdir(
+    tmp_path: Path,
+) -> None:
+    # remote workers outlive the router host, so an unresolved update must
+    # still be found after a reboot, not just after a process restart
+    state_dir = tmp_path / "persistent"
+    workdir = tempfile.mkdtemp(prefix="sglang-omni-router-")
+    dynamic_url = "http://worker-dyn:8103"
+    dynamic_id = worker_id_from_url(dynamic_url)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "worker"}, request=request)
+        if request.url.path == "/update_weights_from_disk":
+            success = _request_netloc(request) == "worker-a:8101"
+            return httpx.Response(
+                200 if success else 500, json={"success": success}, request=request
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = _router_config(router_state_dir=str(state_dir))
+    before = create_app(config, client=async_client)
+    with TestClient(before) as client:
+        assert client.post("/workers", json={"url": dynamic_url}).status_code == 200
+        assert (
+            client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
+            == 502
+        )
+    journal_path = Path(before.state.update_journal.path)
+    assert journal_path.is_relative_to(state_dir)
+    assert not journal_path.is_relative_to(workdir)
+
+    # the supervisor and its per-run workdir are gone; only the state dir is
+    # carried across the reboot
+    shutil.rmtree(workdir)
+    after = create_app(
+        _router_config(router_state_dir=str(state_dir)), client=async_client
+    )
+    with TestClient(after) as client:
+        listed = {w["url"]: w for w in client.get("/workers").json()["workers"]}
+        assert listed["http://worker-a:8101"]["disabled"] is True
+        assert listed["http://worker-b:8102"]["disabled"] is True
+        assert dynamic_url not in listed  # absent, kept only as a tombstone
+        assert dynamic_id in UpdateJournal(str(journal_path)).pending()
+        assert (
+            client.post("/update_weights_from_disk", json={"path": "/m"}).status_code
+            == 409
+        )
+        readded = client.post("/workers", json={"url": dynamic_url})
+        assert readded.json()["worker"]["disabled"] is True
 
 
 def test_model_info_broadcast_exposes_sglang_compatible_weight_version() -> None:

@@ -31,6 +31,11 @@ from sglang_omni_router.launcher import (
     load_launcher_config,
 )
 from sglang_omni_router.supervisor import RouterSupervisor
+from sglang_omni_router.update_journal import (
+    JournalUnwritableError,
+    ensure_state_dir,
+    resolve_state_dir,
+)
 
 logger = logging.getLogger("sglang_omni_router.serve")
 
@@ -162,6 +167,19 @@ def build_parser() -> argparse.ArgumentParser:
             "control-plane/data-plane split (Linux only)."
         ),
     )
+    parser.add_argument(
+        "--router-state-dir",
+        default=None,
+        help=(
+            "Directory for durable control-plane state (currently the "
+            "weight-update journal), which must outlive a host reboot. "
+            "Default: $SGLANG_OMNI_ROUTER_STATE_DIR, else "
+            "$XDG_STATE_HOME/sglang-omni-router, else "
+            "~/.local/state/sglang-omni-router. In a container, mount this on "
+            "a persistent volume. Per-run sockets, snapshots, and shared "
+            "memory stay in a temporary workdir."
+        ),
+    )
     parser.add_argument("--health-failure-threshold", type=int, default=3)
     parser.add_argument("--health-success-threshold", type=int, default=2)
     parser.add_argument("--health-check-timeout-secs", type=int, default=5)
@@ -244,6 +262,7 @@ def build_config_from_args(
         health_check_timeout_secs=args.health_check_timeout_secs,
         health_check_interval_secs=args.health_check_interval_secs,
         health_check_endpoint=args.health_check_endpoint,
+        router_state_dir=args.router_state_dir,
     )
 
 
@@ -288,6 +307,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             config = build_config_from_args(args)
 
         check_file_descriptor_limit(config, strict=args.strict_limits)
+        # Note (Jiaxin Deng): fail closed here rather than on the first weight
+        # update, which would discover the bad path with the pool disabled.
+        state_dir = ensure_state_dir(resolve_state_dir(config.router_state_dir))
+        logger.info(f"Router durable state directory: {state_dir}")
         if args.router_processes > 1:
             # Note (Jiaxin Deng): the children rebuild the app from the config
             # file, so the admin key and log level travel via the environment.
@@ -336,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     except (ValueError, ValidationError) as exc:
         parser.error(str(exc))
-    except (RuntimeError, TimeoutError) as exc:
+    except (RuntimeError, TimeoutError, JournalUnwritableError) as exc:
         parser.exit(1, f"error: {exc}\n")
     except KeyboardInterrupt:
         parser.exit(130)

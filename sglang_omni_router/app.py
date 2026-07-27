@@ -115,7 +115,8 @@ def create_app(
     # journal, so a crash mid-update fails closed instead of returning success
     # with the pool left disabled.
     journal = UpdateJournal(
-        journal_path or default_journal_path(config.host, config.port)
+        journal_path
+        or default_journal_path(config.host, config.port, config.router_state_dir)
     )
     timeout = httpx.Timeout(config.request_timeout_secs)
     owns_client = client is None
