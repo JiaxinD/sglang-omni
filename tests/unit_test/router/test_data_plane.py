@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -864,3 +866,50 @@ def test_dp_does_not_report_non_gateway_failures_to_the_cp(tmp_path: Path) -> No
         assert not any(
             path == "/internal/worker_failure" for path, _ in internal.requests
         )
+
+
+def test_control_traffic_survives_a_saturated_forwarding_pool(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): a forwarded admin call can sit behind the CP's update
+    # lock for minutes; sharing one pool would starve the heartbeat and ACK
+    # inside the liveness window and falsely degrade this DP.
+    control_paths: list[str] = []
+
+    async def _forward_handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1.5)
+        return httpx.Response(200, json={"status": "ok"})
+
+    def _control_handler(request: httpx.Request) -> httpx.Response:
+        control_paths.append(request.url.path)
+        return httpx.Response(200, json={"status": "ok"})
+
+    app = create_data_plane_app(
+        _config(),
+        snapshot_path=str(tmp_path / "w.json"),
+        dp_index=0,
+        generation=1,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(_Recorder().handler)),
+        internal_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_control_handler), base_url="http://cp"
+        ),
+        forward_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_forward_handler),
+            base_url="http://cp",
+            limits=httpx.Limits(max_connections=1),
+        ),
+        dp_refresh_interval_secs=0.02,
+        heartbeat_interval_secs=0.05,
+    )
+    with TestClient(app) as tc:
+        occupy = threading.Thread(
+            target=lambda: tc.post("/update_weights_from_disk", json={"path": "/m"})
+        )
+        occupy.start()
+        try:
+            beats = _wait_for(
+                lambda: (
+                    [p for p in control_paths if p == "/internal/heartbeat"] or None
+                )
+            )
+            assert len(beats) >= 1
+        finally:
+            occupy.join(timeout=15)

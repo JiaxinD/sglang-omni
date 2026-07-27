@@ -66,6 +66,8 @@ DEFAULT_DP_LIVENESS_SECS = 6.0
 # DP stale-timeout, so republish on a fixed cadence, not only on state changes.
 DEFAULT_SNAPSHOT_KEEPALIVE_SECS = 2.0
 _ACK_POLL_INTERVAL_SECS = 0.05
+_ADMISSION_HEALTH_READS = 3
+_ADMISSION_HEALTH_READ_DELAY_SECS = 0.01
 
 
 class WorkerFailureReport(BaseModel):
@@ -300,23 +302,33 @@ def create_control_plane_app(
         admission_error = None
         admission_slots = None
         if admission_view is not None:
-            try:
-                admission_slots = admission_view.per_slot(now=now)
-                slot_generations = {
-                    slot["index"]: slot["generation"] for slot in admission_slots
-                }
-            except SeqlockUnstableError as exc:
-                # Note (Jiaxin Deng): momentarily unstable shm (fold in
-                # flight); report a read error, do not gate readiness on it.
-                admission_error = str(exc)
+            # Note (Jiaxin Deng): a live writer preempted mid-write clears in
+            # microseconds, so debounce before believing the slot is wedged;
+            # await, never spin or sleep the loop.
+            for attempt in range(_ADMISSION_HEALTH_READS):
+                try:
+                    admission_slots = admission_view.per_slot(now=now)
+                    slot_generations = {
+                        slot["index"]: slot["generation"] for slot in admission_slots
+                    }
+                    admission_error = None
+                    break
+                except SeqlockUnstableError as exc:
+                    admission_error = str(exc)
+                    if attempt + 1 < _ADMISSION_HEALTH_READS:
+                        await asyncio.sleep(_ADMISSION_HEALTH_READ_DELAY_SECS)
+        # Note (Jiaxin Deng): a slot still unreadable after the debounce is a
+        # DP that died mid-write, and every sibling's try_acquire fails closed
+        # until the supervisor reclaims it, so nothing can serve.
+        admission_readable = admission_view is None or admission_error is None
         ready_indices = {
             record.dp_index
             for record in live_dps
-            if record.last_applied_epoch == cp_epoch
+            if admission_readable
+            and record.last_applied_epoch == cp_epoch
             and record.serving
             and (
                 admission_view is None
-                or admission_error is not None
                 or slot_generations.get(record.dp_index) == record.generation
             )
         }
@@ -334,8 +346,10 @@ def create_control_plane_app(
             serving = len(ready_indices)
         # Note (Jiaxin Deng): degraded, not dead, while at least one DP keeps
         # serving; 503 only when nothing can serve at all.
-        no_service = routable == 0 or (
-            expected_data_planes is not None and serving == 0
+        no_service = (
+            routable == 0
+            or not admission_readable
+            or (expected_data_planes is not None and serving == 0)
         )
         degraded = bool(missing) and serving > 0
         if no_service:

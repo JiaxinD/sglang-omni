@@ -155,3 +155,50 @@ def test_overlay_renders_counter_fields() -> None:
         "successful_requests": 6,
         "failed_requests": 0,
     }
+
+
+def _two_incarnation_report(seq: int, rows: list[tuple[str, int]]) -> CounterReport:
+    return CounterReport(
+        dp_index=0,
+        generation=1,
+        counter_seq=seq,
+        workers=[
+            WorkerCounters(
+                worker_id="w0",
+                incarnation=incarnation,
+                routed_total=routed,
+                successful_total=routed,
+                failed_total=0,
+                current_active=0,
+            )
+            for incarnation, routed in rows
+        ],
+    )
+
+
+def test_a_report_carrying_both_incarnations_does_not_double_count() -> None:
+    # Note (Jiaxin Deng): during a replacement one report lists the new object
+    # and the draining old one; keyed by stable id alone each row retires the
+    # other, so a single request is counted once per report.
+    ledger = DataPlaneCounterLedger()
+    ledger.apply(_two_incarnation_report(1, [("inc-a", 1)]), now=0.0)
+    assert ledger.totals("w0")["routed_total"] == 0  # first contact is baseline
+
+    ledger.apply(_two_incarnation_report(2, [("inc-b", 1), ("inc-a", 1)]), now=1.0)
+    assert ledger.totals("w0")["routed_total"] == 1
+
+    ledger.apply(_two_incarnation_report(3, [("inc-b", 2)]), now=2.0)
+    assert ledger.totals("w0")["routed_total"] == 2
+
+
+def test_a_drained_incarnation_is_folded_and_dropped() -> None:
+    # Note (Jiaxin Deng): a report is a full snapshot, so retaining every
+    # incarnation that ever appeared would grow the map without bound.
+    ledger = DataPlaneCounterLedger()
+    ledger.apply(_two_incarnation_report(1, [("inc-a", 0)]), now=0.0)
+    ledger.apply(_two_incarnation_report(2, [("inc-b", 3), ("inc-a", 2)]), now=1.0)
+    ledger.apply(_two_incarnation_report(3, [("inc-b", 3)]), now=2.0)
+
+    assert ledger.totals("w0")["routed_total"] == 5
+    entry = ledger._entries[0]
+    assert list(entry.per_worker) == [("w0", "inc-b")]

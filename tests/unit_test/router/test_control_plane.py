@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -312,26 +313,52 @@ def test_internal_routes_on_cp_require_the_token_when_configured(
         )
 
 
+def _await_disabled_snapshot_seq(path: str, timeout: float = 10.0) -> int:
+    reader = SnapshotReader(path)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        reader.maybe_reload()
+        snapshot = reader.snapshot
+        if snapshot is not None and all(w.disabled for w in snapshot.workers):
+            return snapshot.seq
+        time.sleep(0.01)
+    raise AssertionError("the CP never published the disabled-worker snapshot")
+
+
 def test_weight_update_waits_for_dp_ack_then_broadcasts(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): the DP acknowledges the seq the CP actually published,
+    # so the barrier proves the disabled snapshot was observed; a pre-acked
+    # future seq would satisfy it before the publish ever happened.
     upstream = _Upstream()
     app, snapshot_path, _ = _cp_app(tmp_path, upstream=upstream)
     with TestClient(app) as client:
         client.post(
             "/internal/register", json={"dp_index": 0, "generation": 1, "pid": 1}
         )
-        # Note (Jiaxin Deng): ack everything the CP will ever publish in this test
-        client.post(
-            "/internal/heartbeat",
-            json={
-                "dp_index": 0,
-                "generation": 1,
-                "pid": 1,
-                "last_applied_seq": 10_000,
-                "last_applied_epoch": "epoch-test",
-            },
+        responses: list[httpx.Response] = []
+        update = threading.Thread(
+            target=lambda: responses.append(
+                client.post("/update_weights_from_disk", json={"path": "/m"})
+            )
         )
-        response = client.post("/update_weights_from_disk", json={"path": "/m"})
-        assert response.status_code == 200
+        update.start()
+        try:
+            seq = _await_disabled_snapshot_seq(snapshot_path)
+            assert "/update_weights_from_disk" not in upstream.calls
+            client.post(
+                "/internal/heartbeat",
+                json={
+                    "dp_index": 0,
+                    "generation": 1,
+                    "pid": 1,
+                    "last_applied_seq": seq,
+                    "last_applied_epoch": "epoch-test",
+                },
+            )
+        finally:
+            update.join(timeout=15)
+
+        assert responses[0].status_code == 200
         assert "/update_weights_from_disk" in upstream.calls
 
 
@@ -454,7 +481,12 @@ def test_cp_aggregates_dp_counters_into_worker_listings(tmp_path: Path) -> None:
         assert client.post("/internal/counters", json=stale).status_code == 409
 
 
-def _ack_everything(client, dp_index: int = 0) -> None:
+def _preack_future_seq(client, dp_index: int = 0) -> None:
+    """Pre-ack a seq the CP will never exceed.
+
+    Note (Jiaxin Deng): only for tests asserting the barrier fails for a
+    different reason, so the ACK itself is deliberately not the variable.
+    """
     client.post(
         "/internal/register",
         json={"dp_index": dp_index, "generation": 1, "pid": dp_index + 1},
@@ -508,7 +540,7 @@ def test_barrier_fails_closed_while_an_expected_dp_is_absent(
         expected_data_planes=2,
     )
     with TestClient(app) as client:
-        _ack_everything(client, dp_index=0)  # dp 1 never registers
+        _preack_future_seq(client, dp_index=0)  # dp 1 never registers
         response = client.post("/update_weights_from_disk", json={"path": "/m"})
         assert response.status_code == 503
         assert "1" in response.json()["error"]["message"]
@@ -1016,6 +1048,52 @@ def test_health_reports_admission_error_instead_of_500_when_shm_unstable(
         with TestClient(app) as client:
             _ready_heartbeat(client, 0, 11)
             response = client.get("/health")
-            assert response.status_code in (200, 503)  # never 500
-            assert "admission_error" in response.json()
+            # Note (Jiaxin Deng): admission never reads the retired slot, so a
+            # stalled fold costs the aggregate numbers only; the DPs keep
+            # admitting and readiness must not be gated on it.
+            assert response.status_code == 200
+            payload = response.json()
+            assert "admission_error" in payload
+            assert payload["serving_ready_data_planes"] == 1
+        buf.close()
+
+
+def test_health_sheds_while_a_dp_slot_is_stuck_mid_write(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): a DP killed mid-write leaves its slot odd, and every
+    # sibling's try_acquire then fails closed until reclaim, so advertising
+    # ready capacity would promise service that answers 503.
+    import mmap as mmap_module
+
+    from sglang_omni_router.admission_shm import (
+        SharedAdmission,
+        SlotCodec,
+        create_admission_file,
+    )
+
+    shm_path = str(tmp_path / "admission.shm")
+    create_admission_file(shm_path, 2)
+    with open(shm_path, "r+b") as f:
+        buf = mmap_module.mmap(f.fileno(), 0)
+        SharedAdmission(buf, slots=2, own_index=0, max_inflight=8, generation=1, pid=11)
+        SharedAdmission(buf, slots=2, own_index=1, max_inflight=8, generation=1, pid=12)
+        marker = SlotCodec(buf, 1).begin_write()
+
+        app, _, _ = _cp_app(
+            tmp_path, expected_data_planes=2, admission_shm_path=shm_path
+        )
+        with TestClient(app) as client:
+            _ready_heartbeat(client, 0, 11)
+            _ready_heartbeat(client, 1, 12)
+            response = client.get("/health")
+            assert response.status_code == 503
+            payload = response.json()
+            assert payload["serving_ready_data_planes"] == 0
+            assert "admission_error" in payload
+
+            # Note (Jiaxin Deng): reclaim heals the slot and the next probe
+            # recovers with no further intervention.
+            SlotCodec(buf, 1).end_write(marker)
+            recovered = client.get("/health")
+            assert recovered.status_code == 200
+            assert recovered.json()["serving_ready_data_planes"] == 2
         buf.close()

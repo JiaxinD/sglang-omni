@@ -213,6 +213,36 @@ def test_created_state_directories_and_journal_are_owner_only(tmp_path: Path) ->
     assert stat.S_IMODE(path.stat().st_mode) & 0o177 == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX only")
+def test_a_newly_created_endpoint_directory_is_made_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Note (Jiaxin Deng): syncing only the journal's own parent leaves the new
+    # endpoint directory's entry in the state dir unsynced, so a host crash can
+    # drop the whole directory and take the journal with it.
+    state_dir = tmp_path / "state"
+    journal = UpdateJournal(default_journal_path("0.0.0.0", 8000, str(state_dir)))
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def _record(fd: int) -> None:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced.append(info.st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _record)
+    journal.begin("/update_weights_from_disk", ["w0"])
+
+    assert state_dir.stat().st_ino in synced
+    assert Path(journal.path).parent.stat().st_ino in synced
+
+    # Note (Jiaxin Deng): only on creation; a rewrite must not pay for it.
+    synced.clear()
+    journal.keep(["w0"])
+    assert state_dir.stat().st_ino not in synced
+
+
 def test_ensure_state_dir_fails_closed_when_it_cannot_be_created(
     tmp_path: Path,
 ) -> None:

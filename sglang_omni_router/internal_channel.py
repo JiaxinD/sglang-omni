@@ -24,6 +24,15 @@ from pydantic import BaseModel, Field
 INTERNAL_TOKEN_ENV = "SGLANG_OMNI_ROUTER_INTERNAL_TOKEN"
 INTERNAL_TOKEN_HEADER = "x-sglang-omni-internal-token"
 
+# Note (Jiaxin Deng): control traffic (register, heartbeat, snapshot ACK,
+# counters, failure reports) gets its own pool and a timeout well inside the
+# liveness and ACK windows. Sharing the forwarding pool would let public admin
+# calls parked behind the CP's update lock starve the beats that keep this DP
+# counted as live, degrading it and aborting an otherwise safe update.
+CONTROL_CHANNEL_CONNECTIONS = 4
+CONTROL_CHANNEL_TIMEOUT_SECS = 5.0
+FORWARD_CHANNEL_CONNECTIONS = 8
+
 
 class DataPlaneHello(BaseModel):
     dp_index: int = Field(ge=0)

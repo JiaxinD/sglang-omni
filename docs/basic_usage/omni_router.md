@@ -526,8 +526,10 @@ Behavior differences to know about:
 - **The admission bound is shared and soft.** The in-flight bound spans all
   DPs through a shared-memory counter array. Concurrent admission checks can
   overshoot the bound by at most `N - 1` requests. In `/health`, `inflight` is
-  an instantaneous sum (not a linearizable value), `rejected_total` is exact,
-  and `peak_inflight` is best-effort.
+  an instantaneous sum (not a linearizable value) and `peak_inflight` is
+  best-effort. `rejected_total` is exact while every live slot stays readable;
+  a DP killed mid-write loses the counters it had not yet published, so the
+  total is best-effort across a crash and reclaim window.
 - **`least_request` requires a single process.** It reads per-process
   counters, so `--router-processes >= 2` combined with an explicit
   `--policy least_request` fails at startup; use `round_robin` (DPs stagger

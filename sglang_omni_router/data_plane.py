@@ -158,6 +158,7 @@ def create_data_plane_app(
     generation: int,
     client: httpx.AsyncClient | None = None,
     internal_client: httpx.AsyncClient | None = None,
+    forward_client: httpx.AsyncClient | None = None,
     internal_token: str | None = None,
     metadata_client: httpx.AsyncClient | None = None,
     admission=None,
@@ -404,6 +405,8 @@ def create_data_plane_app(
                 await metadata_client.aclose()
             if internal_client is not None:
                 await internal_client.aclose()
+            if forward_client is not None and forward_client is not internal_client:
+                await forward_client.aclose()
 
     app = FastAPI(title="sglang-omni-router-dp", version="0.1.0", lifespan=lifespan)
     # Note (Jiaxin Deng): same external CORS policy as the single-process app;
@@ -444,8 +447,15 @@ def create_data_plane_app(
         )
 
     register_data_routes(app, proxy, gate=_stale_gate)
-    if internal_client is not None:
-        _register_cp_forwarding(app, internal_client, config)
+    # Note (Jiaxin Deng): forwarding runs on its own pool; a public admin
+    # call can sit behind the CP's update lock for minutes, and sharing the
+    # control pool would starve the heartbeat and ACK that keep this DP
+    # counted as live.
+    forwarding_client = (
+        forward_client if forward_client is not None else internal_client
+    )
+    if forwarding_client is not None:
+        _register_cp_forwarding(app, forwarding_client, config)
     return app
 
 
@@ -579,7 +589,12 @@ def create_dp_app_from_env() -> FastAPI:
 
     from sglang_omni_router.admission_shm import SharedAdmission, admission_file_size
     from sglang_omni_router.app_factory import load_config_from_env
-    from sglang_omni_router.internal_channel import INTERNAL_TOKEN_ENV
+    from sglang_omni_router.internal_channel import (
+        CONTROL_CHANNEL_CONNECTIONS,
+        CONTROL_CHANNEL_TIMEOUT_SECS,
+        FORWARD_CHANNEL_CONNECTIONS,
+        INTERNAL_TOKEN_ENV,
+    )
     from sglang_omni_router.supervisor import (
         ADMISSION_SHM_ENV,
         DP_GENERATION_ENV,
@@ -594,23 +609,32 @@ def create_dp_app_from_env() -> FastAPI:
     token = os.environ.get(INTERNAL_TOKEN_ENV)
     timeout = httpx.Timeout(config.request_timeout_secs)
     uds = os.environ.get(INTERNAL_UDS_ENV)
-    internal_limits = httpx.Limits(max_connections=8, max_keepalive_connections=4)
-    if uds:
-        internal_client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(uds=uds, limits=internal_limits),
-            base_url="http://internal",
-            timeout=timeout,
+    tcp_url = os.environ.get(INTERNAL_TCP_URL_ENV)
+    if not uds and not tcp_url:
+        raise RuntimeError(
+            "neither the internal UDS nor the internal TCP URL is set; "
+            "this factory is only meant to be spawned by the supervisor"
         )
-    else:
-        tcp_url = os.environ.get(INTERNAL_TCP_URL_ENV)
-        if not tcp_url:
-            raise RuntimeError(
-                "neither the internal UDS nor the internal TCP URL is set; "
-                "this factory is only meant to be spawned by the supervisor"
+
+    def _internal_client(connections: int, client_timeout) -> httpx.AsyncClient:
+        limits = httpx.Limits(
+            max_connections=connections,
+            max_keepalive_connections=max(1, connections // 2),
+        )
+        if uds:
+            return httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(uds=uds, limits=limits),
+                base_url="http://internal",
+                timeout=client_timeout,
             )
-        internal_client = httpx.AsyncClient(
-            base_url=tcp_url, timeout=timeout, limits=internal_limits
+        return httpx.AsyncClient(
+            base_url=tcp_url, timeout=client_timeout, limits=limits
         )
+
+    internal_client = _internal_client(
+        CONTROL_CHANNEL_CONNECTIONS, httpx.Timeout(CONTROL_CHANNEL_TIMEOUT_SECS)
+    )
+    forward_client = _internal_client(FORWARD_CHANNEL_CONNECTIONS, timeout)
 
     dp_index = int(os.environ[DP_INDEX_ENV])
     generation = int(os.environ[DP_GENERATION_ENV])
@@ -640,6 +664,7 @@ def create_dp_app_from_env() -> FastAPI:
         dp_index=dp_index,
         generation=generation,
         internal_client=internal_client,
+        forward_client=forward_client,
         internal_token=token,
         admission=admission,
         total_data_planes=total,

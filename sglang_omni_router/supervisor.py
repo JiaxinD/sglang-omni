@@ -45,7 +45,11 @@ from sglang_omni_router.admission_shm import (
 )
 from sglang_omni_router.app_factory import CONFIG_FILE_ENV
 from sglang_omni_router.config import RouterConfig
-from sglang_omni_router.internal_channel import INTERNAL_TOKEN_ENV
+from sglang_omni_router.internal_channel import (
+    CONTROL_CHANNEL_CONNECTIONS,
+    FORWARD_CHANNEL_CONNECTIONS,
+    INTERNAL_TOKEN_ENV,
+)
 
 logger = logging.getLogger("sglang_omni_router.supervisor")
 
@@ -373,11 +377,14 @@ class RouterSupervisor:
             admission_shm_path=admission_shm_path,
         )
         pool = self._config.upstream_pool_size
+        internal_fds = CONTROL_CHANNEL_CONNECTIONS + FORWARD_CHANNEL_CONNECTIONS
         per_process_fds = 2 * pool + 64
         logger.info(
             f"multi-process fd budget (upstream-relay estimate): per-process "
             f"~{per_process_fds} (2 x pool {pool} + headroom, plus a bounded "
-            f"internal channel of <= 16 fds); cluster total across "
+            f"internal channel of <= {internal_fds} fds, split "
+            f"{CONTROL_CHANNEL_CONNECTIONS} control + "
+            f"{FORWARD_CHANNEL_CONNECTIONS} forwarding); cluster total across "
             f"{self._router_processes} DPs "
             f"~{self._router_processes * per_process_fds}. Inbound idle "
             f"keep-alive sockets are not bounded by admission, matching the "

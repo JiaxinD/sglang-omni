@@ -138,7 +138,12 @@ class UpdateJournal:
         directory = os.path.dirname(self._path) or "."
         tmp_path = f"{self._path}.tmp"
         try:
-            _make_private_dir(directory)
+            # Note (Jiaxin Deng): a directory this call creates is only durable
+            # once its own entry in the parent is synced. Without this the whole
+            # endpoint directory can vanish in a host crash and take the journal
+            # with it, which is exactly the case the journal exists to survive.
+            for created in reversed(_make_private_dir(directory)):
+                _fsync_directory(os.path.dirname(created) or ".")
             fd = os.open(
                 tmp_path,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
@@ -154,33 +159,36 @@ class UpdateJournal:
         self._fsync_dir()
 
     def _fsync_dir(self) -> None:
-        # Note (Jiaxin Deng): a rename/unlink is only durable across a host
-        # crash once the parent directory entry is synced; non-POSIX hosts
-        # expose no directory handle, so there the file fsync is the cap.
-        if os.name != "posix":
-            return
-        directory = os.path.dirname(self._path) or "."
-        try:
-            fd = os.open(directory, os.O_RDONLY)
-        except OSError as exc:
-            raise JournalUnwritableError(f"{directory}: {exc}") from exc
-        try:
-            os.fsync(fd)
-        except OSError as exc:
-            raise JournalUnwritableError(f"{directory}: {exc}") from exc
-        finally:
-            os.close(fd)
+        _fsync_directory(os.path.dirname(self._path) or ".")
 
 
-def _make_private_dir(path: str) -> None:
-    """makedirs, owner-only on the levels this call actually creates.
+def _fsync_directory(directory: str) -> None:
+    # Note (Jiaxin Deng): a rename/unlink is only durable across a host crash
+    # once the parent directory entry is synced; non-POSIX hosts expose no
+    # directory handle, so there the file fsync is the cap.
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError as exc:
+        raise JournalUnwritableError(f"{directory}: {exc}") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise JournalUnwritableError(f"{directory}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def _make_private_dir(path: str) -> list[str]:
+    """makedirs; returns the directories this call created, innermost first.
 
     A pre-existing directory keeps its own permissions: the state directory may
     be a mount point an operator set up, and shared ancestors such as
     ~/.local must not be tightened underneath other tools.
     """
     if os.path.isdir(path):
-        return
+        return []
     created: list[str] = []
     probe = path
     while probe and not os.path.isdir(probe):
@@ -190,13 +198,13 @@ def _make_private_dir(path: str) -> None:
             break
         probe = parent
     os.makedirs(path, exist_ok=True)
-    if os.name != "posix":
-        return
-    for directory in created:
-        try:
-            os.chmod(directory, _STATE_DIR_MODE)
-        except OSError:
-            pass
+    if os.name == "posix":
+        for directory in created:
+            try:
+                os.chmod(directory, _STATE_DIR_MODE)
+            except OSError:
+                pass
+    return created
 
 
 def resolve_state_dir(state_dir: str | None = None) -> str:
