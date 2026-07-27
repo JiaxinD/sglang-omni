@@ -239,6 +239,20 @@ def test_ensure_state_dir_fails_closed_when_it_is_not_writable(tmp_path: Path) -
     assert str(state_dir) in str(excinfo.value)
 
 
+def test_ensure_state_dir_survives_a_concurrently_removed_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # routers on different ports share one state directory; one cleaning up
+    # first must not make the other refuse to start
+    state_dir = tmp_path / "state"
+
+    def _vanished(path: str) -> None:
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(os, "unlink", _vanished)
+    assert ensure_state_dir(str(state_dir)) == str(state_dir)
+
+
 def test_an_unusable_state_dir_does_not_fall_back_to_a_temp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

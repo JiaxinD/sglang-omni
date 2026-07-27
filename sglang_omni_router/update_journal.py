@@ -218,14 +218,21 @@ def ensure_state_dir(state_dir: str) -> str:
     Checked at startup so a misconfigured mount surfaces there instead of on
     the first weight update, when the pool is already disabled.
     """
-    probe_path = os.path.join(state_dir, ".write-probe")
+    # Note (Jiaxin Deng): routers on different ports share one state directory,
+    # so the probe is per-pid and its cleanup tolerates a vanished file; a
+    # fixed name would let two starting routers unlink each other's probe and
+    # both fail closed on a directory that is perfectly writable.
+    probe_path = os.path.join(state_dir, f".write-probe.{os.getpid()}")
     try:
         _make_private_dir(state_dir)
         fd = os.open(
             probe_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _JOURNAL_FILE_MODE
         )
         os.close(fd)
-        os.unlink(probe_path)
+        try:
+            os.unlink(probe_path)
+        except FileNotFoundError:
+            pass
     except OSError as exc:
         raise JournalUnwritableError(
             f"router state directory {state_dir} is unusable ({exc}); it holds "
