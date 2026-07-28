@@ -186,9 +186,7 @@ def test_rep_window_ring_honours_the_live_batch_codebooks():
     runner = _runner(model)
     pool = model._decode_state_pool
     row_t = torch.tensor([0], device=device, dtype=torch.long)
-    pool.rep_hist[row_t] = torch.zeros(
-        1, pool.rep_ring, N_CODEBOOKS, dtype=torch.int64
-    )
+    pool.rep_hist[row_t] = torch.zeros(1, pool.rep_ring, N_CODEBOOKS, dtype=torch.int64)
 
     ring = runner._rep_window_ring(
         row_t, N_CODEBOOKS, WINDOW, CODEBOOK_SIZE, _params(repetition_codebooks=2)

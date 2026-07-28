@@ -481,9 +481,7 @@ class Zonos2SGLangModel(nn.Module):
     @torch.no_grad()
     def _capture_tail_graph(self, key: tuple) -> torch.cuda.CUDAGraph:
         bucket, top_k_max, any_top_p, any_min_p = key
-        flags = dict(
-            top_k_max=top_k_max, any_top_p=any_top_p, any_min_p=any_min_p
-        )
+        flags = dict(top_k_max=top_k_max, any_top_p=any_top_p, any_min_p=any_min_p)
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):

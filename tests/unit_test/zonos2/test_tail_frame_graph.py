@@ -123,9 +123,7 @@ def _step_inputs(rows: list[dict], device: torch.device, *, step: int = 0) -> di
         top_k=torch.tensor([r["top_k"] for r in rows], device=device),
         top_p=torch.tensor([r["top_p"] for r in rows], device=device),
         min_p=torch.tensor([r["min_p"] for r in rows], device=device),
-        rep_pen=torch.tensor(
-            [r["repetition_penalty"] for r in rows], device=device
-        ),
+        rep_pen=torch.tensor([r["repetition_penalty"] for r in rows], device=device),
         rep_ids=rep_ids,
         break_mask=break_mask,
     )
