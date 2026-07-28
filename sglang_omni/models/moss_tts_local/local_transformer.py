@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang_omni.cuda_graph import PersistentStateRegistry
+
 
 def sample_seeded_branchless(
     logits: torch.Tensor,
@@ -192,7 +194,7 @@ class MossTTSLocalTransformer(nn.Module):
         self._ensure_kv_cache(batch_size, device, dtype)
         self.freeze_kv_cache()
 
-    def register_persistent_state(self, registry) -> None:
+    def register_persistent_state(self, registry: PersistentStateRegistry) -> None:
         """Declare the frozen KV buffers, whose addresses a frame-decode
         capture bakes in."""
         for layer_idx in range(len(self._kv_cache)):
