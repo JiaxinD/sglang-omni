@@ -42,6 +42,7 @@ from sglang_omni.vendor.sglang.layers import (
     should_use_flashinfer_cutlass_moe_fp4_allgather,
 )
 from sglang_omni.vendor.sglang.models import apply_qk_norm
+from sglang_omni.cuda_graph import KeyedGraphCache, normalize_batch_sizes
 from sglang_omni.vendor.sglang.server_args import get_global_server_args
 from sglang_omni.vendor.sglang.utils import make_layers
 
@@ -63,6 +64,9 @@ def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         batch, num_kv_heads, n_rep, seq_len, head_dim
     )
     return hidden_states.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
+
+
+QWEN3_OMNI_PREDICTOR_GRAPH_ENV = "SGLANG_OMNI_QWEN3_OMNI_PREDICTOR_GRAPH"
 
 
 class _PredictorDecodeGraph:
@@ -97,7 +101,16 @@ class _PredictorDecodeGraph:
         self.graph = torch.cuda.CUDAGraph()
         self.result_codes: torch.Tensor | None = None
         self.summed_embeddings: torch.Tensor | None = None
-        self._capture()
+        try:
+            self._capture()
+        except Exception:
+            # Note: (Jiaxin Deng) release the graph's private memory pool
+            # eagerly; the raising object may linger on traceback frames.
+            try:
+                self.graph.reset()
+            except Exception:
+                pass
+            raise
 
     @torch.no_grad()
     def _capture(self) -> None:
@@ -118,6 +131,7 @@ class _PredictorDecodeGraph:
             capture_stream.wait_stream(current_stream)
             with torch.cuda.graph(
                 self.graph,
+                pool=self.model._predictor_graph_cache.memory_pool(),
                 stream=capture_stream,
                 capture_error_mode="thread_local",
             ):
@@ -1003,16 +1017,18 @@ class Qwen3OmniTalker(nn.Module):
             device=device,
             dtype=self.model.codec_embedding.weight.dtype,
         )
-        self._predictor_decode_graph_batch_sizes = (
-            self._normalize_predictor_decode_graph_batch_sizes(
-                server_args,
+        raw_graph_batch_sizes = getattr(server_args, "cuda_graph_bs", None)
+        if raw_graph_batch_sizes is None:
+            raw_graph_batch_sizes = (max_batch_size,)
+        self._predictor_graph_cache = KeyedGraphCache(
+            name="Qwen3-Omni predictor",
+            batch_sizes=normalize_batch_sizes(
+                raw_graph_batch_sizes,
                 max_batch_size=max_batch_size,
-            )
+            ),
+            env_var=QWEN3_OMNI_PREDICTOR_GRAPH_ENV,
         )
-        self._predictor_decode_graphs: dict[
-            tuple[int, torch.dtype], _PredictorDecodeGraph
-        ] = {}
-        self._predictor_decode_graph_disabled: set[tuple[int, torch.dtype]] = set()
+        self._predictor_graph_runtime_checked = False
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -1476,33 +1492,6 @@ class Qwen3OmniTalker(nn.Module):
             return False
         return True
 
-    @staticmethod
-    def _normalize_predictor_decode_graph_batch_sizes(
-        server_args: object,
-        *,
-        max_batch_size: int,
-    ) -> tuple[int, ...]:
-        raw_batch_sizes = getattr(server_args, "cuda_graph_bs", None)
-        if raw_batch_sizes is None:
-            raw_batch_sizes = (max_batch_size,)
-
-        normalized = sorted(
-            {
-                int(batch_size)
-                for batch_size in raw_batch_sizes
-                if 1 <= int(batch_size) <= int(max_batch_size)
-            }
-        )
-        if not normalized or normalized[-1] < int(max_batch_size):
-            normalized.append(int(max_batch_size))
-        return tuple(normalized)
-
-    def _predictor_decode_graph_bucket_size(self, batch_size: int) -> int | None:
-        for bucket_size in self._predictor_decode_graph_batch_sizes:
-            if bucket_size >= batch_size:
-                return bucket_size
-        return None
-
     def _code_predictor_forward_single_token_graph(
         self,
         *,
@@ -1511,37 +1500,33 @@ class Qwen3OmniTalker(nn.Module):
         batch_size: int,
         code_dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
-        bucket_size = self._predictor_decode_graph_bucket_size(batch_size)
+        self._check_predictor_graph_runtime()
+        cache = self._predictor_graph_cache
+        if not cache.enabled:
+            return None
+        bucket_size = cache.bucket_for(batch_size)
         if bucket_size is None:
             return None
-
-        key = (bucket_size, code_dtype)
-        if key in self._predictor_decode_graph_disabled:
-            return None
-
-        graph = self._predictor_decode_graphs.get(key)
+        graph = cache.get_or_capture(
+            (bucket_size, code_dtype),
+            lambda: _PredictorDecodeGraph(self, bucket_size, code_dtype),
+        )
         if graph is None:
-            try:
-                graph = _PredictorDecodeGraph(self, bucket_size, code_dtype)
-            except Exception:
-                self._predictor_decode_graph_disabled.add(key)
-                logger.warning(
-                    "Disabling Qwen3-Omni predictor CUDA graph for "
-                    "batch_size=%s dtype=%s",
-                    bucket_size,
-                    code_dtype,
-                    exc_info=True,
-                )
-                return None
-            self._predictor_decode_graphs[key] = graph
-            logger.info(
-                "Captured Qwen3-Omni predictor CUDA graph for batch_size=%s "
-                "dtype=%s",
-                bucket_size,
-                code_dtype,
-            )
-
+            return None
         return graph.replay(layer0_codes, talker_hidden)
+
+    def _check_predictor_graph_runtime(self) -> None:
+        """Resolve the server-arg gates once, on the first decode step."""
+        if self._predictor_graph_runtime_checked:
+            return
+        self._predictor_graph_runtime_checked = True
+        server_args = get_global_server_args()
+        if bool(getattr(server_args, "disable_cuda_graph", False)):
+            self._predictor_graph_cache.disable("disable_cuda_graph is set")
+        elif int(getattr(server_args, "tp_size", 1) or 1) != 1:
+            # Note: (Jiaxin Deng) capture under TP would record collectives; the
+            # graphed chain is only validated single-rank, so TP stays eager.
+            self._predictor_graph_cache.disable("tp_size > 1")
 
     def _code_predictor_forward_incremental_eager(
         self,
