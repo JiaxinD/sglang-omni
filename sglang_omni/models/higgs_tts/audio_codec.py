@@ -243,8 +243,9 @@ class HiggsAudioCodec:
     def warmup_cuda_graph(self, shapes: Iterable[tuple[int, int]]) -> None:
         """Capture and seal decode graphs for these ``(batch, frames)`` shapes.
 
-        Leaves the codec untouched when the graphs are disabled or nothing
-        captures, so the eager path stays exactly as it was.
+        Graphs whichever ``model.decode`` is installed, so the replay reproduces
+        that decode's bits. Leaves the codec untouched when the graphs are
+        disabled or nothing captures.
         """
         if self.device.type != "cuda" or self._cg_runner is not None:
             return
