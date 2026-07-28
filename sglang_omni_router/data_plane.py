@@ -150,6 +150,13 @@ def dp_client_limits(config: RouterConfig, total_data_planes: int) -> httpx.Limi
     )
 
 
+def _counter_report_applied(response: httpx.Response) -> bool:
+    try:
+        return response.json().get("applied", True) is not False
+    except ValueError:
+        return True
+
+
 def create_data_plane_app(
     config: RouterConfig,
     *,
@@ -307,8 +314,16 @@ def create_data_plane_app(
                     # registrations; re-register, this is not a fence.
                     registered = False
                 elif response.status_code == 200:
+                    was_registered = registered
                     registered = True
                     rejected_registrations = 0
+                    if not was_registered:
+                        # Note (Jiaxin Deng): registration carries no seq, so
+                        # the ACK barrier only learns this DP's position on the
+                        # next beat; send it now instead of a poll interval
+                        # later, which after a timeout would eat most of the
+                        # barrier's budget.
+                        continue
                 else:
                     # Note (Jiaxin Deng): an unregistered DP is invisible to
                     # the weight-update ACK barrier, so a definitively rejected
@@ -370,7 +385,10 @@ def create_data_plane_app(
                     logger.critical("counter report fenced by a newer generation")
                     on_fenced()
                     return
-                if response.status_code < 300:
+                if response.status_code < 300 and _counter_report_applied(response):
+                    # Note (Jiaxin Deng): a retiree's totals live only in this
+                    # payload, so release it on acceptance, not on a 200 that
+                    # dropped the report as stale.
                     view.release_retired(drained)
             except httpx.HTTPError:
                 # Note (Jiaxin Deng): totals are cumulative; the next flush

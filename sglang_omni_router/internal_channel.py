@@ -29,7 +29,10 @@ INTERNAL_TOKEN_HEADER = "x-sglang-omni-internal-token"
 # liveness and ACK windows. Sharing the forwarding pool would let public admin
 # calls parked behind the CP's update lock starve the beats that keep this DP
 # counted as live, degrading it and aborting an otherwise safe update.
-CONTROL_CHANNEL_CONNECTIONS = 4
+# Note (Jiaxin Deng): kept at the pre-split size. Failure reports burst on the
+# same pool as the beat, and a worker outage is exactly when a weight update
+# must still be able to acknowledge the barrier.
+CONTROL_CHANNEL_CONNECTIONS = 8
 CONTROL_CHANNEL_TIMEOUT_SECS = 5.0
 FORWARD_CHANNEL_CONNECTIONS = 8
 

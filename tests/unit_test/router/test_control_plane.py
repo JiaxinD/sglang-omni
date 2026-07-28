@@ -313,14 +313,13 @@ def test_internal_routes_on_cp_require_the_token_when_configured(
         )
 
 
-def _await_disabled_snapshot_seq(path: str, timeout: float = 10.0) -> int:
-    reader = SnapshotReader(path)
+def _await_disabled_snapshot_seq(app, timeout: float = 10.0) -> int:
+    # Note (Jiaxin Deng): read the writer's own seq rather than polling the
+    # file; on Windows an open reader blocks the publish rename.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        reader.maybe_reload()
-        snapshot = reader.snapshot
-        if snapshot is not None and all(w.disabled for w in snapshot.workers):
-            return snapshot.seq
+        if all(worker.disabled for worker in app.state.workers):
+            return app.state.snapshot_writer.seq
         time.sleep(0.01)
     raise AssertionError("the CP never published the disabled-worker snapshot")
 
@@ -343,7 +342,7 @@ def test_weight_update_waits_for_dp_ack_then_broadcasts(tmp_path: Path) -> None:
         )
         update.start()
         try:
-            seq = _await_disabled_snapshot_seq(snapshot_path)
+            seq = _await_disabled_snapshot_seq(app)
             assert "/update_weights_from_disk" not in upstream.calls
             client.post(
                 "/internal/heartbeat",
@@ -1079,7 +1078,10 @@ def test_health_sheds_while_a_dp_slot_is_stuck_mid_write(tmp_path: Path) -> None
         marker = SlotCodec(buf, 1).begin_write()
 
         app, _, _ = _cp_app(
-            tmp_path, expected_data_planes=2, admission_shm_path=shm_path
+            tmp_path,
+            expected_data_planes=2,
+            admission_shm_path=shm_path,
+            admission_grace_secs=0.0,
         )
         with TestClient(app) as client:
             _ready_heartbeat(client, 0, 11)
@@ -1096,4 +1098,41 @@ def test_health_sheds_while_a_dp_slot_is_stuck_mid_write(tmp_path: Path) -> None
             recovered = client.get("/health")
             assert recovered.status_code == 200
             assert recovered.json()["serving_ready_data_planes"] == 2
+        buf.close()
+
+
+def test_a_briefly_unreadable_slot_does_not_evict_the_router(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): a writer descheduled mid-write recovers on its own,
+    # and a DP re-probes its own shed after 50ms; declaring a total outage
+    # faster than that trades a blip for an LB eviction.
+    import mmap as mmap_module
+
+    from sglang_omni_router.admission_shm import (
+        SharedAdmission,
+        SlotCodec,
+        create_admission_file,
+    )
+
+    shm_path = str(tmp_path / "admission.shm")
+    create_admission_file(shm_path, 2)
+    with open(shm_path, "r+b") as f:
+        buf = mmap_module.mmap(f.fileno(), 0)
+        SharedAdmission(buf, slots=2, own_index=0, max_inflight=8, generation=1, pid=11)
+        SharedAdmission(buf, slots=2, own_index=1, max_inflight=8, generation=1, pid=12)
+        SlotCodec(buf, 1).begin_write()
+
+        app, _, _ = _cp_app(
+            tmp_path,
+            expected_data_planes=2,
+            admission_shm_path=shm_path,
+            admission_grace_secs=30.0,
+        )
+        with TestClient(app) as client:
+            _ready_heartbeat(client, 0, 11)
+            _ready_heartbeat(client, 1, 12)
+            response = client.get("/health")
+            assert response.status_code == 200
+            payload = response.json()
+            assert "admission_error" in payload
+            assert payload["serving_ready_data_planes"] == 2
         buf.close()

@@ -304,3 +304,66 @@ def test_an_unusable_state_dir_does_not_fall_back_to_a_temp_directory(
         journal.begin("/update_weights_from_disk", ["w0"])
 
     assert list(fake_tmp.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX only")
+def test_startup_makes_the_state_directory_it_creates_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Note (Jiaxin Deng): the journal writer only syncs from the endpoint
+    # directory down, so a state directory created at startup would keep an
+    # unsynced entry in its own parent and could vanish with the journal.
+    state_dir = tmp_path / "state"
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def _record(fd: int) -> None:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced.append(info.st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _record)
+    ensure_state_dir(str(state_dir))
+
+    assert tmp_path.stat().st_ino in synced
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX only")
+def test_clearing_an_already_absent_journal_still_syncs_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Note (Jiaxin Deng): an earlier unlink may have failed its directory
+    # sync, so absence is not durability; a retry that skipped the sync would
+    # report a resolution a crash can undo.
+    journal = UpdateJournal(str(tmp_path / "j.json"))
+    journal.begin("/x", ["w0"])
+    journal.clear()
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def _record(fd: int) -> None:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced.append(info.st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _record)
+    journal.clear()
+
+    assert tmp_path.stat().st_ino in synced
+
+
+def test_an_unresolvable_home_fails_closed_instead_of_using_a_relative_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Note (Jiaxin Deng): expanduser returns "~" unchanged under an injected
+    # uid with no passwd entry, which would put the journal under the cwd.
+    monkeypatch.delenv(STATE_DIR_ENV, raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr(os.path, "expanduser", lambda path: path)
+
+    with pytest.raises(JournalUnwritableError) as excinfo:
+        resolve_state_dir()
+
+    assert "--router-state-dir" in str(excinfo.value)

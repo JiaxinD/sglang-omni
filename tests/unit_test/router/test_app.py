@@ -3425,3 +3425,52 @@ def test_resolving_the_journal_fails_closed_when_it_cannot_be_removed(
         )
         assert response.status_code == 503
         assert journal_path in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_registry_lock_rejects_while_an_update_is_queued() -> None:
+    # Note (Jiaxin Deng): release() wakes the first waiter without marking the
+    # lock held, so locked() alone would admit a caller that then runs after an
+    # update it never saw.
+    from fastapi import FastAPI as _FastAPI
+
+    from sglang_omni_router.app import _registry_lock_or_reject
+
+    app = _FastAPI()
+    app.state.admin_update_lock = asyncio.Lock()
+    lock = app.state.admin_update_lock
+    await lock.acquire()
+    queued = asyncio.create_task(lock.acquire())
+    await asyncio.sleep(0)
+    lock.release()
+
+    assert lock.locked() is False  # the window locked() alone misses
+    _, rejected = _registry_lock_or_reject(app)
+    assert rejected is not None and rejected.status_code == 409
+
+    queued.cancel()
+
+
+def test_a_journal_that_cannot_be_cleared_is_reported_on_the_success(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): the broadcast really did succeed, but a surviving
+    # entry blocks every later update, which a bare 200 hides.
+    journal_path = str(tmp_path / "update_journal.json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "status": "worker"})
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(_router_config(), client=async_client, journal_path=journal_path)
+    with TestClient(app) as client:
+
+        def _unwritable() -> None:
+            raise JournalUnwritableError("read-only file system")
+
+        app.state.update_journal.clear = _unwritable
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert journal_path in response.json()["journal_error"]

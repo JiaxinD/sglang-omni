@@ -72,16 +72,22 @@ class _LedgerEntry:
     generation: int
     counter_seq: int
     reported_at: float
-    # Note (Jiaxin Deng): keyed by (worker_id, incarnation), because one report
+    # Note (Jiaxin Deng): stable id -> incarnation -> segment. One report
     # carries both the new object and the draining old one during a
-    # replacement; a stable-id key would make each row retire the other.
-    per_worker: dict[tuple[str, str], _WorkerLedger] = field(default_factory=dict)
+    # replacement, so a flat stable-id key would make each row retire the
+    # other; nesting keeps the per-worker lookup O(1) for the /health render.
+    per_worker: dict[str, dict[str, _WorkerLedger]] = field(default_factory=dict)
 
 
 class DataPlaneCounterLedger:
     def __init__(self, liveness_secs: float = 3.0) -> None:
         self._entries: dict[int, _LedgerEntry] = {}
         self._retired: dict[str, dict[str, int]] = {}
+        # Note (Jiaxin Deng): first contact is per CP process, not per
+        # generation: a respawned DP starts its counters at zero, so baselining
+        # it against its own first report would drop everything it served
+        # before that flush.
+        self._seen_dps: set[int] = set()
         self._liveness_secs = liveness_secs
 
     def apply(self, report: CounterReport, *, now: float | None = None) -> bool:
@@ -101,16 +107,25 @@ class DataPlaneCounterLedger:
                 self._retire(entry)
                 entry = None
 
-        carried = dict(entry.per_worker) if entry is not None else {}
-        first_contact = entry is None
-        per_worker: dict[tuple[str, str], _WorkerLedger] = {}
+        carried = (
+            {
+                (worker_id, incarnation): ledger
+                for worker_id, segments in entry.per_worker.items()
+                for incarnation, ledger in segments.items()
+            }
+            if entry is not None
+            else {}
+        )
+        first_contact = report.dp_index not in self._seen_dps
+        self._seen_dps.add(report.dp_index)
+        per_worker: dict[str, dict[str, _WorkerLedger]] = {}
         for item in report.workers:
             ledger = carried.pop((item.worker_id, item.incarnation), None)
             if ledger is None:
-                # Note (Jiaxin Deng): first sight under this (dp, generation)
-                # takes the whole cumulative as the since-CP-start baseline; a
-                # replaced incarnation restarts at zero, so it counts in full.
-                per_worker[(item.worker_id, item.incarnation)] = _WorkerLedger(
+                # Note (Jiaxin Deng): a segment the CP has not seen before
+                # starts at zero on the DP, so it counts in full; only the very
+                # first report from a data plane is a since-CP-start baseline.
+                ledger = _WorkerLedger(
                     baseline={
                         key: getattr(item, key) if first_contact else 0
                         for key in _COUNTER_KEYS
@@ -118,13 +133,22 @@ class DataPlaneCounterLedger:
                     high_water={key: getattr(item, key) for key in _COUNTER_KEYS},
                     current_active=item.current_active,
                 )
-                continue
-            for key in _COUNTER_KEYS:
-                # Note (Jiaxin Deng): clamp; a regressed cumulative must not
-                # lower the display.
-                ledger.high_water[key] = max(ledger.high_water[key], getattr(item, key))
-            ledger.current_active = item.current_active
-            per_worker[(item.worker_id, item.incarnation)] = ledger
+            else:
+                for key in _COUNTER_KEYS:
+                    # Note (Jiaxin Deng): clamp; a regressed cumulative must not
+                    # lower the display.
+                    ledger.high_water[key] = max(
+                        ledger.high_water[key], getattr(item, key)
+                    )
+                ledger.current_active = item.current_active
+            segments = per_worker.setdefault(item.worker_id, {})
+            duplicate = segments.get(item.incarnation)
+            if duplicate is not None:
+                # Note (Jiaxin Deng): the payload is unvalidated on this axis;
+                # fold a repeated key instead of overwriting it, or its counts
+                # vanish with no error.
+                self._retire_worker(item.worker_id, duplicate)
+            segments[item.incarnation] = ledger
 
         # Note (Jiaxin Deng): a report is a full snapshot for that DP, so a
         # segment missing from it has drained for good: fold it into the stable
@@ -141,8 +165,9 @@ class DataPlaneCounterLedger:
         return True
 
     def _retire(self, entry: _LedgerEntry) -> None:
-        for (worker_id, _), ledger in entry.per_worker.items():
-            self._retire_worker(worker_id, ledger)
+        for worker_id, segments in entry.per_worker.items():
+            for ledger in segments.values():
+                self._retire_worker(worker_id, ledger)
 
     def _retire_worker(self, worker_id: str, ledger: _WorkerLedger) -> None:
         slot = self._retired.setdefault(worker_id, {key: 0 for key in _COUNTER_KEYS})
@@ -152,9 +177,7 @@ class DataPlaneCounterLedger:
     def totals(self, worker_id: str) -> dict[str, int]:
         totals = dict(self._retired.get(worker_id, {key: 0 for key in _COUNTER_KEYS}))
         for entry in self._entries.values():
-            for (candidate, _), ledger in entry.per_worker.items():
-                if candidate != worker_id:
-                    continue
+            for ledger in entry.per_worker.get(worker_id, {}).values():
                 for key in _COUNTER_KEYS:
                     totals[key] += ledger.contribution(key)
         return totals
@@ -165,9 +188,8 @@ class DataPlaneCounterLedger:
         for entry in self._entries.values():
             if current - entry.reported_at > self._liveness_secs:
                 continue
-            for (candidate, _), ledger in entry.per_worker.items():
-                if candidate == worker_id:
-                    gauge += ledger.current_active
+            for ledger in entry.per_worker.get(worker_id, {}).values():
+                gauge += ledger.current_active
         return gauge
 
     def overlay(self, worker) -> dict[str, int]:

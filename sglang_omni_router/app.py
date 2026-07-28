@@ -228,6 +228,29 @@ def register_health_routes(
         )
 
 
+def _registry_lock_or_reject(app: FastAPI):
+    """The admin update lock, or a 409 when an update owns or is next in line.
+
+    Note (Jiaxin Deng): the caller must acquire the returned lock with no await
+    in between, or locked() plus acquire stops being atomic. locked() alone is
+    not enough either: release() wakes the first waiter without marking the
+    lock held, so in that window a caller would be admitted and then queue
+    behind an update it never saw.
+    """
+    lock = getattr(app.state, "admin_update_lock", None)
+    if lock is None:
+        return None, None
+    # Note (Jiaxin Deng): a woken waiter is already resolved but has not
+    # resumed yet, so "not done" would filter out exactly the case this
+    # guards; any entry means an update is about to take the lock.
+    queued = bool(getattr(lock, "_waiters", None))
+    if lock.locked() or queued:
+        return None, _error_response(
+            409, "a weight update is in progress; retry when it completes"
+        )
+    return lock, None
+
+
 def register_admin_routes(
     app: FastAPI,
     workers: list[Worker],
@@ -250,19 +273,6 @@ def register_admin_routes(
                 }
             },
         )
-
-    def _registry_lock_or_reject(app: FastAPI):
-        # Note (Jiaxin Deng): a held lock rejects instead of blocking CRUD for
-        # the whole update; the caller must acquire the returned lock with no
-        # await in between, or locked() plus acquire stops being atomic.
-        lock = getattr(app.state, "admin_update_lock", None)
-        if lock is None:
-            return None, None
-        if lock.locked():
-            return None, _error_response(
-                409, "a weight update is in progress; retry when it completes"
-            )
-        return lock, None
 
     @app.post("/workers")
     async def create_worker(request: Request) -> JSONResponse:
@@ -576,11 +586,14 @@ def register_admin_routes(
             try:
                 journal.clear()
             except JournalUnwritableError as exc:
+                # Note (Jiaxin Deng): the unlink may have succeeded and only
+                # its directory sync failed, so do not assert the file is
+                # still there; the operator has to look.
                 return _error_response(
                     503,
                     f"the weight-update journal at {journal.path} could not be "
-                    f"durably resolved ({exc}); every update stays blocked "
-                    "until it is removed",
+                    f"durably resolved ({exc}); inspect it before assuming "
+                    "updates are unblocked",
                 )
         finally:
             if lock is not None:
@@ -876,6 +889,7 @@ async def _broadcast_admin_request_locked(
     # crashed after the broadcast started (fail closed); [] = aborted before
     # anything was sent; list = completed (restore only if all succeeded).
     results: list[dict[str, Any]] | None = None
+    journal_error: str | None = None
     journal = getattr(app.state, "update_journal", None)
     if disable_targets and journal is not None:
         # Note (Jiaxin Deng): journal before disabling/publishing so a crash in
@@ -934,9 +948,15 @@ async def _broadcast_admin_request_locked(
                         # ones that failed.
                         journal.keep([worker.worker_id for worker in workers])
                 except JournalUnwritableError as exc:
-                    # Note (Jiaxin Deng): the in-memory outcome already stands;
-                    # a stale journal only over-disables on recovery, so log it
-                    # rather than replacing the broadcast result with a 500.
+                    # Note (Jiaxin Deng): the in-memory outcome already stands,
+                    # so this is not a 500; but a surviving entry blocks every
+                    # later update behind the 409 gate, which the caller cannot
+                    # see from a 200 alone.
+                    journal_error = (
+                        f"the journal at {journal.path} could not be resolved "
+                        f"({exc}); later updates stay blocked until it is "
+                        "cleared"
+                    )
                     logger.error(f"journal_not_durable path={journal.path} {exc}")
             _notify_registry_change(app)
 
@@ -951,6 +971,8 @@ async def _broadcast_admin_request_locked(
         "worker_count": len(results),
         "results": results,
     }
+    if journal_error is not None:
+        payload["journal_error"] = journal_error
     return JSONResponse(payload, status_code=200 if success else 502)
 
 

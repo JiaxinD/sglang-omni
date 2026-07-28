@@ -68,6 +68,11 @@ DEFAULT_SNAPSHOT_KEEPALIVE_SECS = 2.0
 _ACK_POLL_INTERVAL_SECS = 0.05
 _ADMISSION_HEALTH_READS = 3
 _ADMISSION_HEALTH_READ_DELAY_SECS = 0.01
+# Note (Jiaxin Deng): a DP caches its own fail-closed shed for 50ms and then
+# re-probes, so the shm design already treats a wedge as self-healing. Declaring
+# a total outage faster than that would turn a descheduled writer (cgroup
+# throttling runs to a 100ms period) into an LB eviction.
+_ADMISSION_UNREADABLE_GRACE_SECS = 0.25
 
 
 class WorkerFailureReport(BaseModel):
@@ -139,6 +144,7 @@ def create_control_plane_app(
     snapshot_keepalive_secs: float = DEFAULT_SNAPSHOT_KEEPALIVE_SECS,
     expected_data_planes: int | None = None,
     admission_shm_path: str | None = None,
+    admission_grace_secs: float = _ADMISSION_UNREADABLE_GRACE_SECS,
     journal_path: str | None = None,
 ) -> FastAPI:
     if expected_data_planes is not None and expected_data_planes < 1:
@@ -287,6 +293,8 @@ def create_control_plane_app(
             overlay=ledger.overlay,
         )
 
+    admission_unreadable_since: float | None = None
+
     @app.get("/health")
     async def health() -> JSONResponse:
         now = time.time()
@@ -303,8 +311,9 @@ def create_control_plane_app(
         admission_slots = None
         if admission_view is not None:
             # Note (Jiaxin Deng): a live writer preempted mid-write clears in
-            # microseconds, so debounce before believing the slot is wedged;
-            # await, never spin or sleep the loop.
+            # microseconds, so debounce before believing the slot is wedged.
+            # Each read spins a bounded budget rather than sleeping, and the
+            # waits between them yield instead of blocking the loop.
             for attempt in range(_ADMISSION_HEALTH_READS):
                 try:
                     admission_slots = admission_view.per_slot(now=now)
@@ -317,18 +326,33 @@ def create_control_plane_app(
                     admission_error = str(exc)
                     if attempt + 1 < _ADMISSION_HEALTH_READS:
                         await asyncio.sleep(_ADMISSION_HEALTH_READ_DELAY_SECS)
-        # Note (Jiaxin Deng): a slot still unreadable after the debounce is a
-        # DP that died mid-write, and every sibling's try_acquire fails closed
-        # until the supervisor reclaims it, so nothing can serve.
+        # Note (Jiaxin Deng): a wedge that outlives the grace window is a DP
+        # that died mid-write, and every sibling's try_acquire fails closed
+        # until the supervisor reclaims it, so nothing can serve. Below the
+        # window it is reported but not acted on, because a merely descheduled
+        # writer recovers on its own and a 503 costs an LB eviction.
+        nonlocal admission_unreadable_since
+        if admission_error is None:
+            admission_unreadable_since = None
+        elif admission_unreadable_since is None:
+            admission_unreadable_since = now
         admission_readable = admission_view is None or admission_error is None
+        wedged = (
+            admission_unreadable_since is not None
+            and now - admission_unreadable_since >= admission_grace_secs
+        )
         ready_indices = {
             record.dp_index
             for record in live_dps
-            if admission_readable
+            if not wedged
             and record.last_applied_epoch == cp_epoch
             and record.serving
             and (
                 admission_view is None
+                # Note (Jiaxin Deng): inside the grace window the heartbeat is
+                # the better signal; a descheduled writer must not read as a
+                # DP that stopped owning its slot.
+                or admission_error is not None
                 or slot_generations.get(record.dp_index) == record.generation
             )
         }
@@ -348,7 +372,7 @@ def create_control_plane_app(
         # serving; 503 only when nothing can serve at all.
         no_service = (
             routable == 0
-            or not admission_readable
+            or wedged
             or (expected_data_planes is not None and serving == 0)
         )
         degraded = bool(missing) and serving > 0

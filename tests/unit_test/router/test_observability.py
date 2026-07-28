@@ -100,10 +100,23 @@ def test_generation_bump_retires_the_old_contribution() -> None:
     ledger = DataPlaneCounterLedger()
     ledger.apply(_report(1, 2, generation=1), now=0.0)  # baseline 2
     ledger.apply(_report(7, 10, generation=1), now=0.0)  # contribution 8
-    ledger.apply(_report(1, 3, generation=2), now=0.0)  # new gen: baseline 3
-    assert ledger.totals("w0")["routed_total"] == 8
+    # Note (Jiaxin Deng): the respawned process starts its counters at zero, so
+    # its first report counts in full; baselining it there would silently drop
+    # everything it served before that flush.
+    ledger.apply(_report(1, 3, generation=2), now=0.0)
+    assert ledger.totals("w0")["routed_total"] == 11
     ledger.apply(_report(2, 4, generation=2), now=0.0)
-    assert ledger.totals("w0")["routed_total"] == 9
+    assert ledger.totals("w0")["routed_total"] == 12
+
+
+def test_only_the_first_report_from_a_data_plane_is_a_baseline() -> None:
+    # Note (Jiaxin Deng): a fresh ledger is a CP restart, where the DP has been
+    # running a while, so its accumulated cumulative is the baseline.
+    ledger = DataPlaneCounterLedger()
+    ledger.apply(_report(9, 100, generation=4), now=0.0)
+    assert ledger.totals("w0")["routed_total"] == 0
+    ledger.apply(_report(10, 105, generation=4), now=0.0)
+    assert ledger.totals("w0")["routed_total"] == 5
 
 
 def test_older_generation_reports_are_fenced() -> None:
@@ -201,4 +214,6 @@ def test_a_drained_incarnation_is_folded_and_dropped() -> None:
 
     assert ledger.totals("w0")["routed_total"] == 5
     entry = ledger._entries[0]
-    assert list(entry.per_worker) == [("w0", "inc-b")]
+    assert {wid: list(seg) for wid, seg in entry.per_worker.items()} == {
+        "w0": ["inc-b"]
+    }

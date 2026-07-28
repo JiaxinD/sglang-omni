@@ -31,14 +31,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+
+logger = logging.getLogger(__name__)
 
 STATE_DIR_ENV = "SGLANG_OMNI_ROUTER_STATE_DIR"
 _STATE_DIR_NAME = "sglang-omni-router"
 _STATE_DIR_MODE = 0o700
 _JOURNAL_FILE_MODE = 0o600
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+# Note (Jiaxin Deng): these paths are ours alone, so a symlink sitting on one
+# is an attempt to redirect the write, never a legitimate setup.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _MAX_READABLE_KEY = 48
 
 
@@ -126,9 +132,15 @@ class UpdateJournal:
         return True
 
     def clear(self) -> None:
+        directory = os.path.dirname(self._path) or "."
         try:
             os.unlink(self._path)
         except FileNotFoundError:
+            # Note (Jiaxin Deng): an earlier unlink may have failed its
+            # directory fsync, so absence is not durability; sync again rather
+            # than report a resolution that a crash can undo.
+            if os.path.isdir(directory):
+                self._fsync_dir()
             return
         except OSError as exc:
             raise JournalUnwritableError(f"{self._path}: {exc}") from exc
@@ -146,7 +158,7 @@ class UpdateJournal:
                 _fsync_directory(os.path.dirname(created) or ".")
             fd = os.open(
                 tmp_path,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW,
                 _JOURNAL_FILE_MODE,
             )
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -197,13 +209,15 @@ def _make_private_dir(path: str) -> list[str]:
         if parent == probe:
             break
         probe = parent
-    os.makedirs(path, exist_ok=True)
+    # Note (Jiaxin Deng): pass the mode so a permissive umask cannot leave the
+    # directory world-writable in the window before the chmod lands.
+    os.makedirs(path, mode=_STATE_DIR_MODE, exist_ok=True)
     if os.name == "posix":
         for directory in created:
             try:
                 os.chmod(directory, _STATE_DIR_MODE)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(f"could not tighten {directory} to 0700: {exc}")
     return created
 
 
@@ -217,7 +231,18 @@ def resolve_state_dir(state_dir: str | None = None) -> str:
         return os.path.join(
             os.path.abspath(os.path.expanduser(xdg_state_home)), _STATE_DIR_NAME
         )
-    return os.path.join(os.path.expanduser("~"), ".local", "state", _STATE_DIR_NAME)
+    home = os.path.expanduser("~")
+    if home.startswith("~"):
+        # Note (Jiaxin Deng): expanduser returns the path unchanged when HOME
+        # is unset and the uid has no passwd entry, which is an ordinary
+        # container run under an injected uid. Returning it would put the
+        # journal under the router's cwd, on the ephemeral layer.
+        raise JournalUnwritableError(
+            "cannot resolve a home directory for the router state directory "
+            "(HOME is unset and this uid has no passwd entry); point "
+            f"--router-state-dir or {STATE_DIR_ENV} at a writable persistent path"
+        )
+    return os.path.join(home, ".local", "state", _STATE_DIR_NAME)
 
 
 def ensure_state_dir(state_dir: str) -> str:
@@ -232,9 +257,12 @@ def ensure_state_dir(state_dir: str) -> str:
     # both fail closed on a directory that is perfectly writable.
     probe_path = os.path.join(state_dir, f".write-probe.{os.getpid()}")
     try:
-        _make_private_dir(state_dir)
+        for created in reversed(_make_private_dir(state_dir)):
+            _fsync_directory(os.path.dirname(created) or ".")
         fd = os.open(
-            probe_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _JOURNAL_FILE_MODE
+            probe_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW,
+            _JOURNAL_FILE_MODE,
         )
         os.close(fd)
         try:
