@@ -89,9 +89,9 @@ def _model(cls=_FakeCodecModel, *args) -> _FakeCodecModel:
 
 def _codes(batch: int, frames: int, *, num_codebooks: int = _N, seed: int = 0):
     generator = torch.Generator().manual_seed(seed)
-    return torch.randint(
-        0, 32, (batch, num_codebooks, frames), generator=generator
-    ).to("cuda", torch.long)
+    return torch.randint(0, 32, (batch, num_codebooks, frames), generator=generator).to(
+        "cuda", torch.long
+    )
 
 
 def _runner(model, **kwargs) -> HiggsVocoderCudaGraphRunner:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,8 @@ import torchaudio
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from transformers import HiggsAudioV2TokenizerConfig, HiggsAudioV2TokenizerModel
+
+from sglang_omni.models.higgs_tts.vocoder_cuda_graph import HiggsVocoderCudaGraphRunner
 
 WaveformInput = torch.Tensor | np.ndarray
 
@@ -108,6 +111,7 @@ class HiggsAudioCodec:
         self.model = model
         self.device = device
         self._dtype = next(model.parameters()).dtype
+        self._cg_runner: HiggsVocoderCudaGraphRunner | None = None
 
     @classmethod
     def from_pretrained(
@@ -236,6 +240,31 @@ class HiggsAudioCodec:
             error_label="encode_batch",
         )
 
+    def warmup_cuda_graph(self, shapes: Iterable[tuple[int, int]]) -> None:
+        """Capture and seal decode graphs for these ``(batch, frames)`` shapes.
+
+        Leaves the codec untouched when the graphs are disabled or nothing
+        captures, so the eager path stays exactly as it was.
+        """
+        if self.device.type != "cuda" or self._cg_runner is not None:
+            return
+        wanted = [(int(batch), int(frames)) for batch, frames in shapes]
+        runner = HiggsVocoderCudaGraphRunner(
+            self.model, batch_sizes=sorted({batch for batch, _ in wanted})
+        )
+        runner.warmup(wanted)
+        if runner.captured_shapes():
+            self._cg_runner = runner
+
+    @torch.no_grad()
+    def _decode_model(self, codes_BNT: torch.Tensor) -> torch.Tensor:
+        """Codec decode, replaying a captured graph when the shape matches."""
+        if self._cg_runner is not None:
+            replayed = self._cg_runner.decode(codes_BNT)
+            if replayed is not None:
+                return replayed
+        return self.model.decode(codes_BNT).audio_values
+
     @torch.no_grad()
     def decode(self, codes_TN: torch.Tensor) -> torch.Tensor:
         """``[T, num_codebooks]`` → mono waveform ``[L]``."""
@@ -248,7 +277,7 @@ class HiggsAudioCodec:
             .unsqueeze(0)
             .to(device=self.device, dtype=torch.long)
         )
-        return self.model.decode(codes_BNT).audio_values.squeeze(0).squeeze(0).cpu()
+        return self._decode_model(codes_BNT).squeeze(0).squeeze(0).cpu()
 
     @torch.no_grad()
     def decode_batch(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
@@ -257,7 +286,7 @@ class HiggsAudioCodec:
         def _batch_fn(batch_items: list[torch.Tensor]) -> list[torch.Tensor]:
             stacked = torch.stack(batch_items)
             codes_BNT = stacked.transpose(1, 2).to(device=self.device, dtype=torch.long)
-            audio = self.model.decode(codes_BNT).audio_values.cpu()
+            audio = self._decode_model(codes_BNT).cpu()
             return [audio[j, 0] for j in range(len(batch_items))]
 
         return self._bucketed_batch(
