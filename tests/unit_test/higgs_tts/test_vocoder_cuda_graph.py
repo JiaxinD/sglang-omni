@@ -207,7 +207,7 @@ def test_env_kill_switch_leaves_the_model_untouched(monkeypatch):
     runner.warmup([(1, 16)])
     assert not runner.captured_shapes()
     assert runner.decode(_codes(1, 16)) is None
-    assert model.quantizer.decode is stock_decode
+    assert model.quantizer.decode == stock_decode  # the RVQ rewrite never applied
 
 
 @cuda_only

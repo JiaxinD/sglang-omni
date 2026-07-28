@@ -76,7 +76,7 @@ def graphed_codec():
         "gib": (torch.cuda.memory_allocated() - before) / 1024**3,
     }
     assert codec._cg_runner is not None, "warmup captured nothing"
-    return codec, references, call_site_reference, cost
+    return codec, references, call_site, cost
 
 
 @real_model
@@ -106,10 +106,8 @@ def test_replay_is_bit_identical_across_batch_sizes(graphed_codec, batch):
 @torch.no_grad()
 def test_codec_decode_call_site_is_bit_identical(graphed_codec):
     """The gate on the real entry point, not just the runner."""
-    codec, references, call_site_reference, _ = graphed_codec
-    codes = references[(1, 83)][0]
-    codes_TN = codes[0].transpose(0, 1).cpu()
-    assert torch.equal(codec.decode(codes_TN), call_site_reference)
+    codec, _, (codes_TN, reference), _ = graphed_codec
+    assert torch.equal(codec.decode(codes_TN), reference)
 
 
 @real_model
