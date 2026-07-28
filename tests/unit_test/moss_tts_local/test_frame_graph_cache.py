@@ -183,6 +183,30 @@ def test_frame_graph_replay_is_bit_identical_to_eager(bucket):
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA")
+def test_interleaved_bucket_replays_stay_bit_identical():
+    """Buckets share one graph pool, so a later capture's retained outputs can
+    sit on an earlier capture's freed intermediates. Serving survives that by
+    consuming each replay before the next one; this drives the buckets in a
+    scrambled order under exactly that discipline."""
+    device = torch.device("cuda")
+    torch.manual_seed(29)
+    model = _mini_model(device)
+    model.init_frame_decode_graphs(BUCKETS)
+
+    for step, bucket in enumerate([4, 1, 2, 4, 1, 2, 4]):
+        inputs = _frame_inputs(bucket, device, seed=100 + step)
+        stop_choice, codes, feedback = model.decode_frame_graphed(
+            inputs["hidden_states"],
+            **{k: v for k, v in inputs.items() if k != "hidden_states"},
+        )
+        graphed = (stop_choice.clone(), codes.clone(), feedback.clone())
+        eager = model._decode_frame_graphable(**inputs)
+        for got, want, what in zip(graphed, eager, ("stop", "codes", "feedback")):
+            assert torch.equal(got, want), f"{what} diverged at step {step} bs={bucket}"
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA")
 def test_env_kill_switch_skips_capture_and_leaves_kv_growable(monkeypatch):
     monkeypatch.setenv(MOSS_LOCAL_FRAME_GRAPH_ENV, "0")
     model = _mini_model(torch.device("cuda"))
