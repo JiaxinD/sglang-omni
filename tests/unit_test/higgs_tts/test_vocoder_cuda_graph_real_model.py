@@ -153,6 +153,47 @@ def test_uncaptured_windows_fall_back_to_eager(graphed_codec):
     assert codec._cg_runner.decode(_codes(codec, 8, _BATCH_FRAMES, seed=12)) is None
 
 
+@pytest.fixture(scope="module")
+def compiled_graphed_codec():
+    """The shipped vocoder config: ``compile_decode=True``, then graphs on top.
+
+    ``torch.compile`` does not preserve the eager path's bits, so the baseline
+    that matters here is the compiled decode, captured before the graphs exist.
+    """
+    codec = HiggsAudioCodec.from_pretrained(_CKPT, device="cuda", dtype=torch.bfloat16)
+    codec.model.decode = torch.compile(codec.model.decode, dynamic=True)
+    references = {}
+    with torch.no_grad():
+        warm = torch.zeros(
+            (8, int(codec.model.config.num_quantizers)), dtype=torch.long
+        )
+        codec.decode(warm)
+        for frames in _FRAME_CASES:
+            codes = _codes(codec, 1, frames, seed=frames)
+            references[frames] = (
+                codes,
+                codec.model.decode(codes).audio_values.clone(),
+            )
+    codec.warmup_cuda_graph([(1, frames) for frames in _FRAME_CASES])
+    assert (
+        codec._cg_runner is not None
+    ), "warmup captured nothing over the compiled decode"
+    return codec, references
+
+
+@real_model
+@torch.no_grad()
+@pytest.mark.parametrize("frames", _FRAME_CASES)
+def test_replay_is_bit_identical_to_the_compiled_baseline(
+    compiled_graphed_codec, frames
+):
+    codec, references = compiled_graphed_codec
+    codes, reference = references[frames]
+    replayed = codec._cg_runner.decode(codes)
+    assert replayed is not None, f"(1, {frames}) should have been captured"
+    assert torch.equal(replayed, reference)
+
+
 @real_model
 def test_warmup_cost_is_bounded(graphed_codec):
     codec, _, _, cost = graphed_codec
