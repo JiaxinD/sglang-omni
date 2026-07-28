@@ -16,8 +16,9 @@ separates two different properties and never lets one stand in for the other:
   anything. The draw is row-indexed, so a padded bucket does not shift the live
   rows' draws within a frame.
 * global RNG stream accounting across frames, which the reseeding above would
-  hide. Those tests never reseed mid-run; see the "RNG stream" section, which
-  also documents the padded-replay divergence rather than asserting it away.
+  hide. Those tests never reseed mid-run: they step a graphed and an eager model
+  in lockstep off one seed, so any drift in how much of the generator the tail
+  consumes compounds into the codes. See the "RNG stream" section.
 """
 
 from __future__ import annotations
@@ -101,10 +102,14 @@ def _build_model(device: torch.device) -> Zonos2SGLangModel:
     return model
 
 
-def _armed_model(device: torch.device) -> Zonos2SGLangModel:
+def _armed_model(device: torch.device, buckets=BUCKETS) -> Zonos2SGLangModel:
     model = _build_model(device)
-    model.capture_tail_graphs(list(BUCKETS), _default_params())
+    model.capture_tail_graphs(list(buckets), _default_params())
     return model
+
+
+def _hetero(batch_size: int) -> list[dict]:
+    return [_ROWS[i % len(_ROWS)] for i in range(batch_size)]
 
 
 def _host_flags(rows: list[dict], vocab: int) -> tuple[int, bool, bool]:
@@ -282,21 +287,29 @@ def test_heterogeneous_padded_bucket_bit_identity():
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
 def test_heterogeneous_batch_reuses_one_graph_across_steps():
-    """Per-request params change every step; one key must still serve them.
+    """Per-request inputs change every step; one key must still serve them.
 
-    Each step is compared from a reseeded generator state, so this proves key
-    reuse and per-frame identity only. Cross-frame RNG stream accounting is
-    covered by the "RNG stream" tests below, which never reseed mid-run."""
+    Frames run off ONE seed against an eager model stepping in lockstep, so a
+    graph that consumed the stream differently would show up in the codes."""
     device = torch.device("cuda")
     model = _armed_model(device)
+    eager_model = _armed_model(device)
     rows = _ROWS[:4]
     before = set(model._tail_cache.graphs)
+    _graph_for(model, rows)
 
-    for step in range(3):
-        inputs = _step_inputs(rows, device, step=step)
-        eager_out = _run_eager(model, rows, inputs)
-        graph_out = _run_graph(model, rows, inputs)
-        _assert_identical(graph_out, eager_out, f"step={step}")
+    torch.manual_seed(SEED)
+    graph_frames = [
+        _graph_frame(model, rows, _step_inputs(rows, device, step=step))
+        for step in range(3)
+    ]
+    torch.manual_seed(SEED)
+    eager_frames = [
+        _eager_frame(eager_model, rows, _step_inputs(rows, device, step=step))
+        for step in range(3)
+    ]
+    for step, (got, want) in enumerate(zip(graph_frames, eager_frames)):
+        _assert_identical(got, want, f"step={step}")
 
     minted = set(model._tail_cache.graphs) - before
     assert len(minted) == 1, f"expected one new key, got {sorted(minted)}"
@@ -456,65 +469,62 @@ def test_failed_capture_does_not_consume_the_request_rng_stream(
     _assert_identical(live, reference, "failed capture shifted the RNG stream")
 
 
-def _consecutive_frames(device: torch.device, rows: list[dict], *, graphed: bool):
-    """Run consecutive frames from ONE seed, as serving does. Returns the frame
-    codes plus the generator state left behind."""
-    model = _armed_model(device)
+_CROSS_FRAME_BUCKETS = (1, 2, 4, 8, 16, 32, 48)
+
+
+def _consecutive_frames(
+    device: torch.device, batch_size: int, *, graphed: bool, frames: int = 4
+):
+    """Run consecutive frames off ONE seed, the way serving does: no reseeding
+    between frames, so any drift in global RNG consumption compounds and shows
+    up in the codes. Returns the frames plus the generator state left behind."""
+    rows = _hetero(batch_size)
+    model = _armed_model(device, _CROSS_FRAME_BUCKETS)
     if graphed:
-        _graph_for(model, rows)  # capture up front; neutrality is tested above
+        _graph_for(model, rows)  # capture up front; its neutrality is tested above
     torch.manual_seed(SEED)
-    frames = []
-    for step in range(3):
+    out = []
+    for step in range(frames):
         inputs = _step_inputs(rows, device, step=100 + step)
         run = _graph_frame if graphed else _eager_frame
-        frames.append(run(model, rows, inputs)[0])
-    return frames, torch.cuda.get_rng_state(device).clone()
+        out.append(run(model, rows, inputs)[0])
+    return out, torch.cuda.get_rng_state(device).clone()
 
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
-def test_bucket_exact_replay_tracks_the_eager_rng_stream():
-    """At bs == bucket the replay consumes exactly what the eager tail would, so
-    consecutive frames stay on the same stream position as eager."""
-    device = torch.device("cuda")
-    rows = _ROWS[:4]  # bucket 4, no padding
+@pytest.mark.parametrize(
+    "batch_size, bucket",
+    [(1, 1), (3, 4), (5, 8), (12, 16), (17, 32), (33, 48)],
+    ids=["exact-1", "pad-3of4", "pad-5of8", "pad-12of16", "pad-17of32", "pad-33of48"],
+)
+def test_consecutive_frames_track_the_eager_rng_stream(batch_size: int, bucket: int):
+    """Graphed and eager decode must stay on the same stream across frames.
 
-    eager_frames, eager_state = _consecutive_frames(device, rows, graphed=False)
-    graph_frames, graph_state = _consecutive_frames(device, rows, graphed=True)
+    A padded replay executes the whole captured bucket, so it also draws for the
+    padding rows. That does NOT drift here: ``torch.multinomial`` derives its
+    philox offset increment from the launch configuration, not the row count, so
+    a bucket-sized draw and a live-sized draw bump the generator identically for
+    every bucket in this ladder (measured; the increment is flat at 4 until
+    ~1062 rows, and bucket 48 is 432 rows). Buckets 128 and 256 straddle that
+    threshold and are the only ones where a padded replay could drift, which is
+    unreachable at the shipped cuda_graph_max_bs.
+
+    No reseeding between frames, so a drift would compound into the codes."""
+    device = torch.device("cuda")
+    assert next(b for b in _CROSS_FRAME_BUCKETS if b >= batch_size) == bucket
+
+    eager_frames, eager_state = _consecutive_frames(device, batch_size, graphed=False)
+    graph_frames, graph_state = _consecutive_frames(device, batch_size, graphed=True)
 
     for step, (got, want) in enumerate(zip(graph_frames, eager_frames)):
-        assert torch.equal(got, want), f"frame {step} diverged at bs == bucket"
+        assert torch.equal(got, want), (
+            f"frame {step} diverged from eager (bs={batch_size}, bucket={bucket}); "
+            "a shifted global RNG stream is the likely cause"
+        )
     assert torch.equal(graph_state, eager_state), (
-        "a bucket-exact replay must leave the generator where eager would"
+        f"replay left the generator somewhere else than eager "
+        f"(bs={batch_size}, bucket={bucket})"
     )
-
-
-@pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
-def test_padded_replay_advances_the_rng_for_the_padding_rows():
-    """Documents a real, unfixed divergence rather than hiding it.
-
-    A padded replay executes the whole captured bucket, so ``multinomial`` draws
-    for the padding rows too and the shared generator ends up ahead of where the
-    eager tail would leave it. Frame 0 still matches eager (the draw is
-    row-indexed), but every later frame starts from a different stream position.
-    ZONOS2 rejects a per-request seed, so this shifts an already-shared
-    nondeterministic stream; it is not a broken reproducibility contract."""
-    device = torch.device("cuda")
-    rows = _ROWS[:3]  # bucket 4, one padding row
-
-    eager_frames, eager_state = _consecutive_frames(device, rows, graphed=False)
-    graph_frames, graph_state = _consecutive_frames(device, rows, graphed=True)
-
-    assert torch.equal(graph_frames[0], eager_frames[0]), (
-        "the first frame after a shared seed must still match eager"
-    )
-    assert not torch.equal(graph_state, eager_state), (
-        "expected the padding rows' draws to move the generator; if this now "
-        "holds, the padded-replay limitation was fixed and this test is stale"
-    )
-    assert any(
-        not torch.equal(got, want)
-        for got, want in zip(graph_frames[1:], eager_frames[1:])
-    ), "expected later frames to diverge once the stream position differs"
 
 
 # ---- cache plumbing: env switch, fuse, ceiling, pool ----

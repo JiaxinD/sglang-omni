@@ -482,31 +482,42 @@ class Zonos2SGLangModel(nn.Module):
     def _capture_tail_graph(self, key: tuple) -> torch.cuda.CUDAGraph:
         bucket, top_k_max, any_top_p, any_min_p = key
         flags = dict(top_k_max=top_k_max, any_top_p=any_top_p, any_min_p=any_min_p)
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
-                self._tail_compute(bucket, **flags)
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
+        # Note: (Jiaxin Deng) captures are lazy, so this runs inside a live
+        # request's step, and both the warmups and the recorded pass reach the
+        # sampler's torch.multinomial on the shared generator. Restore it around
+        # the whole capture, on the failure path too, or the request that mints
+        # (or fails) a signature samples from a stream the others never see.
+        cpu_rng_state = torch.random.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state_all()
         try:
-            with torch.cuda.graph(
-                graph,
-                pool=self._tail_cache.memory_pool(),
-                capture_error_mode="thread_local",
-            ):
-                self._tail_compute(bucket, **flags)
-        except Exception:
-            # Note: (Jiaxin Deng) release the graph's memory eagerly; the raising
-            # object may linger on traceback frames.
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):
+                    self._tail_compute(bucket, **flags)
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
             try:
-                graph.reset()
+                with torch.cuda.graph(
+                    graph,
+                    pool=self._tail_cache.memory_pool(),
+                    capture_error_mode="thread_local",
+                ):
+                    self._tail_compute(bucket, **flags)
             except Exception:
-                pass
-            raise
-        torch.cuda.synchronize()
-        return graph
+                # Note: (Jiaxin Deng) release the graph's memory eagerly; the
+                # raising object may linger on traceback frames.
+                try:
+                    graph.reset()
+                except Exception:
+                    pass
+                raise
+            torch.cuda.synchronize()
+            return graph
+        finally:
+            torch.random.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state_all(cuda_rng_state)
 
     @torch.no_grad()
     def run_tail_graph(
