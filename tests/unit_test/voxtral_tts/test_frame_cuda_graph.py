@@ -251,9 +251,9 @@ def test_graph_multi_frame_rng_stream_parity():
     eager = _eager(model, semantic, llm_hidden, steps=4)
     graphed = _run(model, semantic, llm_hidden, steps=4)
 
-    assert len({tuple(frame.flatten().tolist()) for frame in eager}) > 1, (
-        "frames must differ across the RNG stream for this test to bite"
-    )
+    assert (
+        len({tuple(frame.flatten().tolist()) for frame in eager}) > 1
+    ), "frames must differ across the RNG stream for this test to bite"
     for step, (want, got) in enumerate(zip(eager, graphed)):
         assert torch.equal(got, want), f"frame {step} diverged from eager"
     assert len(model._frame_graph_cache.graphs) == 1
@@ -466,6 +466,6 @@ def test_frame_chain_has_no_boolean_mask_assignment():
         for target in node.targets
         if isinstance(target, ast.Subscript)
     ]
-    assert not subscript_targets, (
-        "boolean-mask assignment is not capturable; use torch.where"
-    )
+    assert (
+        not subscript_targets
+    ), "boolean-mask assignment is not capturable; use torch.where"

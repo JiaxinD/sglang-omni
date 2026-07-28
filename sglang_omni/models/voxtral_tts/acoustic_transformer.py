@@ -299,9 +299,7 @@ class _FrameDecodeGraph:
         self.model = model
         self.batch_size = batch_size
         self.semantic_code = torch.zeros(batch_size, dtype=torch.long, device=device)
-        self.llm_hidden = torch.zeros(
-            batch_size, input_dim, dtype=dtype, device=device
-        )
+        self.llm_hidden = torch.zeros(batch_size, input_dim, dtype=dtype, device=device)
         self.noise = torch.zeros(
             batch_size,
             model.model_args.n_acoustic_codebook,
