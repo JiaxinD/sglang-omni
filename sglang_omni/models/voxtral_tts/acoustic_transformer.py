@@ -541,9 +541,9 @@ class FlowMatchingAudioTransformer(nn.Module):
         # Note: (Jiaxin Deng) the draw stays on the host RNG and outside any
         # captured region, so a graphed frame consumes the same seeded stream
         # as the eager one; only the resulting values enter the graph.
-        x_0 = torch.randn(batch_size, self.model_args.n_acoustic_codebook).to(
-            dtype=llm_hidden.dtype, device=llm_hidden.device
-        )
+        x_0 = torch.randn(
+            batch_size, self.model_args.n_acoustic_codebook, device="cpu"
+        ).to(dtype=llm_hidden.dtype, device=llm_hidden.device)
         return self._noise_scale * x_0
 
     def decode_one_frame(

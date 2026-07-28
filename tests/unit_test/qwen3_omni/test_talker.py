@@ -543,6 +543,29 @@ def test_qwen_predictor_decode_graph_matches_eager(monkeypatch: pytest.MonkeyPat
     torch.testing.assert_close(graph_codes, eager_codes)
     torch.testing.assert_close(graph_embeds, eager_embeds)
 
+    # Note: (Jiaxin Deng) a second replay with different inputs catches a stale
+    # persistent buffer, which a single-replay parity check cannot see.
+    next_codes = torch.tensor([[3], [5]], dtype=torch.int, device=device)
+    next_hidden = talker_hidden * -0.5
+    with torch.no_grad():
+        eager_next_codes, eager_next_embeds = (
+            talker._code_predictor_forward_incremental_eager(
+                next_codes,
+                next_hidden,
+            )
+        )
+        eager_next_codes = eager_next_codes.clone()
+        eager_next_embeds = eager_next_embeds.clone()
+        replay_codes, replay_embeds = talker.code_predictor_forward(
+            next_codes,
+            next_hidden,
+        )
+        torch.cuda.synchronize()
+
+    assert len(talker._predictor_graph_cache.graphs) == 1, "must reuse the graph"
+    torch.testing.assert_close(replay_codes, eager_next_codes)
+    torch.testing.assert_close(replay_embeds, eager_next_embeds)
+
 
 class _TupleLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int) -> None:

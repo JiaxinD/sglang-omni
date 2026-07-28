@@ -107,9 +107,9 @@ def test_repeated_capture_failures_fuse_the_path_off(monkeypatch: pytest.MonkeyP
     assert _dispatch(talker, 1) is None
     assert talker._predictor_graph_cache.enabled is True
     assert _dispatch(talker, 2) is None
-    assert talker._predictor_graph_cache.enabled is False, (
-        "the graph path must fuse off after repeated capture failures"
-    )
+    assert (
+        talker._predictor_graph_cache.enabled is False
+    ), "the graph path must fuse off after repeated capture failures"
 
     before = len(attempts)
     assert _dispatch(talker, 4) is None

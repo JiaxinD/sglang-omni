@@ -174,9 +174,11 @@ def test_frame_noise_matches_the_pre_graph_host_rng_draw(batch_size: int):
     llm_hidden = torch.zeros(batch_size, INPUT_DIM, dtype=DTYPE, device=device)
 
     torch.manual_seed(4321)
-    reference = model._noise_scale * torch.randn(batch_size, N_ACOUSTIC).to(
-        dtype=DTYPE, device=device
-    )
+    # Note: (Jiaxin Deng) reference draws on the CPU generator explicitly; an
+    # ambient default-device switch must not silently move the draw to CUDA.
+    reference = model._noise_scale * torch.randn(
+        batch_size, N_ACOUSTIC, device="cpu"
+    ).to(dtype=DTYPE, device=device)
     torch.manual_seed(4321)
     drawn = model._draw_frame_noise(batch_size, llm_hidden)
 
@@ -469,3 +471,26 @@ def test_frame_chain_has_no_boolean_mask_assignment():
     assert (
         not subscript_targets
     ), "boolean-mask assignment is not capturable; use torch.where"
+
+
+def test_frame_noise_is_pinned_to_the_cpu_generator(monkeypatch: pytest.MonkeyPatch):
+    """The draw must stay on the host RNG even under a default-device switch.
+
+    A CUDA draw is a different generator, so a seeded run would silently change
+    its output; the graph path depends on the two paths sharing one stream.
+    """
+    device = torch.device("cuda")
+    model = _build_transformer(device)
+    llm_hidden = torch.zeros(2, INPUT_DIM, dtype=DTYPE, device=device)
+
+    torch.manual_seed(99)
+    expected = model._draw_frame_noise(2, llm_hidden)
+
+    torch.set_default_device("cuda")
+    try:
+        torch.manual_seed(99)
+        drawn = model._draw_frame_noise(2, llm_hidden)
+    finally:
+        torch.set_default_device("cpu")
+
+    assert torch.equal(drawn, expected)

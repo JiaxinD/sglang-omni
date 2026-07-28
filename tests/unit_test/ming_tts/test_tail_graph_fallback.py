@@ -55,6 +55,40 @@ def test_uncovered_batch_returns_none_instead_of_raising():
     assert cache.replay(_inputs(8), noise=None, sde_random=None) is None
 
 
+def test_fallback_reuses_the_same_stochastic_draws_it_would_have_replayed():
+    """The eager fallback must consume the draws already made for this step.
+
+    Regenerating them would give an uncovered batch different noise than a
+    covered one, and would advance the RNG twice for a single frame.
+    """
+    model = object.__new__(MingTTSSGLangModel)
+    model._tail_graphs = _cache([1, 2])
+    draws = []
+    seen = {}
+
+    def _make(*, batch_size, device):
+        drawn = (object(), object(), object())
+        draws.append(drawn)
+        return drawn
+
+    def _eager(inputs, *, noise, timesteps, sde_random):
+        seen["noise"] = noise
+        seen["timesteps"] = timesteps
+        seen["sde_random"] = sde_random
+        return "eager"
+
+    model._make_tail_sampling_inputs = _make
+    model._compute_tail_step = _eager
+
+    assert model.run_tail_step(_inputs(8)) == "eager"
+
+    assert len(draws) == 1, "the fallback must not draw a second time"
+    noise, timesteps, sde_random = draws[0]
+    assert seen["noise"] is noise
+    assert seen["timesteps"] is timesteps
+    assert seen["sde_random"] is sde_random
+
+
 def test_run_tail_step_falls_back_to_eager_when_no_bucket_covers_the_batch():
     model = object.__new__(MingTTSSGLangModel)
     model._tail_graphs = _cache([1, 2])

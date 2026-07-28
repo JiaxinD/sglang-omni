@@ -14,6 +14,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import add_prefix
 from torch import nn
 
+from sglang_omni.cuda_graph import KeyedGraphCache, normalize_batch_sizes
 from sglang_omni.models.qwen3_omni.components.thinker_model import (
     Qwen3OmniMoeThinkerTextAttention,
     Qwen3OmniMoeThinkerTextDecoderLayer,
@@ -42,7 +43,6 @@ from sglang_omni.vendor.sglang.layers import (
     should_use_flashinfer_cutlass_moe_fp4_allgather,
 )
 from sglang_omni.vendor.sglang.models import apply_qk_norm
-from sglang_omni.cuda_graph import KeyedGraphCache, normalize_batch_sizes
 from sglang_omni.vendor.sglang.server_args import get_global_server_args
 from sglang_omni.vendor.sglang.utils import make_layers
 

@@ -322,9 +322,9 @@ def test_row_top_k_below_bucket_width_bit_identity():
     eager_out = _run_eager(model, rows, inputs)
     graph_out = _run_graph(model, rows, inputs)
 
-    assert any(key[1] == 106 for key in model._tail_cache.graphs), (
-        f"expected capture at ladder width 106, got {sorted(model._tail_cache.graphs)}"
-    )
+    assert any(
+        key[1] == 106 for key in model._tail_cache.graphs
+    ), f"expected capture at ladder width 106, got {sorted(model._tail_cache.graphs)}"
     _assert_identical(graph_out, eager_out, "top_k=8 row under a width-106 capture")
 
 

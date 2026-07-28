@@ -339,9 +339,9 @@ def test_mixed_sampled_argmax_rows_fall_back_to_eager():
     eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
     graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
 
-    assert not talker._predictor_graph_cache.graphs, (
-        "mixed batches must not capture a graph"
-    )
+    assert (
+        not talker._predictor_graph_cache.graphs
+    ), "mixed batches must not capture a graph"
     assert torch.equal(graph_codes, eager_codes)
     assert torch.equal(graph_embeds, eager_embeds)
 
@@ -572,9 +572,9 @@ def test_row_top_k_below_bucket_width_bit_identity():
     eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
     graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
 
-    assert any(key[2] == 8 for key in talker._predictor_graph_cache.graphs), (
-        f"expected capture at ladder width 8, got keys {sorted(talker._predictor_graph_cache.graphs)}"
-    )
+    assert any(
+        key[2] == 8 for key in talker._predictor_graph_cache.graphs
+    ), f"expected capture at ladder width 8, got keys {sorted(talker._predictor_graph_cache.graphs)}"
     assert torch.equal(graph_codes, eager_codes)
     assert torch.equal(graph_embeds, eager_embeds)
 
@@ -746,9 +746,9 @@ def test_top_p_removed_ranks_never_sampled():
             row_indices=row_indices,
             semantic_positions=positions,
         )
-        assert token.item() == 3, (
-            f"seed={seed} sampled a nucleus-removed rank: {token.item()}"
-        )
+        assert (
+            token.item() == 3
+        ), f"seed={seed} sampled a nucleus-removed rank: {token.item()}"
 
 
 def test_capture_state_pre_yield_failure_restores_state():
