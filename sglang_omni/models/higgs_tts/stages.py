@@ -512,6 +512,18 @@ def create_vocoder_executor(
             )
             codec.model.decode = eager_decode
 
+    # Note: (Jiaxin Deng) capture the streaming decode windows the scheduler can emit,
+    # [1, max(stride, followup + holdback + overlap)] at batch 1. Wider windows (a
+    # batched final decode, a fast-first-audio catch-up) stay on the decode installed
+    # above, so the emitted audio is the same either way. This runs after the compile
+    # block on purpose: it graphs whichever decode is installed, and a graph over the
+    # compiled decode reproduces the compiled decode's bits, not eager's.
+    max_window_frames = max(
+        stream_stride,
+        stream_followup_stride + stream_holdback_tokens + stream_overlap_tokens,
+    )
+    codec.warmup_cuda_graph([(1, frames) for frames in range(1, max_window_frames + 1)])
+
     return HiggsStreamingVocoderScheduler(
         codec,
         max_batch_size=vocoder_decode_batch_size,
