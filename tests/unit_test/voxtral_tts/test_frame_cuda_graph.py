@@ -105,6 +105,84 @@ def _graphed_model(device: torch.device) -> FlowMatchingAudioTransformer:
     return model
 
 
+def _reference_frame(model, semantic_code, llm_hidden):
+    """The pre-graph chain, transcribed, as an absolute reference.
+
+    The graph-vs-eager comparisons alone would not catch a refactor that moved
+    both paths together, so the ODE body and the host RNG draw are pinned here.
+    """
+    B = semantic_code.shape[0]
+    should_decode = semantic_code != model._end_audio_token_id
+
+    x_0 = torch.randn(B, model.model_args.n_acoustic_codebook).to(
+        dtype=llm_hidden.dtype, device=llm_hidden.device
+    )
+    x_0 = model._noise_scale * x_0
+
+    timesteps = model._timesteps.to(dtype=llm_hidden.dtype)
+    llm_hidden_zero = torch.zeros_like(llm_hidden)
+
+    sampled = x_0
+    for i in range(len(timesteps) - 1):
+        t = timesteps[i]
+        dt = timesteps[i + 1] - timesteps[i]
+        t_emb = model.time_embedding(t.view(-1, 1).repeat(B, 1)).to(llm_hidden.dtype)
+        x_batched = torch.cat([sampled, sampled], dim=0)
+        llm_batched = torch.cat([llm_hidden, llm_hidden_zero], dim=0)
+        t_emb_batched = torch.cat([t_emb, t_emb], dim=0)
+        v_all = model._predict_velocity(
+            x_t=x_batched, llm_output=llm_batched, t_emb=t_emb_batched
+        )
+        v_t, uncond_v_t = v_all[:B], v_all[B:]
+        v_t = model._cfg_alpha * v_t + (1 - model._cfg_alpha) * uncond_v_t
+        sampled = sampled + v_t * dt
+
+    sampled = torch.clamp(sampled, -1, 1)
+    quantized_levels = ((sampled + 1) / 2) * (model.acoustic_embeddings_levels - 1)
+    output_codes = quantized_levels.round().long()
+    output_codes[~should_decode] = model._empty_audio_token_id
+    return output_codes + len(AudioSpecialTokens)
+
+
+# -- reference equivalence -------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="frame CUDA graph needs CUDA")
+@pytest.mark.parametrize("batch_size", [1, 3, 8])
+def test_graph_and_eager_match_the_pre_graph_chain(batch_size: int):
+    device = torch.device("cuda")
+    model = _graphed_model(device)
+    semantic, llm_hidden = _frame_inputs(batch_size, device, masked_rows=(0,))
+
+    torch.manual_seed(777)
+    with torch.no_grad():
+        reference = _reference_frame(model, semantic, llm_hidden).clone()
+
+    (eager,) = _eager(model, semantic, llm_hidden, seed=777)
+    (graphed,) = _run(model, semantic, llm_hidden, seed=777)
+
+    assert torch.equal(eager, reference), "refactored eager chain drifted"
+    assert torch.equal(graphed, reference), "graphed chain drifted"
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="frame CUDA graph needs CUDA")
+@pytest.mark.parametrize("batch_size", [1, 3, 8])
+def test_frame_noise_matches_the_pre_graph_host_rng_draw(batch_size: int):
+    """The draw must consume the same host RNG values, in the same order."""
+    device = torch.device("cuda")
+    model = _build_transformer(device)
+    llm_hidden = torch.zeros(batch_size, INPUT_DIM, dtype=DTYPE, device=device)
+
+    torch.manual_seed(4321)
+    reference = model._noise_scale * torch.randn(batch_size, N_ACOUSTIC).to(
+        dtype=DTYPE, device=device
+    )
+    torch.manual_seed(4321)
+    drawn = model._draw_frame_noise(batch_size, llm_hidden)
+
+    assert torch.equal(drawn, reference)
+
+
 # -- bit identity ----------------------------------------------------------
 
 
