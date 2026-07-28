@@ -155,3 +155,51 @@ def test_normalize_batch_sizes_defaults_and_bounds():
     # None falls back to the backbone's default capture ladder
     assert normalize_batch_sizes(None, max_batch_size=16) == (1, 2, 4, 8, 12, 16)
     assert normalize_batch_sizes([], max_batch_size=8) == (8,)
+
+
+def test_warmup_captures_every_key_largest_first():
+    """Sealed warmup exists so a stage can capture at startup instead of inside
+    a live request. Order is descending because per-key graphs share one pool."""
+    cache = _cache(batch_sizes=[1, 2, 4, 8])
+    order = []
+    warmed = cache.warmup([2, 8, 1, 4], lambda key: order.append(key) or object())
+    assert order == [8, 4, 2, 1]
+    assert warmed == 4
+    assert sorted(cache.graphs) == [1, 2, 4, 8]
+
+
+def test_warmup_skips_duplicates_and_respects_the_ceiling():
+    cache = _cache(max_keys=2)
+    captured = []
+    warmed = cache.warmup([4, 4, 2, 1], lambda key: captured.append(key) or object())
+    assert captured == [4, 2], "the ceiling stops capture, deduped, largest first"
+    assert warmed == 2
+
+
+def test_warmup_tolerates_a_failed_key_and_keeps_going():
+    cache = _cache()
+    seen = []
+
+    def factory(key):
+        seen.append(key)
+        if key == 4:
+            raise RuntimeError("capture failed")
+        return object()
+
+    warmed = cache.warmup([1, 2, 4], factory)
+    assert seen == [4, 2, 1], "a failed key must not abort the remaining warmup"
+    assert warmed == 2
+    assert cache.disabled_keys == frozenset({4})
+
+
+def test_warmup_stops_when_a_precheck_declines():
+    """A VRAM headroom check must be able to stop before capture, not after."""
+    cache = _cache()
+    captured = []
+    warmed = cache.warmup(
+        [1, 2, 4],
+        lambda key: captured.append(key) or object(),
+        precheck=lambda: len(captured) < 2,
+    )
+    assert captured == [4, 2]
+    assert warmed == 2
