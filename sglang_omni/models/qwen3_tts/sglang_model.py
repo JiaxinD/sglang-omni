@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional, Tuple
 
@@ -14,6 +13,7 @@ from sglang.srt.layers.sampler import multinomial_with_seed
 from sglang.srt.utils import add_prefix
 from torch import nn
 
+from sglang_omni.cuda_graph import KeyedGraphCache, normalize_batch_sizes
 from sglang_omni.models.qwen3_omni.components.talker import (  # noqa: E501
     Qwen3OmniMoeTalkerDenseMLP,
     ResizeMLP,
@@ -36,16 +36,9 @@ from sglang_omni.vendor.sglang.server_args import get_global_server_args
 logger = logging.getLogger(__name__)
 
 QTTS_PREDICTOR_GRAPH_ENV = "SGLANG_OMNI_QTTS_PREDICTOR_GRAPH"
-_PREDICTOR_GRAPH_MAX_KEYS = 32
-_PREDICTOR_GRAPH_MAX_FAILURES = 8
 # Note: (Jiaxin Deng) 50 is on the ladder because it is the family checkpoint
 # default, keeping the dominant signature's kernel width exactly as before.
 _PREDICTOR_TOP_K_LADDER = (4, 8, 16, 32, 50, 64, 128, 256, 512, 1024)
-
-
-def _predictor_graph_env_enabled() -> bool:
-    value = os.environ.get(QTTS_PREDICTOR_GRAPH_ENV, "1").strip().lower()
-    return value not in ("0", "false", "off", "no")
 
 
 def _quantize_predictor_top_k(max_top_k: int, vocab_size: int) -> int | None:
@@ -133,7 +126,7 @@ class _PredictorDecodeGraph:
             capture_stream.wait_stream(current_stream)
             with torch.cuda.graph(
                 self.graph,
-                pool=model._predictor_graph_memory_pool(),
+                pool=model._predictor_graph_cache.memory_pool(),
                 stream=capture_stream,
                 capture_error_mode="thread_local",
             ):
@@ -506,17 +499,17 @@ class Qwen3TTSTalker(nn.Module):
         self._sub_sampled_has_top_p = False
         self._sub_sampled_max_top_k = 0
         self._sub_sampled_has_unbounded_top_k = False
-        self._predictor_graph_batch_sizes = self._normalize_predictor_graph_batch_sizes(
-            server_args,
-            max_batch_size=max_batch_size,
+        self._predictor_graph_cache = KeyedGraphCache(
+            name="Qwen3-TTS predictor",
+            batch_sizes=normalize_batch_sizes(
+                getattr(server_args, "cuda_graph_bs", None),
+                max_batch_size=max_batch_size,
+            ),
+            env_var=QTTS_PREDICTOR_GRAPH_ENV,
         )
-        self._predictor_graphs: dict[tuple, _PredictorDecodeGraph] = {}
-        self._predictor_graph_disabled: set[tuple] = set()
-        # Note: (Jiaxin Deng) None = resolved at decode time; bootstrap forces
-        # disable_cuda_graph on during init (deferred capture), so not here.
-        self._predictor_graph_enabled: bool | None = None
-        self._predictor_graph_failure_count = 0
-        self._predictor_graph_pool = None
+        # Note: (Jiaxin Deng) runtime gates resolve at decode time; bootstrap
+        # forces disable_cuda_graph on during init (deferred capture).
+        self._predictor_graph_runtime_checked = False
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -1123,34 +1116,6 @@ class Qwen3TTSTalker(nn.Module):
         )
         return result_codes, summed_embeddings
 
-    @staticmethod
-    def _normalize_predictor_graph_batch_sizes(
-        server_args: object,
-        *,
-        max_batch_size: int,
-    ) -> tuple[int, ...]:
-        raw_batch_sizes = getattr(server_args, "cuda_graph_bs", None)
-        if raw_batch_sizes is None:
-            # Note: (Jiaxin Deng) mirrors the backbone's default capture list
-            # ([1, 2, 4, 8, 12, 16] at max_running_requests=16).
-            raw_batch_sizes = (1, 2, 4, *range(8, int(max_batch_size) + 1, 4))
-        normalized = sorted(
-            {
-                int(batch_size)
-                for batch_size in raw_batch_sizes
-                if 1 <= int(batch_size) <= int(max_batch_size)
-            }
-        )
-        if not normalized or normalized[-1] < int(max_batch_size):
-            normalized.append(int(max_batch_size))
-        return tuple(normalized)
-
-    def _predictor_graph_bucket_size(self, batch_size: int) -> int | None:
-        for bucket_size in self._predictor_graph_batch_sizes:
-            if bucket_size >= batch_size:
-                return bucket_size
-        return None
-
     def _predictor_graph_signature(
         self,
         batch_size: int,
@@ -1222,22 +1187,18 @@ class Qwen3TTSTalker(nn.Module):
                 self._sub_sampled_has_unbounded_top_k,
             ) = saved
 
-    def _predictor_graph_memory_pool(self):
-        # Note: (Jiaxin Deng) one shared pool across keys; private per-graph
-        # pools would retain intermediates per key and scale with diversity.
-        if self._predictor_graph_pool is None:
-            self._predictor_graph_pool = torch.cuda.graph_pool_handle()
-        return self._predictor_graph_pool
-
-    def _resolve_predictor_graph_enabled(self) -> bool:
-        if not _predictor_graph_env_enabled():
-            return False
+    def _check_predictor_graph_runtime(self) -> None:
+        """Resolve the server-arg gates once, on the first decode step."""
+        if self._predictor_graph_runtime_checked:
+            return
+        self._predictor_graph_runtime_checked = True
         server_args = get_global_server_args()
         if bool(server_args.disable_cuda_graph):
-            return False
-        # Note: (Jiaxin Deng) capture under TP would record collectives; the
-        # graphed chain is only validated single-rank, so TP stays eager.
-        return int(getattr(server_args, "tp_size", 1) or 1) == 1
+            self._predictor_graph_cache.disable("disable_cuda_graph is set")
+        elif int(getattr(server_args, "tp_size", 1) or 1) != 1:
+            # Note: (Jiaxin Deng) capture under TP would record collectives; the
+            # graphed chain is only validated single-rank, so TP stays eager.
+            self._predictor_graph_cache.disable("tp_size > 1")
 
     def _predictor_forward_graphed(
         self,
@@ -1245,9 +1206,9 @@ class Qwen3TTSTalker(nn.Module):
         talker_hidden: torch.Tensor,
         semantic_positions: torch.Tensor | None,
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
-        if self._predictor_graph_enabled is None:
-            self._predictor_graph_enabled = self._resolve_predictor_graph_enabled()
-        if not self._predictor_graph_enabled:
+        self._check_predictor_graph_runtime()
+        cache = self._predictor_graph_cache
+        if not cache.enabled:
             return None
         batch_size, seq_len = layer0_codes.shape
         if seq_len != 1 or batch_size == 0:
@@ -1263,42 +1224,21 @@ class Qwen3TTSTalker(nn.Module):
         signature = self._predictor_graph_signature(batch_size, semantic_positions)
         if signature is None:
             return None
-        bucket_size = self._predictor_graph_bucket_size(batch_size)
+        bucket_size = cache.bucket_for(batch_size)
         if bucket_size is None:
             return None
-        key = (bucket_size, *signature)
-        if key in self._predictor_graph_disabled:
-            return None
-        graph = self._predictor_graphs.get(key)
+        graph = cache.get_or_capture(
+            (bucket_size, *signature),
+            lambda: _PredictorDecodeGraph(
+                self,
+                bucket_size,
+                signature,
+                hidden_size=int(talker_hidden.shape[-1]),
+                hidden_dtype=talker_hidden.dtype,
+            ),
+        )
         if graph is None:
-            if len(self._predictor_graphs) >= _PREDICTOR_GRAPH_MAX_KEYS:
-                return None
-            try:
-                graph = _PredictorDecodeGraph(
-                    self,
-                    bucket_size,
-                    signature,
-                    hidden_size=int(talker_hidden.shape[-1]),
-                    hidden_dtype=talker_hidden.dtype,
-                )
-            except Exception:
-                self._predictor_graph_disabled.add(key)
-                self._predictor_graph_failure_count += 1
-                logger.warning(
-                    "Disabling Qwen3-TTS predictor CUDA graph for key=%s",
-                    key,
-                    exc_info=True,
-                )
-                if self._predictor_graph_failure_count >= _PREDICTOR_GRAPH_MAX_FAILURES:
-                    self._predictor_graph_enabled = False
-                    logger.warning(
-                        "Disabling Qwen3-TTS predictor CUDA graphs entirely "
-                        "after %d capture failures",
-                        self._predictor_graph_failure_count,
-                    )
-                return None
-            self._predictor_graphs[key] = graph
-            logger.info("Captured Qwen3-TTS predictor CUDA graph for key=%s", key)
+            return None
         return graph.replay(layer0_codes, talker_hidden, semantic_positions)
 
     def _code_predictor_forward_incremental(

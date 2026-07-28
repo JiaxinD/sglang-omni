@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 import sglang_omni.models.qwen3_omni.components.talker as talker_module
+from sglang_omni.cuda_graph import KeyedGraphCache
 from sglang_omni.model_runner.thinker_model_runner import ThinkerModelRunner
 from sglang_omni.models.qwen3_omni.components.talker import (
     Qwen3OmniTalker,
@@ -412,9 +413,12 @@ def _build_fake_predictor_graph_talker(device: torch.device) -> Qwen3OmniTalker:
     talker._predictor_input_buffer = torch.zeros(4, 5, 8, device=device)
     talker._output_codes = torch.zeros(4, 4, dtype=torch.long, device=device)
     talker._output_embeds = torch.zeros(4, 8, device=device)
-    talker._predictor_decode_graphs = {}
-    talker._predictor_decode_graph_disabled = set()
-    talker._predictor_decode_graph_batch_sizes = (1, 2, 4)
+    talker._predictor_graph_cache = KeyedGraphCache(
+        name="Qwen3-Omni predictor",
+        batch_sizes=(1, 2, 4),
+        env_var=talker_module.QWEN3_OMNI_PREDICTOR_GRAPH_ENV,
+    )
+    talker._predictor_graph_runtime_checked = True
     layer0_embedding = nn.Embedding(16, 8).to(device)
     talker.get_input_embeddings = lambda: layer0_embedding
     talker.code_predictor = SimpleNamespace(
@@ -501,8 +505,8 @@ def test_qwen_predictor_decode_graph_uses_configured_batch_buckets(
 
     assert result_codes.shape == (3, 4, 1)
     assert result_embeds.shape == (3, 1, 8)
-    assert (4, torch.int) in talker._predictor_decode_graphs
-    assert (3, torch.int) not in talker._predictor_decode_graphs
+    assert (4, torch.int) in talker._predictor_graph_cache.graphs
+    assert (3, torch.int) not in talker._predictor_graph_cache.graphs
 
 
 @pytest.mark.skipif(
@@ -535,9 +539,32 @@ def test_qwen_predictor_decode_graph_matches_eager(monkeypatch: pytest.MonkeyPat
         )
         torch.cuda.synchronize()
 
-    assert (2, torch.int) in talker._predictor_decode_graphs
+    assert (2, torch.int) in talker._predictor_graph_cache.graphs
     torch.testing.assert_close(graph_codes, eager_codes)
     torch.testing.assert_close(graph_embeds, eager_embeds)
+
+    # Note: (Jiaxin Deng) a second replay with different inputs catches a stale
+    # persistent buffer, which a single-replay parity check cannot see.
+    next_codes = torch.tensor([[3], [5]], dtype=torch.int, device=device)
+    next_hidden = talker_hidden * -0.5
+    with torch.no_grad():
+        eager_next_codes, eager_next_embeds = (
+            talker._code_predictor_forward_incremental_eager(
+                next_codes,
+                next_hidden,
+            )
+        )
+        eager_next_codes = eager_next_codes.clone()
+        eager_next_embeds = eager_next_embeds.clone()
+        replay_codes, replay_embeds = talker.code_predictor_forward(
+            next_codes,
+            next_hidden,
+        )
+        torch.cuda.synchronize()
+
+    assert len(talker._predictor_graph_cache.graphs) == 1, "must reuse the graph"
+    torch.testing.assert_close(replay_codes, eager_next_codes)
+    torch.testing.assert_close(replay_embeds, eager_next_embeds)
 
 
 class _TupleLinear(nn.Module):
@@ -602,9 +629,12 @@ def _build_real_step_predictor_graph_talker(device: torch.device) -> Qwen3OmniTa
         device=device,
     )
     talker._predictor_v_cache = torch.zeros_like(talker._predictor_k_cache)
-    talker._predictor_decode_graph_batch_sizes = (1, 2, 4)
-    talker._predictor_decode_graphs = {}
-    talker._predictor_decode_graph_disabled = set()
+    talker._predictor_graph_cache = KeyedGraphCache(
+        name="Qwen3-Omni predictor",
+        batch_sizes=(1, 2, 4),
+        env_var=talker_module.QWEN3_OMNI_PREDICTOR_GRAPH_ENV,
+    )
+    talker._predictor_graph_runtime_checked = True
 
     layer = SimpleNamespace(
         input_layernorm=nn.Identity(),
@@ -675,7 +705,7 @@ def test_qwen_predictor_decode_graph_covers_real_incremental_step(
         )
         torch.cuda.synchronize()
 
-    assert (2, torch.int) in talker._predictor_decode_graphs
+    assert (2, torch.int) in talker._predictor_graph_cache.graphs
     torch.testing.assert_close(graph_codes, eager_codes)
     torch.testing.assert_close(graph_embeds, eager_embeds)
 
@@ -717,7 +747,7 @@ def test_qwen_predictor_decode_graph_uses_tensor_device_when_current_device_diff
         torch.cuda.synchronize(device)
 
     assert torch.cuda.current_device() == 0
-    assert (2, torch.int) in talker._predictor_decode_graphs
+    assert (2, torch.int) in talker._predictor_graph_cache.graphs
     torch.testing.assert_close(graph_codes, eager_codes)
     torch.testing.assert_close(graph_embeds, eager_embeds)
 
