@@ -104,6 +104,9 @@ class HiggsAudioCodec:
     """Frozen encode/decode wrapper around :class:`HiggsAudioV2TokenizerModel`."""
 
     SAMPLE_RATE: int = 24_000
+    # Note: (Jiaxin Deng) class-level default so a codec built without __init__
+    # still reads as ungraphed rather than raising on the decode path.
+    _cg_runner: "HiggsVocoderCudaGraphRunner | None" = None
 
     def __init__(
         self, model: HiggsAudioV2TokenizerModel, *, device: torch.device
@@ -111,7 +114,6 @@ class HiggsAudioCodec:
         self.model = model
         self.device = device
         self._dtype = next(model.parameters()).dtype
-        self._cg_runner: HiggsVocoderCudaGraphRunner | None = None
 
     @classmethod
     def from_pretrained(
