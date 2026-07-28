@@ -3180,6 +3180,7 @@ def test_route_registration_split_exposes_exact_route_sets() -> None:
         "/destroy_weights_update_group",
         "/update_weights_from_distributed",
         "/weights_checker",
+        "/weight_update_journal/resolve",
     }
     assert _paths(
         lambda app: register_public_metadata_routes(app, workers, config)
@@ -3272,3 +3273,155 @@ def test_worker_registration_probes_outside_the_update_lock() -> None:
         assert any(
             worker.url == "http://127.0.0.1:8199" for worker in app.state.workers
         )
+
+
+def _resolve_journal_app(tmp_path: Path, journal_bytes: bytes | None):
+    journal_path = str(tmp_path / "update_journal.json")
+    if journal_bytes is not None:
+        Path(journal_path).write_bytes(journal_bytes)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "status": "worker"})
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = create_app(
+        _router_config(),
+        client=async_client,
+        journal_path=journal_path,
+        admin_api_key="secret-key",
+    )
+    return app, journal_path
+
+
+_ADMIN = {"Authorization": "Bearer secret-key"}
+
+
+def test_resolving_the_journal_requires_an_explicit_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): the record is what keeps workers with uncertain
+    # weight versions disabled, so it must not be droppable by a bare POST.
+    worker_id = worker_id_from_url("http://worker-a:8101")
+    app, journal_path = _resolve_journal_app(tmp_path, None)
+    UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
+    with TestClient(app) as client:
+        for body in ({}, {"acknowledge": False}, {"acknowledge": "yes"}):
+            response = client.post(
+                "/weight_update_journal/resolve", json=body, headers=_ADMIN
+            )
+            assert response.status_code == 422
+        assert UpdateJournal(journal_path).pending() == [worker_id]
+
+
+def test_resolving_the_journal_needs_admin_auth(tmp_path: Path) -> None:
+    app, journal_path = _resolve_journal_app(tmp_path, None)
+    UpdateJournal(journal_path).begin("/x", ["w0"])
+    with TestClient(app) as client:
+        response = client.post(
+            "/weight_update_journal/resolve", json={"acknowledge": True}
+        )
+        assert response.status_code == 401
+        assert UpdateJournal(journal_path).pending() == ["w0"]
+
+
+def test_resolving_an_unreadable_journal_unblocks_weight_updates(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): discard() cannot edit a corrupt file, so without this
+    # operation the 409 gate can only be cleared from a shell on the host.
+    worker_id = worker_id_from_url("http://worker-a:8101")
+    app, journal_path = _resolve_journal_app(tmp_path, b"{corrupt")
+    with TestClient(app) as client:
+        update = {"path": "/m"}
+        assert (
+            client.post(
+                "/update_weights_from_disk", json=update, headers=_ADMIN
+            ).status_code
+            == 409
+        )
+        # re-enabling is the documented way out, and it cannot resolve a
+        # journal it cannot read
+        assert (
+            client.put(
+                f"/workers/{worker_id}", json={"disabled": False}, headers=_ADMIN
+            ).status_code
+            == 503
+        )
+
+        response = client.post(
+            "/weight_update_journal/resolve", json={"acknowledge": True}, headers=_ADMIN
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "ok",
+            "journal_readable": False,
+            "resolved_worker_ids": [],
+        }
+        assert not Path(journal_path).exists()
+
+        assert (
+            client.put(
+                f"/workers/{worker_id}", json={"disabled": False}, headers=_ADMIN
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/update_weights_from_disk", json=update, headers=_ADMIN
+            ).status_code
+            == 200
+        )
+
+
+def test_resolving_a_readable_journal_reports_what_it_dropped(tmp_path: Path) -> None:
+    worker_id = worker_id_from_url("http://worker-a:8101")
+    app, journal_path = _resolve_journal_app(tmp_path, None)
+    UpdateJournal(journal_path).begin("/update_weights_from_disk", [worker_id])
+    with TestClient(app) as client:
+        response = client.post(
+            "/weight_update_journal/resolve", json={"acknowledge": True}, headers=_ADMIN
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["journal_readable"] is True
+        assert payload["resolved_worker_ids"] == [worker_id]
+        assert UpdateJournal(journal_path).pending() == []
+
+
+def test_resolving_the_journal_is_rejected_while_an_update_holds_the_lock(
+    tmp_path: Path,
+) -> None:
+    app, journal_path = _resolve_journal_app(tmp_path, None)
+    UpdateJournal(journal_path).begin("/x", ["w0"])
+    with TestClient(app) as client:
+        app.state.admin_update_lock = asyncio.Lock()
+
+        async def _hold() -> None:
+            await app.state.admin_update_lock.acquire()
+
+        asyncio.run(_hold())
+        response = client.post(
+            "/weight_update_journal/resolve", json={"acknowledge": True}, headers=_ADMIN
+        )
+        assert response.status_code == 409
+        assert UpdateJournal(journal_path).pending() == ["w0"]
+
+
+def test_resolving_the_journal_fails_closed_when_it_cannot_be_removed(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): reporting success on a file that survives would leave
+    # every later update blocked behind a gate the operator believes is gone.
+    app, journal_path = _resolve_journal_app(tmp_path, None)
+    UpdateJournal(journal_path).begin("/x", ["w0"])
+    with TestClient(app) as client:
+
+        def _unwritable() -> None:
+            raise JournalUnwritableError("read-only file system")
+
+        app.state.update_journal.clear = _unwritable
+        response = client.post(
+            "/weight_update_journal/resolve", json={"acknowledge": True}, headers=_ADMIN
+        )
+        assert response.status_code == 503
+        assert journal_path in response.json()["error"]["message"]

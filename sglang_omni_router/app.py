@@ -535,6 +535,68 @@ def register_admin_routes(
         _notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker_id": worker.worker_id})
 
+    @app.post("/weight_update_journal/resolve", dependencies=[Depends(_auth)])
+    async def resolve_weight_update_journal(request: Request) -> JSONResponse:
+        """Drop the crash-recovery record after an operator verified weights.
+
+        The journal blocks every weight update until the targets of an
+        interrupted one are re-enabled, and a journal that cannot be read can
+        no longer be resolved that way. Without this the only way out is
+        deleting the file on the host, so a new fail-closed mechanism would
+        ship with no in-band recovery path.
+        """
+        payload, error = await _read_json_object(request)
+        if error is not None:
+            return error
+        if payload.get("acknowledge") is not True:
+            return _error_response(
+                422,
+                "resolving the journal discards the record that keeps workers "
+                "with uncertain weight versions disabled; send "
+                '{"acknowledge": true} to confirm those versions were verified',
+            )
+        journal = getattr(app.state, "update_journal", None)
+        if journal is None:
+            return _error_response(503, "no weight-update journal is configured")
+        # Note (Jiaxin Deng): reject rather than queue behind a running update;
+        # clearing mid-broadcast would erase the record of a transaction whose
+        # outcome is still unknown.
+        lock, rejected = _registry_lock_or_reject(app)
+        if rejected is not None:
+            return rejected
+        if lock is not None:
+            await lock.acquire()
+        try:
+            try:
+                journaled = journal.pending()
+                readable = True
+            except JournalUnreadableError:
+                journaled = []
+                readable = False
+            try:
+                journal.clear()
+            except JournalUnwritableError as exc:
+                return _error_response(
+                    503,
+                    f"the weight-update journal at {journal.path} could not be "
+                    f"durably resolved ({exc}); every update stays blocked "
+                    "until it is removed",
+                )
+        finally:
+            if lock is not None:
+                lock.release()
+        logger.warning(
+            f"weight_update_journal_resolved readable={readable} "
+            f"worker_ids={journaled}"
+        )
+        return JSONResponse(
+            {
+                "status": "ok",
+                "journal_readable": readable,
+                "resolved_worker_ids": journaled,
+            }
+        )
+
     @app.get("/model_info", dependencies=[Depends(_auth)])
     async def model_info(request: Request) -> JSONResponse:
         return await _broadcast_admin_request(app, request, "/model_info")

@@ -475,6 +475,11 @@ _FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("/pause_generation", ("POST",), "pause_generation"),
     ("/continue_generation", ("POST",), "continue_generation"),
     ("/update_weights_from_disk", ("POST",), "update_weights_from_disk"),
+    (
+        "/weight_update_journal/resolve",
+        ("POST",),
+        "resolve_weight_update_journal",
+    ),
     ("/update_weights_from_tensor", ("POST",), "update_weights_from_tensor"),
     ("/init_weights_update_group", ("POST",), "init_weights_update_group"),
     ("/destroy_weights_update_group", ("POST",), "destroy_weights_update_group"),

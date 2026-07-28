@@ -483,6 +483,21 @@ journals. Startup fails if the directory cannot be created or written: there is
 no temp-directory fallback, which would look durable while a reboot silently
 dropped the record.
 
+If the journal itself becomes unreadable, re-enabling cannot resolve it and
+every weight update stays blocked with `409`. Verify the pool's weight
+versions, then drop the record explicitly:
+
+```bash
+curl -X POST http://127.0.0.1:8000/weight_update_journal/resolve \
+  -H "Authorization: Bearer $SGLANG_OMNI_ADMIN_KEY" \
+  -d '{"acknowledge": true}'
+```
+
+The call is admin-authenticated, requires `acknowledge` so the record cannot be
+dropped by accident, reports the worker ids it dropped, and fails with `503` if
+the file could not be removed. The affected workers stay disabled until they
+are re-enabled one by one.
+
 In a container, mount it on a persistent volume:
 
 ```bash
