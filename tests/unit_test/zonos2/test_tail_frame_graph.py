@@ -7,10 +7,18 @@ signature pins only the host branches the capture bakes in: the ladder-quantized
 top-k bound and the top-p / min-p passes. Every per-request value rides a device
 buffer, so one graph has to serve a heterogeneous batch bit-for-bit.
 
-``sample_tts`` draws with ``torch.multinomial`` on the global RNG and CUDA graphs
-capture the generator's philox state, so eager and replayed runs are compared
-under the same seed. That draw is row-indexed, so a padded bucket does not shift
-the live rows' draws.
+``sample_tts`` draws with ``torch.multinomial`` on the global RNG, so this file
+separates two different properties and never lets one stand in for the other:
+
+* per-frame transform identity: graphed and eager outputs for ONE frame started
+  from the same generator state. ``_run_eager`` / ``_run_graph`` reseed on
+  purpose, because a shared starting state is what makes the comparison mean
+  anything. The draw is row-indexed, so a padded bucket does not shift the live
+  rows' draws within a frame.
+* global RNG stream accounting across frames, which the reseeding above would
+  hide. Those tests never reseed mid-run: they step a graphed and an eager model
+  in lockstep off one seed, so any drift in how much of the generator the tail
+  consumes compounds into the codes. See the "RNG stream" section.
 """
 
 from __future__ import annotations
@@ -94,10 +102,14 @@ def _build_model(device: torch.device) -> Zonos2SGLangModel:
     return model
 
 
-def _armed_model(device: torch.device) -> Zonos2SGLangModel:
+def _armed_model(device: torch.device, buckets=BUCKETS) -> Zonos2SGLangModel:
     model = _build_model(device)
-    model.capture_tail_graphs(list(BUCKETS), _default_params())
+    model.capture_tail_graphs(list(buckets), _default_params())
     return model
+
+
+def _hetero(batch_size: int) -> list[dict]:
+    return [_ROWS[i % len(_ROWS)] for i in range(batch_size)]
 
 
 def _host_flags(rows: list[dict], vocab: int) -> tuple[int, bool, bool]:
@@ -153,17 +165,53 @@ def _outputs(model: Zonos2SGLangModel, bs: int) -> tuple:
     )
 
 
-def _run_eager(model: Zonos2SGLangModel, rows: list[dict], inputs: dict) -> tuple:
-    """The runner's eager branch: exact host flags, live batch size, no graph."""
+def _eager_frame(model: Zonos2SGLangModel, rows: list[dict], inputs: dict) -> tuple:
+    """One eager tail frame from the generator's current state (no reseed)."""
     bs = len(rows)
     top_k_max, any_top_p, any_min_p = _host_flags(rows, model.audio_vocab)
     _stage(model, bs, inputs)
-    torch.manual_seed(SEED)
     model._tail_compute(
         bs, top_k_max=top_k_max, any_top_p=any_top_p, any_min_p=any_min_p
     )
     torch.cuda.synchronize()
     return _outputs(model, bs)
+
+
+def _graph_frame(model: Zonos2SGLangModel, rows: list[dict], inputs: dict) -> tuple:
+    """One replayed tail frame from the generator's current state (no reseed)."""
+    graph = _graph_for(model, rows)
+    codes, keys, feedback = model.run_tail_graph(
+        graph,
+        inputs["hidden"],
+        inputs["temperature"],
+        inputs["top_k"],
+        inputs["top_p"],
+        inputs["min_p"],
+        inputs["rep_pen"],
+        inputs["rep_ids"],
+        inputs["break_mask"],
+    )
+    torch.cuda.synchronize()
+    return codes.clone(), keys.clone(), feedback.clone()
+
+
+def _graph_for(model: Zonos2SGLangModel, rows: list[dict]):
+    top_k_max, any_top_p, any_min_p = _host_flags(rows, model.audio_vocab)
+    graph = model.tail_graph(
+        len(rows),
+        top_k_max=top_k_max,
+        any_top_p=any_top_p,
+        any_min_p=any_min_p,
+        window=WINDOW,
+    )
+    assert graph is not None, "expected a captured tail graph for this batch"
+    return graph
+
+
+def _run_eager(model: Zonos2SGLangModel, rows: list[dict], inputs: dict) -> tuple:
+    """The runner's eager branch, reseeded so one frame is comparable to _run_graph."""
+    torch.manual_seed(SEED)
+    return _eager_frame(model, rows, inputs)
 
 
 def _run_graph(model: Zonos2SGLangModel, rows: list[dict], inputs: dict) -> tuple:
@@ -239,17 +287,29 @@ def test_heterogeneous_padded_bucket_bit_identity():
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
 def test_heterogeneous_batch_reuses_one_graph_across_steps():
-    """Per-request params change every step; one key must still serve them."""
+    """Per-request inputs change every step; one key must still serve them.
+
+    Frames run off ONE seed against an eager model stepping in lockstep, so a
+    graph that consumed the stream differently would show up in the codes."""
     device = torch.device("cuda")
     model = _armed_model(device)
+    eager_model = _armed_model(device)
     rows = _ROWS[:4]
     before = set(model._tail_cache.graphs)
+    _graph_for(model, rows)
 
-    for step in range(3):
-        inputs = _step_inputs(rows, device, step=step)
-        eager_out = _run_eager(model, rows, inputs)
-        graph_out = _run_graph(model, rows, inputs)
-        _assert_identical(graph_out, eager_out, f"step={step}")
+    torch.manual_seed(SEED)
+    graph_frames = [
+        _graph_frame(model, rows, _step_inputs(rows, device, step=step))
+        for step in range(3)
+    ]
+    torch.manual_seed(SEED)
+    eager_frames = [
+        _eager_frame(eager_model, rows, _step_inputs(rows, device, step=step))
+        for step in range(3)
+    ]
+    for step, (got, want) in enumerate(zip(graph_frames, eager_frames)):
+        _assert_identical(got, want, f"step={step}")
 
     minted = set(model._tail_cache.graphs) - before
     assert len(minted) == 1, f"expected one new key, got {sorted(minted)}"
@@ -326,6 +386,145 @@ def test_row_top_k_below_bucket_width_bit_identity():
         key[1] == 106 for key in model._tail_cache.graphs
     ), f"expected capture at ladder width 106, got {sorted(model._tail_cache.graphs)}"
     _assert_identical(graph_out, eager_out, "top_k=8 row under a width-106 capture")
+
+
+# ---- RNG stream: capture neutrality and padded-replay accounting ----
+
+# A signature the startup pre-capture does not already hold, so asking for it
+# forces a lazy capture mid-stream.
+_LAZY_ROWS: list[dict] = [
+    dict(temperature=1.15, top_k=100, top_p=0.85, min_p=0.18, repetition_penalty=1.2),
+    dict(temperature=0.9, top_k=64, top_p=0.9, min_p=0.18, repetition_penalty=1.3),
+    dict(temperature=1.2, top_k=32, top_p=0.95, min_p=0.18, repetition_penalty=1.1),
+    dict(temperature=0.75, top_k=16, top_p=0.8, min_p=0.18, repetition_penalty=1.4),
+]
+
+
+def _reference_eager_frame(device: torch.device, rows: list[dict], inputs: dict):
+    """Eager frame with no capture anywhere between the seed and the sample."""
+    model = _armed_model(device)
+    torch.manual_seed(SEED)
+    return _eager_frame(model, rows, inputs)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
+def test_lazy_capture_does_not_consume_the_request_rng_stream():
+    """A capture triggered by a live request must not burn its random draws.
+
+    The runner asks for the graph before it samples, and capture warms up and
+    records the chain, each pass drawing from the global generator. Without a
+    save/restore the first request of a new signature samples from a shifted
+    stream, so it is not reseeded here: the reference and the live run share one
+    seed and nothing in between may move the generator."""
+    device = torch.device("cuda")
+    rows = _LAZY_ROWS
+    inputs = _step_inputs(rows, device, step=11)
+    reference = _reference_eager_frame(device, rows, inputs)
+
+    model = _armed_model(device)
+    assert not any(
+        key[2] for key in model._tail_cache.graphs
+    ), "this signature must not be pre-captured, or the test proves nothing"
+    torch.manual_seed(SEED)
+    live = _graph_frame(model, rows, inputs)
+
+    assert any(key[2] for key in model._tail_cache.graphs), "expected a lazy capture"
+    _assert_identical(live, reference, "lazy capture shifted the RNG stream")
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
+def test_failed_capture_does_not_consume_the_request_rng_stream(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The eager fallback after a failed capture must also see a pristine stream.
+
+    Warmups have already drawn by the time the capture raises, so the restore
+    has to happen on the failure path too."""
+    device = torch.device("cuda")
+    rows = _LAZY_ROWS
+    inputs = _step_inputs(rows, device, step=12)
+    reference = _reference_eager_frame(device, rows, inputs)
+
+    model = _armed_model(device)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated capture failure")
+
+    monkeypatch.setattr(torch.cuda, "graph", boom)
+    torch.manual_seed(SEED)
+    top_k_max, any_top_p, any_min_p = _host_flags(rows, model.audio_vocab)
+    assert (
+        model.tail_graph(
+            len(rows),
+            top_k_max=top_k_max,
+            any_top_p=any_top_p,
+            any_min_p=any_min_p,
+            window=WINDOW,
+        )
+        is None
+    )
+    assert model._tail_cache.disabled_keys, "expected the capture to have failed"
+    live = _eager_frame(model, rows, inputs)
+
+    _assert_identical(live, reference, "failed capture shifted the RNG stream")
+
+
+_CROSS_FRAME_BUCKETS = (1, 2, 4, 8, 16, 32, 48)
+
+
+def _consecutive_frames(
+    device: torch.device, batch_size: int, *, graphed: bool, frames: int = 4
+):
+    """Run consecutive frames off ONE seed, the way serving does: no reseeding
+    between frames, so any drift in global RNG consumption compounds and shows
+    up in the codes. Returns the frames plus the generator state left behind."""
+    rows = _hetero(batch_size)
+    model = _armed_model(device, _CROSS_FRAME_BUCKETS)
+    if graphed:
+        _graph_for(model, rows)  # capture up front; its neutrality is tested above
+    torch.manual_seed(SEED)
+    out = []
+    for step in range(frames):
+        inputs = _step_inputs(rows, device, step=100 + step)
+        run = _graph_frame if graphed else _eager_frame
+        out.append(run(model, rows, inputs)[0])
+    return out, torch.cuda.get_rng_state(device).clone()
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="tail CUDA graph needs CUDA")
+@pytest.mark.parametrize(
+    "batch_size, bucket",
+    [(1, 1), (3, 4), (5, 8), (12, 16), (17, 32), (33, 48)],
+    ids=["exact-1", "pad-3of4", "pad-5of8", "pad-12of16", "pad-17of32", "pad-33of48"],
+)
+def test_consecutive_frames_track_the_eager_rng_stream(batch_size: int, bucket: int):
+    """Graphed and eager decode must stay on the same stream across frames.
+
+    A padded replay executes the whole captured bucket, so it also draws for the
+    padding rows. That does NOT drift here: ``torch.multinomial`` derives its
+    philox offset increment from the launch configuration, not the row count, so
+    a bucket-sized draw and a live-sized draw bump the generator identically for
+    every bucket in this ladder (measured; the increment is flat at 4 until
+    ~1062 rows, and bucket 48 is 432 rows). Buckets 128 and 256 straddle that
+    threshold and are the only ones where a padded replay could drift, which is
+    unreachable at the shipped cuda_graph_max_bs.
+
+    No reseeding between frames, so a drift would compound into the codes."""
+    device = torch.device("cuda")
+    assert next(b for b in _CROSS_FRAME_BUCKETS if b >= batch_size) == bucket
+
+    eager_frames, eager_state = _consecutive_frames(device, batch_size, graphed=False)
+    graph_frames, graph_state = _consecutive_frames(device, batch_size, graphed=True)
+
+    for step, (got, want) in enumerate(zip(graph_frames, eager_frames)):
+        assert torch.equal(got, want), (
+            f"frame {step} diverged from eager (bs={batch_size}, bucket={bucket}); "
+            "a shifted global RNG stream is the likely cause"
+        )
+    assert torch.equal(graph_state, eager_state), (
+        f"replay left the generator somewhere else than eager "
+        f"(bs={batch_size}, bucket={bucket})"
+    )
 
 
 # ---- cache plumbing: env switch, fuse, ceiling, pool ----
