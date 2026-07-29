@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Exact-shape CUDA graphs for the Qwen3-Omni Code2Wav component."""
+"""Exact-shape CUDA graphs for the Qwen3-Omni Code2Wav component.
+
+Each decode re-reads its whole window (the stream chunk plus the left context it
+is given), so nothing survives a call and the persistent-state registry stays
+empty here.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +20,18 @@ from typing import Any
 
 import torch
 
+from sglang_omni.cuda_graph import KeyedGraphCache, PersistentStateRegistry
+
 logger = logging.getLogger(__name__)
 
+CODE2WAV_CUDA_GRAPH_ENV = "SGLANG_OMNI_QWEN3_OMNI_CODE2WAV_GRAPH"
 
-@dataclass(frozen=True, slots=True)
+# Exact-shape keys, one per serial threshold window, so the ceiling only has to
+# stay clear of any window ladder a serving config can produce.
+_DEFAULT_MAX_GRAPH_KEYS = 256
+
+
+@dataclass(frozen=True, order=True, slots=True)
 class GraphKey:
     """One exact Code2Wav input shape, excluding fixed quantizer count."""
 
@@ -156,6 +169,7 @@ class Code2WavCudaGraphRunner:
         num_quantizers: int,
         graph_keys: tuple[GraphKey, ...],
         cuda_api: Any,
+        max_keys: int = _DEFAULT_MAX_GRAPH_KEYS,
     ) -> None:
         self._model = model
         self._device = torch.device(device)
@@ -167,9 +181,16 @@ class Code2WavCudaGraphRunner:
         self._graph_keys = graph_keys
         self._owner_pid = os.getpid()
         self._cuda = cuda_api
-        self._graphs: dict[GraphKey, _CapturedGraph] = {}
-        self._pool: Any | None = None
+        self._cache = KeyedGraphCache(
+            name="Qwen3-Omni Code2Wav",
+            batch_sizes=sorted({key.batch_size for key in graph_keys}),
+            env_var=CODE2WAV_CUDA_GRAPH_ENV,
+            max_keys=max_keys,
+            pool_factory=lambda: self._cuda.graph_pool_handle(),
+        )
+        self._persistent_state = PersistentStateRegistry()
         self._capture_stream: Any | None = None
+        self._capture_failure: str | None = None
         self._enabled = False
         self._disable_reason: str | None = None
         self._build_stats: dict[str, Any] = {
@@ -191,6 +212,7 @@ class Code2WavCudaGraphRunner:
         total_gpu_memory_fraction: float | None,
         graph_keys: tuple[GraphKey, ...],
         cuda_api: Any | None = None,
+        max_keys: int = _DEFAULT_MAX_GRAPH_KEYS,
     ) -> Code2WavCudaGraphRunner:
         """Build the configured serving-reachable serial graphs."""
 
@@ -200,19 +222,22 @@ class Code2WavCudaGraphRunner:
             num_quantizers=num_quantizers,
             graph_keys=graph_keys,
             cuda_api=_TorchCudaApi() if cuda_api is None else cuda_api,
+            max_keys=max_keys,
         )
         runner._build(total_gpu_memory_fraction)
         return runner
 
     def _build(self, total_gpu_memory_fraction: float | None) -> None:
+        if not self._cache.enabled:
+            self._disable_reason = "disabled_by_env"
+            logger.info("Code2Wav CUDA graphs disabled by %s", CODE2WAV_CUDA_GRAPH_ENV)
+            return
         fraction = self._valid_fraction(total_gpu_memory_fraction)
         if fraction is None:
             self._disable_reason = "invalid_total_gpu_memory_fraction"
             return
         self._memory_stats["total_gpu_memory_fraction"] = fraction
 
-        temporary: dict[GraphKey, _CapturedGraph] = {}
-        pool: Any | None = None
         capture_stream: Any | None = None
         before: dict[str, int] | None = None
         failure_reason: str | None = None
@@ -231,14 +256,18 @@ class Code2WavCudaGraphRunner:
                     }
                 )
 
-                pool = self._cuda.graph_pool_handle()
                 capture_stream = self._cuda.new_stream(self._device)
-                for key in reversed(self._graph_keys):
-                    self._build_stats["attempted_graph_count"] += 1
-                    temporary[key] = self._capture_graph(
-                        key,
-                        pool=pool,
-                        stream=capture_stream,
+                captured = self._cache.warmup(
+                    self._graph_keys,
+                    lambda key: self._attempt_capture(key, stream=capture_stream),
+                    precheck=lambda: self._may_capture(graph_budget),
+                )
+                wanted = len(set(self._graph_keys))
+                if captured != wanted:
+                    raise _BuildFailure(
+                        self._capture_failure
+                        or f"incomplete_graph_matrix: captured {captured} of "
+                        f"{wanted} keys"
                     )
 
                 # Capture, replay and equivalence checks enqueue CUDA work. Do
@@ -274,24 +303,50 @@ class Code2WavCudaGraphRunner:
             )
 
         if failure_reason is not None:
-            pool = None
             capture_stream = None
-            self._rollback_build(
-                temporary=temporary,
-                reason=failure_reason,
-            )
+            self._rollback_build(reason=failure_reason)
             return
 
-        self._pool = pool
         self._capture_stream = capture_stream
-        self._graphs = {key: temporary[key] for key in self._graph_keys}
-        self._build_stats["published_graph_count"] = len(self._graphs)
+        self._build_stats["published_graph_count"] = len(self._cache.graphs)
         self._enabled = True
         logger.info(
             "Code2Wav CUDA graph runner published %d exact graphs on %s",
-            len(self._graphs),
+            len(self._cache.graphs),
             self._device,
         )
+
+    def _may_capture(self, graph_budget: int) -> bool:
+        """Stop the capture pass on an exhausted budget or the first failure.
+
+        Note: (Jiaxin Deng) the matrix is all-or-nothing, so once one key fails
+        the rest would only burn VRAM the rollback is about to release.
+        """
+        if self._capture_failure is not None:
+            return False
+        if graph_budget > 0:
+            return True
+        self._capture_failure = (
+            "memory_budget_exceeded: the loaded model already fills the stage "
+            "budget, leaving no room for graphs"
+        )
+        return False
+
+    def _attempt_capture(self, key: GraphKey, *, stream: Any) -> _CapturedGraph:
+        self._build_stats["attempted_graph_count"] += 1
+        try:
+            return self._capture_graph(
+                key,
+                pool=self._cache.memory_pool(),
+                stream=stream,
+            )
+        except Exception as exc:
+            self._capture_failure = (
+                str(exc)
+                if isinstance(exc, _BuildFailure)
+                else f"capture_failed: {type(exc).__name__}: {exc}"
+            )
+            raise
 
     def _capture_graph(
         self,
@@ -311,12 +366,14 @@ class Code2WavCudaGraphRunner:
             device=self._device,
             stream=stream,
         )
+        self._persistent_state.reset()
         graph, static_output = self._cuda.capture(
             self._model,
             static_input,
             pool=pool,
             stream=stream,
         )
+        self._persistent_state.snapshot_addresses()
         with torch.inference_mode():
             eager_output = self._model(static_input).detach().clone()
             graph.replay()
@@ -356,12 +413,7 @@ class Code2WavCudaGraphRunner:
                 f"equivalence_failed: {key}: eager and graph outputs differ"
             )
 
-    def _rollback_build(
-        self,
-        *,
-        temporary: dict[GraphKey, _CapturedGraph],
-        reason: str,
-    ) -> None:
+    def _rollback_build(self, *, reason: str) -> None:
         if "after" not in self._memory_stats:
             try:
                 self._cuda.synchronize(self._device)
@@ -377,9 +429,8 @@ class Code2WavCudaGraphRunner:
                     "Code2Wav CUDA graph rollback snapshot failed: %s",
                     snapshot_exc,
                 )
-        self._graphs.clear()
-        temporary.clear()
-        self._pool = None
+        self._cache.clear()
+        self._cache.disable(reason)
         self._capture_stream = None
         self._enabled = False
         self._disable_reason = reason
@@ -426,7 +477,7 @@ class Code2WavCudaGraphRunner:
             batch_size=int(codes.shape[0]),
             frames=int(codes.shape[2]),
         )
-        captured = self._graphs.get(key)
+        captured = self._cache.graphs.get(key)
         if captured is None:
             return self._eager(codes, key=key, reason="key_miss")
 
@@ -480,8 +531,8 @@ class Code2WavCudaGraphRunner:
         )
 
     def _disable_runtime(self, reason: str) -> None:
-        self._graphs.clear()
-        self._pool = None
+        self._cache.clear()
+        self._cache.disable(reason)
         self._capture_stream = None
         self._enabled = False
         self._disable_reason = reason
@@ -495,6 +546,11 @@ class Code2WavCudaGraphRunner:
                 cleanup_exc,
             )
         logger.exception("Code2Wav CUDA graph replay disabled the runner")
+
+    @property
+    def persistent_state(self) -> PersistentStateRegistry:
+        """Empty: a decode reads only the window it is handed."""
+        return self._persistent_state
 
     def stats(self) -> dict[str, Any]:
         """Return a strict JSON-safe snapshot of build and runtime state."""
@@ -528,6 +584,7 @@ class Code2WavCudaGraphRunner:
 
 
 __all__ = [
+    "CODE2WAV_CUDA_GRAPH_ENV",
     "Code2WavCudaGraphRunner",
     "Code2WavRunResult",
     "GraphKey",

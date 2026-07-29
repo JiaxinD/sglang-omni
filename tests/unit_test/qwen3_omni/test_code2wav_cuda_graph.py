@@ -672,6 +672,70 @@ def test_runtime_replay_failure_is_raised_and_disables_all_graphs() -> None:
     assert len(_model.calls) == calls_before + 1
 
 
+def test_env_kill_switch_skips_capture_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(code2wav_cuda_graph.CODE2WAV_CUDA_GRAPH_ENV, "0")
+    runner, backend, model = _build_runner()
+
+    stats = runner.stats()
+    assert stats["enabled"] is False
+    assert stats["disable_reason"] == "disabled_by_env"
+    assert stats["build"] == {
+        "attempted_graph_count": 0,
+        "published_graph_count": 0,
+    }
+    assert backend.capture_calls == 0
+    assert backend.pool_calls == 0
+
+    calls_before = len(model.calls)
+    result = runner.run(_codes(backend, 1, 10))
+    assert result.execution_mode == "eager"
+    assert result.fallback_reason == "disabled"
+    assert len(model.calls) == calls_before + 1
+
+
+def test_key_ceiling_publishes_nothing_instead_of_a_partial_matrix() -> None:
+    backend = _FakeCudaBackend()
+    runner = Code2WavCudaGraphRunner.build(
+        _FakeModel(),
+        device="cuda:0",
+        num_quantizers=16,
+        total_gpu_memory_fraction=0.5,
+        graph_keys=_DEFAULT_GRAPH_KEYS,
+        cuda_api=backend,
+        max_keys=2,
+    )
+
+    stats = runner.stats()
+    assert backend.capture_calls == 2
+    assert stats["enabled"] is False
+    assert stats["build"]["published_graph_count"] == 0
+    assert stats["disable_reason"].startswith("incomplete_graph_matrix")
+
+
+def test_first_capture_failure_stops_the_pass_and_is_not_retried() -> None:
+    runner, backend, _model = _build_runner(
+        backend=_FakeCudaBackend(capture_error_at=0)
+    )
+
+    assert backend.capture_calls == 1, "a failed key must not be retried"
+    stats = runner.stats()
+    assert stats["build"] == {
+        "attempted_graph_count": 1,
+        "published_graph_count": 0,
+    }
+    assert stats["disable_reason"].startswith("capture_failed")
+
+
+def test_no_persistent_state_is_declared() -> None:
+    """Each decode re-reads its whole window, so nothing crosses calls."""
+    runner, _backend, _model = _build_runner()
+
+    assert runner.persistent_state.is_empty()
+    assert runner.persistent_state.declared_names() == []
+
+
 def test_stats_are_strictly_json_safe_after_success_and_failure() -> None:
     successful, successful_backend, _model = _build_runner()
     successful.run(_codes(successful_backend, 3, 10))
