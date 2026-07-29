@@ -274,3 +274,41 @@ def emit(
         metadata=metadata,
         timestamp_ns=timestamp_ns,
     )
+
+
+def _read_host_boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def emit_mps_model_path_start(request_id: str) -> None:
+    if not _RECORDER.is_active():
+        return
+    emit(
+        request_id=request_id,
+        stage=None,
+        event_name="mps_model_path_start",
+        metadata={
+            "clock": "CLOCK_MONOTONIC",
+            "host_boot_id": _read_host_boot_id(),
+            "monotonic_ns": time.monotonic_ns(),
+        },
+    )
+
+
+def emit_mps_model_path_end(request_id: str, *, status: str) -> None:
+    if not _RECORDER.is_active():
+        return
+    emit(
+        request_id=request_id,
+        stage=None,
+        event_name="mps_model_path_end",
+        metadata={
+            "clock": "CLOCK_MONOTONIC",
+            "host_boot_id": _read_host_boot_id(),
+            "monotonic_ns": time.monotonic_ns(),
+            "status": status,
+        },
+    )

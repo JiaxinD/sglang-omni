@@ -40,6 +40,12 @@ from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.utils import broadcast_pyobj
 
 from sglang_omni.profiler.event_recorder import emit as _emit_event
+from sglang_omni.profiler.event_recorder import (
+    emit_mps_model_path_end as _emit_mps_model_path_end,
+)
+from sglang_omni.profiler.event_recorder import (
+    emit_mps_model_path_start as _emit_mps_model_path_start,
+)
 from sglang_omni.profiler.event_recorder import get_active_stage as _get_active_stage
 from sglang_omni.proto.admin import (
     ADMIN_CONTINUE_GENERATION,
@@ -1316,6 +1322,7 @@ class OmniScheduler:
             if rid in self._prefill_start_done:
                 continue
             self._prefill_start_done.add(rid)
+            _emit_mps_model_path_start(rid)
             _emit_event(
                 request_id=rid,
                 stage=None,
@@ -1367,6 +1374,7 @@ class OmniScheduler:
                 self._run_abort_callback(rid)
                 self._first_emit_done.discard(rid)
                 self._prefill_start_done.discard(rid)
+                _emit_mps_model_path_end(rid, status="aborted")
                 _detach_request_data(req)
                 continue
 
@@ -1413,8 +1421,15 @@ class OmniScheduler:
                 self._run_abort_callback(rid)
 
             if terminal_error is not None:
+                self._first_emit_done.discard(rid)
+                self._prefill_start_done.discard(rid)
+                _emit_mps_model_path_end(rid, status="error")
                 self._emit_request_error(rid, terminal_error)
                 continue
+
+            self._first_emit_done.discard(rid)
+            self._prefill_start_done.discard(rid)
+            _emit_mps_model_path_end(rid, status="success")
             self.outbox.put(
                 OutgoingMessage(
                     request_id=rid,
