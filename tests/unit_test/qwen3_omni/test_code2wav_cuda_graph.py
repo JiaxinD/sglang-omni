@@ -715,7 +715,9 @@ def test_key_ceiling_publishes_nothing_instead_of_a_partial_matrix() -> None:
 
 
 def test_first_capture_failure_stops_the_pass_and_is_not_retried() -> None:
-    runner, backend, _model = _build_runner(backend=_FakeCudaBackend(capture_error_at=0))
+    runner, backend, _model = _build_runner(
+        backend=_FakeCudaBackend(capture_error_at=0)
+    )
 
     assert backend.capture_calls == 1, "a failed key must not be retried"
     stats = runner.stats()

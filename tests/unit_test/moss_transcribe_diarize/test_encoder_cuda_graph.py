@@ -180,7 +180,9 @@ def test_capture_failure_falls_back_to_eager(encoder_bundle):
 
     runner._capture_bucket = boom
     runner.capture(_CHUNK_BUCKETS)
-    assert runner.captured_buckets() == [], "capture failures must be caught -> no graphs"
+    assert (
+        runner.captured_buckets() == []
+    ), "capture failures must be caught -> no graphs"
 
     feat = _feat(num_mel_bins, 2)
     pos = _pos()
