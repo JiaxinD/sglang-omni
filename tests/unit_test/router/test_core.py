@@ -1199,11 +1199,12 @@ def test_router_state_dir_reaches_the_router_config(tmp_path: Path) -> None:
     assert build_config_from_args(args).router_state_dir == str(tmp_path / "state")
 
 
-def test_startup_fails_closed_when_the_state_dir_is_unusable(
+def test_multiprocess_startup_fails_closed_when_the_state_dir_is_unusable(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Note (Jiaxin Deng): no temp-directory fallback: refuse to serve rather than run
-    # weight updates whose journal cannot survive a reboot
+    # Note (Jiaxin Deng): no temp-directory fallback, and the multi-process
+    # router exists to serve weight updates, so a journal it cannot write is a
+    # startup error rather than a surprise on the first update.
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory", encoding="utf-8")
     unusable = str(blocker / "state")
@@ -1213,12 +1214,40 @@ def test_startup_fails_closed_when_the_state_dir_is_unusable(
             [
                 "--worker-urls",
                 "http://127.0.0.1:8101",
+                "--router-processes",
+                "2",
                 "--router-state-dir",
                 unusable,
             ]
         )
 
     assert unusable in capsys.readouterr().err
+
+
+def test_single_process_startup_survives_an_unusable_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Note (Jiaxin Deng): the single-process relay predates the journal, so a
+    # read-only or home-less container must still start; the weight update
+    # refuses instead.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    served: dict = {}
+
+    def _fake_run(app, **kwargs):
+        served["app"] = app
+
+    monkeypatch.setattr(serve_module.uvicorn, "run", _fake_run)
+    serve_module.main(
+        [
+            "--worker-urls",
+            "http://127.0.0.1:8101",
+            "--router-state-dir",
+            str(blocker / "state"),
+        ]
+    )
+
+    assert served["app"] is not None
 
 
 def test_router_processes_multiprocess_runs_the_supervisor(

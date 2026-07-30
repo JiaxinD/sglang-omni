@@ -32,7 +32,10 @@ from sglang_omni_router.app import (
     register_data_routes,
 )
 from sglang_omni_router.config import RouterConfig, WorkerConfig
-from sglang_omni_router.internal_channel import INTERNAL_TOKEN_HEADER
+from sglang_omni_router.internal_channel import (
+    FORWARD_CHANNEL_CONNECTIONS,
+    INTERNAL_TOKEN_HEADER,
+)
 from sglang_omni_router.proxy import HOP_BY_HOP_HEADERS, ProxyHandler
 from sglang_omni_router.selector import WorkerSelector
 from sglang_omni_router.snapshot import SnapshotReader, WorkerSnapshot
@@ -51,6 +54,10 @@ _FAILURE_REPORT_BACKOFF_SECS = 0.2
 # Note (Jiaxin Deng): bound pending report tasks so a slow CP cannot pile up
 # retry tasks (and their sockets) on the DP.
 _FAILURE_REPORT_MAX_PENDING = 64
+# Note (Jiaxin Deng): forwarded admin bodies are small JSON, and this path runs
+# before the CP checks the admin key.
+_MAX_FORWARD_BODY_BYTES = 1024 * 1024
+_MAX_CONCURRENT_FORWARDS = 2 * FORWARD_CHANNEL_CONNECTIONS
 # Note (Jiaxin Deng): definitive (non-428) registration rejections before the
 # DP fails closed; an unregistered DP escapes the weight-update ACK barrier.
 _REGISTER_REJECT_LIMIT = 10
@@ -525,14 +532,15 @@ _FORWARD_RESPONSE_STRIP = {
 def _register_cp_forwarding(
     app: FastAPI, internal_client: httpx.AsyncClient, config: RouterConfig
 ) -> None:
+    in_flight = 0
+
     def _payload_too_large() -> JSONResponse:
         return JSONResponse(
             status_code=413,
             content={
                 "error": {
                     "message": (
-                        "request body exceeds max_payload_size "
-                        f"({config.max_payload_size} bytes)"
+                        "admin request body exceeds " f"{_MAX_FORWARD_BODY_BYTES} bytes"
                     ),
                     "type": "payload_too_large",
                     "code": 413,
@@ -541,17 +549,41 @@ def _register_cp_forwarding(
         )
 
     async def _forward(request: Request) -> Response:
-        # Note (Jiaxin Deng): bound the body before buffering; auth happens on
-        # the CP, so this pre-auth path must not exhaust DP memory.
+        # Note (Jiaxin Deng): this path buffers before the CP authenticates, so
+        # it is bounded on its own terms rather than by --max-payload-size,
+        # which sizes model traffic. Admin bodies are small JSON; without both
+        # bounds unauthenticated callers could hold N x 512MiB of DP memory.
+        nonlocal in_flight
+        if in_flight >= _MAX_CONCURRENT_FORWARDS:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "too many concurrent admin requests",
+                        "type": "overloaded_error",
+                        "code": 503,
+                    }
+                },
+                headers={"Retry-After": "1"},
+            )
+        in_flight += 1
+        try:
+            return await _forward_bounded(request)
+        finally:
+            in_flight -= 1
+
+    async def _forward_bounded(request: Request) -> Response:
         declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > config.max_payload_size:
+        if declared and declared.isdigit() and int(declared) > _MAX_FORWARD_BODY_BYTES:
             return _payload_too_large()
         received = bytearray()
         async for chunk in request.stream():
             received.extend(chunk)
-            if len(received) > config.max_payload_size:
+            if len(received) > _MAX_FORWARD_BODY_BYTES:
+                received.clear()
                 return _payload_too_large()
         body = bytes(received)
+        received.clear()
         # Note (Jiaxin Deng): raw_path keeps percent-encoding intact (worker
         # ids contain encoded slashes a decode/re-encode round trip loses).
         raw_path = request.scope.get("raw_path")

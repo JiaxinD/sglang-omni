@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import mmap
 import os
+import platform
 import secrets
 import signal
 import socket
@@ -64,6 +65,11 @@ SNAPSHOT_PATH_ENV = "SGLANG_OMNI_ROUTER_SNAPSHOT_PATH"
 EXPECTED_DPS_ENV = "SGLANG_OMNI_ROUTER_EXPECTED_DPS"
 ADMISSION_SHM_ENV = "SGLANG_OMNI_ROUTER_ADMISSION_SHM"
 LOG_LEVEL_ENV = "SGLANG_OMNI_ROUTER_LOG_LEVEL"
+
+# Note (Jiaxin Deng): the shared admission seqlock relies on x86-64 store
+# ordering, so anywhere else the protocol is simply unvalidated; refuse rather
+# than run it and hope.
+SUPPORTED_MACHINES = ("x86_64", "amd64")
 
 _LISTEN_BACKLOG = 2048
 _SHUTDOWN_GRACE_SECS = 10.0
@@ -215,6 +221,13 @@ class RouterSupervisor:
                 f"router_processes={router_processes}; raise --max-connections/"
                 "--max-inflight or lower the process count (the soft bound's "
                 "N-1 overshoot would dominate such a small budget)"
+            )
+        machine = platform.machine().lower()
+        if router_processes > 1 and machine not in SUPPORTED_MACHINES:
+            raise ValueError(
+                f"multi-process admission is validated on x86-64 only and this "
+                f"machine reports {machine or 'unknown'}; run with "
+                "--router-processes 1"
             )
         if config.policy == "least_request" and router_processes > 1:
             raise ValueError(

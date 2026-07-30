@@ -55,7 +55,7 @@ from sglang_omni_router.observability import (
     StaleCounterGenerationError,
 )
 from sglang_omni_router.snapshot import SnapshotReader, SnapshotWorker, SnapshotWriter
-from sglang_omni_router.update_journal import UpdateJournal, default_journal_path
+from sglang_omni_router.update_journal import build_journal
 from sglang_omni_router.worker import Worker, WorkerState, build_workers
 
 logger = logging.getLogger("sglang_omni_router.control_plane")
@@ -156,9 +156,8 @@ def create_control_plane_app(
     # Note (Jiaxin Deng): a durable path (keyed by host:port) outside the
     # per-run workdir; the journal must survive a host reboot, not just a CP
     # respawn, because the remote workers do.
-    journal = UpdateJournal(
-        journal_path
-        or default_journal_path(config.host, config.port, config.router_state_dir)
+    journal = build_journal(
+        config.host, config.port, config.router_state_dir, journal_path
     )
 
     admission_view: AdmissionAggregateView | None = None

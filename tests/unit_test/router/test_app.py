@@ -3474,3 +3474,76 @@ def test_a_journal_that_cannot_be_cleared_is_reported_on_the_success(
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert journal_path in response.json()["journal_error"]
+
+
+def test_weight_update_is_refused_without_a_durable_state_directory(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): startup stays up for a plain relay, but an update
+    # with nowhere to record its target set must fail closed.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, request=request)
+        sent.append(request.url.path)
+        return httpx.Response(200, json={"success": True}, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = _router_config(router_state_dir=str(blocker / "state"))
+    app = create_app(config, client=async_client)
+    with TestClient(app) as client:
+        response = client.post("/update_weights_from_disk", json={"path": "/m"})
+
+    assert response.status_code == 503
+    assert sent == []
+    assert not any(worker.disabled for worker in app.state.workers)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_upstream_send_returns_the_active_gauge() -> None:
+    # Note (Jiaxin Deng): a client disconnect cancels the send await, and
+    # neither httpx handler sees it; a leaked gauge keeps the worker looking
+    # busy and stops a retiring incarnation from ever draining.
+    from sglang_omni_router.route_metadata import RouteMetadata
+
+    config = _router_config()
+    workers = build_workers(config.workers)
+    worker = workers[0]
+
+    class _CancellingClient:
+        def build_request(self, *args, **kwargs):
+            return object()
+
+        async def send(self, request, **kwargs):
+            raise asyncio.CancelledError()
+
+    proxy = proxy_module.ProxyHandler(
+        config=config,
+        workers=workers,
+        selector=WorkerSelector(config.policy),
+        client=_CancellingClient(),
+    )
+    metadata = RouteMetadata(
+        request_id="r1",
+        model=None,
+        stream=False,
+        required_capabilities=set(),
+        body_exceeds_metadata_limit=False,
+        route_capabilities_header_present=False,
+    )
+    release = proxy_module._ReleaseOnce(proxy.admission)
+
+    with pytest.raises(asyncio.CancelledError):
+        await proxy._forward_relay(
+            _request_without_content_length([b"{}"]),
+            "/generate",
+            b"{}",
+            metadata,
+            worker,
+            release,
+        )
+
+    assert worker.active_requests == 0

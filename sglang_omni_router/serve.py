@@ -164,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Number of data-plane processes. 1 (default) keeps the current "
             "single-process router. Values >= 2 run the multi-process "
-            "control-plane/data-plane split (Linux only)."
+            "control-plane/data-plane split (x86-64 Linux only)."
         ),
     )
     parser.add_argument(
@@ -307,10 +307,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             config = build_config_from_args(args)
 
         check_file_descriptor_limit(config, strict=args.strict_limits)
-        # Note (Jiaxin Deng): fail closed here rather than on the first weight
-        # update, which would discover the bad path with the pool disabled.
-        state_dir = ensure_state_dir(resolve_state_dir(config.router_state_dir))
-        logger.info(f"Router durable state directory: {state_dir}")
+        # Note (Jiaxin Deng): the multi-process router exists to serve weight
+        # updates, so a state directory it cannot use is a startup error rather
+        # than a surprise on the first update. The single-process relay predates
+        # the journal and must still start read-only or home-less; there an
+        # update refuses instead, with this warning as the early signal.
+        try:
+            state_dir = ensure_state_dir(resolve_state_dir(config.router_state_dir))
+            logger.info(f"Router durable state directory: {state_dir}")
+        except JournalUnwritableError:
+            if args.router_processes > 1:
+                raise
+            logger.warning(
+                "no durable state directory; weight updates will be refused "
+                "until --router-state-dir points at a writable persistent path"
+            )
         if args.router_processes > 1:
             # Note (Jiaxin Deng): the children rebuild the app from the config
             # file, so the admin key and log level travel via the environment.

@@ -33,7 +33,7 @@ from sglang_omni_router.update_journal import (
     JournalUnreadableError,
     JournalUnwritableError,
     UpdateJournal,
-    default_journal_path,
+    build_journal,
 )
 from sglang_omni_router.worker import (
     HEALTH_STATE_UNHEALTHY,
@@ -114,9 +114,8 @@ def create_app(
     # Note (Jiaxin Deng): the single-process router shares the CP's crash-safe
     # journal, so a crash mid-update fails closed instead of returning success
     # with the pool left disabled.
-    journal = UpdateJournal(
-        journal_path
-        or default_journal_path(config.host, config.port, config.router_state_dir)
+    journal = build_journal(
+        config.host, config.port, config.router_state_dir, journal_path
     )
     timeout = httpx.Timeout(config.request_timeout_secs)
     owns_client = client is None

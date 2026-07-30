@@ -451,6 +451,13 @@ class ProxyHandler:
                 content={"error": {"message": "upstream request failed"}},
                 headers=self._diagnostic_headers(worker, metadata),
             )
+        except BaseException:
+            # Note (Jiaxin Deng): a client disconnect cancels this await, and
+            # neither httpx handler sees it. Without returning the gauge the
+            # worker looks busy forever, and a retiring incarnation never
+            # drains, so the data plane reports it to the CP indefinitely.
+            worker.decrement_active()
+            raise
 
         worker_failure_recorded = False
 

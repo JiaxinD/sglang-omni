@@ -13,6 +13,7 @@ from sglang_omni_router.update_journal import (
     JournalUnreadableError,
     JournalUnwritableError,
     UpdateJournal,
+    build_journal,
     default_journal_path,
     ensure_state_dir,
     resolve_state_dir,
@@ -367,3 +368,20 @@ def test_an_unresolvable_home_fails_closed_instead_of_using_a_relative_path(
         resolve_state_dir()
 
     assert "--router-state-dir" in str(excinfo.value)
+
+
+def test_build_journal_refuses_updates_when_it_has_no_durable_home(
+    tmp_path: Path,
+) -> None:
+    # Note (Jiaxin Deng): a router that never updates weights must still start,
+    # so reads report no transaction; an update that cannot record its targets
+    # must not run.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    journal = build_journal("0.0.0.0", 8000, str(blocker / "state"))
+
+    assert journal.pending() == []
+    assert journal.has_pending() is False
+    assert journal.discard("w0") is True
+    with pytest.raises(JournalUnwritableError):
+        journal.begin("/update_weights_from_disk", ["w0"])

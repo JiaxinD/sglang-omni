@@ -9,7 +9,11 @@ import httpx
 from fastapi.testclient import TestClient
 
 from sglang_omni_router.config import RouterConfig, WorkerConfig
-from sglang_omni_router.data_plane import DataPlaneWorkerView, create_data_plane_app
+from sglang_omni_router.data_plane import (
+    _MAX_FORWARD_BODY_BYTES,
+    DataPlaneWorkerView,
+    create_data_plane_app,
+)
 from sglang_omni_router.snapshot import SnapshotWorker, SnapshotWriter
 
 
@@ -655,12 +659,18 @@ def test_forwarded_admin_bodies_are_bounded_before_buffering(
         counter_flush_interval_secs=600,
     )
     with TestClient(app) as tc:
-        big = b"x" * 4096
-        response = tc.post("/update_weights_from_disk", content=big)
+        # Note (Jiaxin Deng): the admin cap is independent of
+        # --max-payload-size, which sizes model traffic; this path buffers
+        # before the CP checks the key, so it gets its own small bound.
+        oversize = b"x" * (_MAX_FORWARD_BODY_BYTES + 1)
+        response = tc.post("/update_weights_from_disk", content=oversize)
         assert response.status_code == 413
         assert response.json()["error"]["type"] == "payload_too_large"
         assert all(path != "/update_weights_from_disk" for path, _ in internal.requests)
-        assert tc.post("/update_weights_from_disk", content=b"ok").status_code == 200
+        # above max_payload_size (1024 here) but a legitimate admin body
+        assert (
+            tc.post("/update_weights_from_disk", content=b"x" * 4096).status_code == 200
+        )
 
 
 def test_dp_answers_cors_preflight_like_the_single_process_app(
@@ -913,3 +923,43 @@ def test_control_traffic_survives_a_saturated_forwarding_pool(tmp_path: Path) ->
             assert len(beats) >= 1
         finally:
             occupy.join(timeout=15)
+
+
+def test_forwarded_admin_requests_are_bounded_in_concurrency(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): unauthenticated callers reach this path, so an
+    # unbounded number of them must not each hold a buffered body.
+    from sglang_omni_router.data_plane import _MAX_CONCURRENT_FORWARDS
+
+    async def _cp_handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1.0)
+        return httpx.Response(200, json={"status": "ok"})
+
+    app = create_data_plane_app(
+        _config(),
+        snapshot_path=str(tmp_path / "w.json"),
+        dp_index=0,
+        generation=1,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(_Recorder().handler)),
+        internal_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(_cp_handler), base_url="http://cp"
+        ),
+        heartbeat_interval_secs=600,
+        counter_flush_interval_secs=600,
+    )
+    statuses: list[int] = []
+    with TestClient(app) as tc:
+        threads = [
+            threading.Thread(
+                target=lambda: statuses.append(
+                    tc.post("/pause_generation", json={}).status_code
+                )
+            )
+            for _ in range(_MAX_CONCURRENT_FORWARDS + 4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+    assert 503 in statuses
+    assert statuses.count(200) <= _MAX_CONCURRENT_FORWARDS

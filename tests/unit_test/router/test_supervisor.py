@@ -582,3 +582,24 @@ def test_supervisor_creates_and_reclaims_admission_slots(tmp_path: Path) -> None
     assert harness.supervisor.dp_slots[1].generation == 2
     harness.supervisor.shutdown()
     assert not (tmp_path / "admission.shm").exists()
+
+
+@pytest.mark.parametrize("machine", ["aarch64", "arm64", "riscv64", ""])
+def test_multiprocess_is_refused_off_x86_64(
+    machine: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Note (Jiaxin Deng): the seqlock relies on x86-64 store ordering, so
+    # anywhere else the protocol is unvalidated; warning and running it anyway
+    # would ship a silent correctness gamble.
+    import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "machine", lambda: machine)
+    with pytest.raises(ValueError, match="x86-64"):
+        RouterSupervisor(_config(), router_processes=2)
+
+
+def test_single_process_is_allowed_off_x86_64(monkeypatch: pytest.MonkeyPatch) -> None:
+    import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "machine", lambda: "aarch64")
+    assert RouterSupervisor(_config(), router_processes=1) is not None

@@ -61,6 +61,57 @@ class JournalUnwritableError(Exception):
     """
 
 
+class UnavailableJournal:
+    """Stand-in when no durable state directory could be resolved.
+
+    A router that never updates weights must still start (the single-process
+    relay predates the journal entirely), but an update with nowhere to record
+    its target set must not run. So reads report no transaction and the write
+    that would begin one refuses.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    @property
+    def path(self) -> str:
+        return f"<no durable state directory: {self._reason}>"
+
+    def exists(self) -> bool:
+        return False
+
+    def pending(self) -> list[str]:
+        return []
+
+    def has_pending(self) -> bool:
+        return False
+
+    def begin(self, path: str, worker_ids: list[str]) -> None:
+        raise JournalUnwritableError(self._reason)
+
+    def keep(self, worker_ids: list[str]) -> None:
+        raise JournalUnwritableError(self._reason)
+
+    def discard(self, worker_id: str) -> bool:
+        return True
+
+    def clear(self) -> None:
+        return None
+
+
+def build_journal(
+    host: str, port: int, state_dir: str | None, explicit_path: str | None = None
+) -> UpdateJournal | UnavailableJournal:
+    """The endpoint's journal, or a refusing stand-in if it has no home."""
+    if explicit_path:
+        return UpdateJournal(explicit_path)
+    try:
+        return UpdateJournal(default_journal_path(host, port, state_dir))
+    except JournalUnwritableError as exc:
+        logger.error(f"weight updates will be refused: {exc}")
+        return UnavailableJournal(str(exc))
+
+
 class UpdateJournal:
     def __init__(self, path: str) -> None:
         self._path = path
