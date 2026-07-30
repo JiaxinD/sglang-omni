@@ -99,19 +99,6 @@ class UnavailableJournal:
         return None
 
 
-def build_journal(
-    host: str, port: int, state_dir: str | None, explicit_path: str | None = None
-) -> UpdateJournal | UnavailableJournal:
-    """The endpoint's journal, or a refusing stand-in if it has no home."""
-    if explicit_path:
-        return UpdateJournal(explicit_path)
-    try:
-        return UpdateJournal(default_journal_path(host, port, state_dir))
-    except JournalUnwritableError as exc:
-        logger.error(f"weight updates will be refused: {exc}")
-        return UnavailableJournal(str(exc))
-
-
 class UpdateJournal:
     def __init__(self, path: str) -> None:
         self._path = path
@@ -132,7 +119,11 @@ class UpdateJournal:
         try:
             with open(self._path, encoding="utf-8") as f:
                 data = json.load(f)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
+            # Note (Jiaxin Deng): POSIX reports ENOTDIR when an ancestor is a
+            # regular file. No journal can exist under such a path, so treating
+            # it as unreadable would fail closed and disable the pool for a
+            # router that never wrote one.
             return []
         except (OSError, ValueError) as exc:
             raise JournalUnreadableError(str(exc)) from exc
@@ -352,3 +343,19 @@ def default_journal_path(host: str, port: int, state_dir: str | None = None) -> 
     return os.path.join(
         resolve_state_dir(state_dir), _endpoint_key(host, port), "update_journal.json"
     )
+
+
+def build_journal(
+    host: str, port: int, state_dir: str | None, explicit_path: str | None = None
+) -> UpdateJournal | UnavailableJournal:
+    """The endpoint's journal, or a refusing stand-in if it has no home."""
+    if explicit_path:
+        return UpdateJournal(explicit_path)
+    try:
+        resolved = ensure_state_dir(resolve_state_dir(state_dir))
+        return UpdateJournal(
+            os.path.join(resolved, _endpoint_key(host, port), "update_journal.json")
+        )
+    except JournalUnwritableError as exc:
+        logger.error(f"weight updates will be refused: {exc}")
+        return UnavailableJournal(str(exc))
