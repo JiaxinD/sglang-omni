@@ -290,7 +290,7 @@ def test_atomic_summary_validation_rejects_dirty_or_partial_evidence(
         runtime.validate_final_summary(loaded)
 
 
-def test_scheduler_mps_activity_is_monotonic_and_default_off(
+def test_scheduler_model_path_activity_is_monotonic_and_default_off(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -298,21 +298,21 @@ def test_scheduler_mps_activity_is_monotonic_and_default_off(
 
     recorder = event_recorder.get_recorder()
     recorder.stop()
-    event_recorder.emit_mps_model_path_start("request-off")
+    event_recorder.emit_model_path_start("request-off")
     assert recorder.is_active() is False
 
     path = recorder.start("run-unit", str(tmp_path), "tts_engine")
     monkeypatch.setattr(event_recorder.time, "monotonic_ns", lambda: 123456)
     monkeypatch.setattr(event_recorder, "_read_host_boot_id", lambda: "boot-test")
-    event_recorder.emit_mps_model_path_start("request-on")
-    event_recorder.emit_mps_model_path_end("request-on", status="success")
+    event_recorder.emit_model_path_start("request-on")
+    event_recorder.emit_model_path_end("request-on", status="success")
     recorder.stop()
     emitted = [
         json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()
     ]
     assert [item["event_name"] for item in emitted] == [
-        "mps_model_path_start",
-        "mps_model_path_end",
+        "model_path_start",
+        "model_path_end",
     ]
     assert all(item["metadata"]["monotonic_ns"] == 123456 for item in emitted)
     assert all(item["metadata"]["clock"] == "CLOCK_MONOTONIC" for item in emitted)
@@ -320,7 +320,7 @@ def test_scheduler_mps_activity_is_monotonic_and_default_off(
     assert emitted[-1]["metadata"]["status"] == "success"
 
 
-def test_mps_activity_preserves_the_profiler_wall_clock_domain(
+def test_model_path_activity_preserves_the_profiler_wall_clock_domain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -337,8 +337,8 @@ def test_mps_activity_preserves_the_profiler_wall_clock_domain(
         stage="tts_engine",
         event_name="request_started",
     )
-    event_recorder.emit_mps_model_path_start("request-clock-domain")
-    event_recorder.emit_mps_model_path_end(
+    event_recorder.emit_model_path_start("request-clock-domain")
+    event_recorder.emit_model_path_end(
         "request-clock-domain",
         status="success",
     )
@@ -352,11 +352,11 @@ def test_mps_activity_preserves_the_profiler_wall_clock_domain(
     emitted = [
         json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()
     ]
-    mps_events = [
-        item for item in emitted if item["event_name"].startswith("mps_model_path_")
+    model_path_events = [
+        item for item in emitted if item["event_name"].startswith("model_path_")
     ]
     assert all(item["timestamp_ns"] == 2_000_000_000 for item in emitted)
-    assert all(item["metadata"]["monotonic_ns"] == 123456 for item in mps_events)
+    assert all(item["metadata"]["monotonic_ns"] == 123456 for item in model_path_events)
     assert reconstruct_timelines(path)["request-clock-domain"].total_ms == 0.0
 
 
@@ -407,7 +407,7 @@ def test_activity_reader_waits_for_all_terminal_events(
             event = {
                 "run_id": "run-unit",
                 "request_id": f"request-{index}",
-                "event_name": "mps_model_path_end",
+                "event_name": "model_path_end",
                 "metadata": {
                     "clock": "CLOCK_MONOTONIC",
                     "monotonic_ns": 100 + index,

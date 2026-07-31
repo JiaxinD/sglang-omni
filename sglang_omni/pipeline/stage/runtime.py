@@ -50,6 +50,8 @@ from sglang_omni.scheduling.messages import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
+_SCHEDULER_THREAD_JOIN_TIMEOUT_S = 5.0
+
 GetNextFn = Callable[[str, Any], str | list[str] | None]
 GetStreamDoneTargetsFn = Callable[[str, Any], str | list[str] | None]
 
@@ -221,6 +223,21 @@ class Stage:
                 self.scheduler.stop()
             except Exception as exc:
                 _record_cleanup_error("scheduler", exc)
+            scheduler_thread = self._scheduler_thread
+            if scheduler_thread is not None:
+                try:
+                    await asyncio.to_thread(
+                        scheduler_thread.join,
+                        _SCHEDULER_THREAD_JOIN_TIMEOUT_S,
+                    )
+                    if scheduler_thread.is_alive():
+                        raise TimeoutError(
+                            "scheduler thread did not stop within "
+                            f"{_SCHEDULER_THREAD_JOIN_TIMEOUT_S:g}s"
+                        )
+                    self._scheduler_thread = None
+                except Exception as exc:
+                    _record_cleanup_error("scheduler thread", exc)
         try:
             self.control_plane.close()
         except Exception as exc:

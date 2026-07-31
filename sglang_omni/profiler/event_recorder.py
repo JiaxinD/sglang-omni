@@ -283,13 +283,13 @@ def _read_host_boot_id() -> str | None:
         return None
 
 
-def emit_mps_model_path_start(request_id: str) -> None:
+def emit_model_path_start(request_id: str) -> None:
     if not _RECORDER.is_active():
         return
     emit(
         request_id=request_id,
         stage=None,
-        event_name="mps_model_path_start",
+        event_name="model_path_start",
         metadata={
             "clock": "CLOCK_MONOTONIC",
             "host_boot_id": _read_host_boot_id(),
@@ -298,13 +298,13 @@ def emit_mps_model_path_start(request_id: str) -> None:
     )
 
 
-def emit_mps_model_path_end(request_id: str, *, status: str) -> None:
+def emit_model_path_end(request_id: str, *, status: str) -> None:
     if not _RECORDER.is_active():
         return
     emit(
         request_id=request_id,
         stage=None,
-        event_name="mps_model_path_end",
+        event_name="model_path_end",
         metadata={
             "clock": "CLOCK_MONOTONIC",
             "host_boot_id": _read_host_boot_id(),

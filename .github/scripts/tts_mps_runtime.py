@@ -660,8 +660,8 @@ def _read_model_path_activity_once(snapshot: LauncherState) -> list[dict[str, An
                         continue
                     raise
                 if raw.get("event_name") not in {
-                    "mps_model_path_start",
-                    "mps_model_path_end",
+                    "model_path_start",
+                    "model_path_end",
                 }:
                     continue
                 metadata = raw.get("metadata") or {}
@@ -670,11 +670,7 @@ def _read_model_path_activity_once(snapshot: LauncherState) -> list[dict[str, An
                         "run_id": raw.get("run_id"),
                         "replica_id": replica.index,
                         "request_id": raw.get("request_id"),
-                        "event": (
-                            "model_path_start"
-                            if raw["event_name"] == "mps_model_path_start"
-                            else "model_path_end"
-                        ),
+                        "event": raw["event_name"],
                         "clock": metadata.get("clock"),
                         "monotonic_ns": metadata.get("monotonic_ns"),
                         "host_boot_id": metadata.get("host_boot_id"),
