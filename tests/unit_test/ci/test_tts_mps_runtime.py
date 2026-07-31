@@ -606,9 +606,17 @@ def _healthy_mps_summary() -> dict:
     )
 
 
-def test_mps_performance_fails_closed_while_references_are_uncalibrated() -> None:
+def test_mps_performance_fails_closed_on_an_uncalibrated_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from benchmarks.eval import tts_mps_perf
 
+    monkeypatch.setattr(
+        tts_mps_perf,
+        "MPS_PERFORMANCE_REFERENCES",
+        {"higgs": {"throughput_qps": (None, "minimum", "req/s")}},
+        raising=True,
+    )
     verdict = tts_mps_perf.check_mps_performance(
         model="higgs",
         concurrency=tts_mps_perf.MPS_CONCURRENCY,
@@ -616,10 +624,20 @@ def test_mps_performance_fails_closed_while_references_are_uncalibrated() -> Non
     )
 
     assert verdict["status"] == "fail"
-    assert verdict["uncalibrated"] == sorted(
-        tts_mps_perf.MPS_PERFORMANCE_REFERENCES["higgs"]
-    )
+    assert verdict["uncalibrated"] == ["throughput_qps"]
     assert any("tune-ci-thresholds" in check for check in verdict["failed_checks"])
+
+
+def test_shipped_mps_references_are_all_calibrated() -> None:
+    from benchmarks.eval import tts_mps_perf
+
+    uncalibrated = [
+        f"{model}.{metric}"
+        for model, metrics in tts_mps_perf.MPS_PERFORMANCE_REFERENCES.items()
+        for metric, (reference, _direction, _unit) in metrics.items()
+        if reference is None
+    ]
+    assert uncalibrated == []
 
 
 def test_mps_performance_applies_slack_to_calibrated_references(

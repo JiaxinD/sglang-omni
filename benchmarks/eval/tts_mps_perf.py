@@ -9,6 +9,12 @@ recalibration only ever rewrites the `_REF` literals.
 `None` means the metric has not been calibrated yet. The stage still collects
 and reports the observation, then fails the assertion, so an uncalibrated gate
 can never pass silently.
+
+Calibrated 2026-07-31 on one H100 of the CI host, five strict-valid repeats per
+preset at concurrency 16 over the full SeedTTS EN set. Higgs held a 0.9 to 2.8
+percent spread. MOSS is host-bound and its runs were bimodal under a shared
+host at load 20 to 165, so its references are correspondingly wider; tightening
+them needs a quiescent runner or a MOSS-side fix, not a hand-picked number.
 """
 
 from __future__ import annotations
@@ -22,15 +28,15 @@ MPS_SLACK_LOWER = 1.25
 
 MPS_CONCURRENCY = 16
 
-MPS_HIGGS_THROUGHPUT_QPS_REF: float | None = None
-MPS_HIGGS_OUTPUT_TOK_PER_REQ_S_REF: float | None = None
-MPS_HIGGS_LATENCY_MEAN_S_REF: float | None = None
-MPS_HIGGS_RTF_MEAN_REF: float | None = None
+MPS_HIGGS_THROUGHPUT_QPS_REF: float | None = 14.82
+MPS_HIGGS_OUTPUT_TOK_PER_REQ_S_REF: float | None = 120.0
+MPS_HIGGS_LATENCY_MEAN_S_REF: float | None = 1.073
+MPS_HIGGS_RTF_MEAN_REF: float | None = 0.258
 
-MPS_MOSS_THROUGHPUT_QPS_REF: float | None = None
-MPS_MOSS_OUTPUT_TOK_PER_REQ_S_REF: float | None = None
-MPS_MOSS_LATENCY_MEAN_S_REF: float | None = None
-MPS_MOSS_RTF_MEAN_REF: float | None = None
+MPS_MOSS_THROUGHPUT_QPS_REF: float | None = 7.074
+MPS_MOSS_OUTPUT_TOK_PER_REQ_S_REF: float | None = 53.9
+MPS_MOSS_LATENCY_MEAN_S_REF: float | None = 2.253
+MPS_MOSS_RTF_MEAN_REF: float | None = 0.5363
 
 _MINIMUM = "minimum"
 _MAXIMUM = "maximum"
