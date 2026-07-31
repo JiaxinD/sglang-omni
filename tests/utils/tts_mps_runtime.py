@@ -83,12 +83,20 @@ def validate_final_summary(summary: dict[str, Any]) -> None:
 
 
 def update_summary(path: str | Path, **sections: Any) -> dict[str, Any]:
+    """Merge into each named section rather than replacing it.
+
+    Callers update one field at a time, so whole-section replacement forced
+    them to re-read the file and splice the previous contents back in.
+    """
     summary_path = Path(path)
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     for key, value in sections.items():
         if key not in payload:
             raise ValueError(f"unknown summary section {key!r}")
-        payload[key] = value
+        if isinstance(value, dict) and isinstance(payload.get(key), dict):
+            payload[key] = {**payload[key], **value}
+        else:
+            payload[key] = value
     atomic_write_json(summary_path, payload)
     return payload
 
