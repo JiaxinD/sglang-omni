@@ -38,6 +38,21 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
             mem_fraction_static=None if colocated else _AR_MEM_FRACTION_STATIC
         ),
     )
+
+    # Note: (Jiaxin Deng) the codec stages carry the same budgets
+    # process_edge_resources prescribes for the split, so the isolated topology
+    # is the declared one rather than an override applied at startup. Each stage
+    # needs its own instance: pydantic assigns these by reference, and
+    # _apply_process_edge_resources rebinds stage.runtime.resources in place.
+    def codec_runtime() -> StageRuntimeConfig:
+        return StageRuntimeConfig(
+            resources=StageResourceConfig(
+                total_gpu_memory_fraction=(
+                    _COLOCATED_CODEC_GPU_MEMORY_FRACTION if colocated else None
+                )
+            )
+        )
+
     tts_engine_args: dict[str, Any] = {"dtype": "bfloat16"}
     if colocated:
         tts_engine_args["codec_mem_reserve"] = _COLOCATED_CODEC_MEM_RESERVE
@@ -49,6 +64,7 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
             factory=f"{_PKG}.stages.create_preprocessing_executor",
             factory_args={"device": codec_device},
             gpu=0,
+            runtime=codec_runtime(),
             next="tts_engine",
         ),
         StageConfig(
@@ -63,10 +79,11 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         ),
         StageConfig(
             name="vocoder",
-            process="pipeline",
+            process="vocoder" if colocated else "pipeline",
             factory=f"{_PKG}.stages.create_vocoder_executor",
             factory_args={"device": codec_device},
             gpu=0,
+            runtime=codec_runtime(),
             terminal=True,
             can_accept_stream_before_payload=True,
         ),

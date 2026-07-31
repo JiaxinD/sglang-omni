@@ -339,7 +339,7 @@ def test_process_override_rejects_fused_stage_component() -> None:
         apply_stage_process_overrides(config, isolate_stages=["b"])
 
 
-def test_moss_tts_local_preserves_default_and_can_isolate_vocoder() -> None:
+def test_moss_tts_local_isolates_vocoder_by_default() -> None:
     from sglang_omni.models.moss_tts_local.config import MossTTSLocalPipelineConfig
 
     config = MossTTSLocalPipelineConfig(model_path="dummy")
@@ -348,49 +348,56 @@ def test_moss_tts_local_preserves_default_and_can_isolate_vocoder() -> None:
         for stage in config.stages
         if stage.gpu is not None
     } == {
-        "preprocessing": None,
+        "preprocessing": 0.05,
         "tts_engine": 0.90,
-        "vocoder": None,
+        "vocoder": 0.05,
     }
     assert [stage.process for stage in config.stages] == [
         "pipeline",
         "pipeline",
-        "pipeline",
-    ]
-    assert _topology(config).groups[0].stage_names == (
-        "preprocessing",
-        "tts_engine",
         "vocoder",
-    )
-
-    isolated = apply_stage_process_overrides(config, isolate_stages=["vocoder"])
-
-    assert [stage.process for stage in config.stages] == [
-        "pipeline",
-        "pipeline",
-        "pipeline",
     ]
-    assert [
-        (group.name, group.stage_names) for group in _topology(isolated).groups
-    ] == [
+    assert [(group.name, group.stage_names) for group in _topology(config).groups] == [
         ("pipeline", ("preprocessing", "tts_engine")),
         ("vocoder", ("vocoder",)),
     ]
     assert build_stage_placement_plan(config).gpus[
         0
-    ].total_gpu_memory_fraction == pytest.approx(0.90)
-    assert {
-        stage.name: stage.runtime.resources.total_gpu_memory_fraction
-        for stage in isolated.stages
-        if stage.gpu is not None
-    } == {
-        "preprocessing": 0.05,
-        "tts_engine": 0.90,
-        "vocoder": 0.05,
-    }
-    assert build_stage_placement_plan(isolated).gpus[
-        0
     ].total_gpu_memory_fraction == pytest.approx(1.0)
+
+    # The new default is exactly what --isolate-stage vocoder used to produce.
+    # Rebuild the pre-change topology and run the flag over it. Comparing the
+    # new config against itself would prove nothing: the override early-returns
+    # for a stage that already runs alone.
+    legacy = config.model_copy(deep=True)
+    for name in ("preprocessing", "vocoder"):
+        stage = next(item for item in legacy.stages if item.name == name)
+        stage.process = "pipeline"
+        stage.runtime.resources = StageResourceConfig()
+    assert [stage.process for stage in legacy.stages] == ["pipeline"] * 3
+    assert (
+        apply_stage_process_overrides(legacy, isolate_stages=["vocoder"]).model_dump()
+        == config.model_dump()
+    )
+
+    # --isolate-stage vocoder stays accepted on the new default and changes
+    # nothing, so existing launch commands keep working.
+    assert (
+        apply_stage_process_overrides(config, isolate_stages=["vocoder"]).model_dump()
+        == config.model_dump()
+    )
+
+    # The codec stages must not share one runtime block: pydantic assigns it by
+    # reference, and _apply_process_edge_resources rebinds stage.runtime.resources
+    # in place, so a shared instance would let one budget overwrite the other.
+    stages = {stage.name: stage for stage in config.stages}
+    assert stages["preprocessing"].runtime is not stages["vocoder"].runtime
+    stages["preprocessing"].runtime.resources = StageResourceConfig(
+        total_gpu_memory_fraction=0.42
+    )
+    assert stages[
+        "vocoder"
+    ].runtime.resources.total_gpu_memory_fraction == pytest.approx(0.05)
 
 
 def test_ming_tts_preserves_default_and_can_isolate_vocoder_role() -> None:
