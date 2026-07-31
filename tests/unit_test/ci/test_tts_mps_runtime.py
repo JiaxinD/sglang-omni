@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNTIME_SCRIPT = REPO_ROOT / ".github/scripts/tts_mps_runtime.py"
-OVERLAP_SCRIPT = REPO_ROOT / ".github/scripts/tts_mps_overlap.py"
+RUNTIME_SCRIPT = REPO_ROOT / "tests/utils/tts_mps_runtime.py"
+OVERLAP_SCRIPT = REPO_ROOT / "tests/utils/tts_mps_overlap.py"
 
 
 def _load(path: Path, name: str):
@@ -527,12 +527,11 @@ def test_managed_router_lifecycle_accepts_two_external_mps_workers(
     assert "--launcher-config" not in command
 
 
-def test_model_specific_mps_floor_catches_only_obvious_regressions() -> None:
+def _healthy_mps_summary() -> dict:
     from benchmarks.benchmarker.data import RequestResult
-    from benchmarks.eval.tts_mps_perf import check_mps_performance
     from benchmarks.metrics.performance import compute_speed_metrics
 
-    healthy = compute_speed_metrics(
+    return compute_speed_metrics(
         [
             RequestResult(
                 is_success=True,
@@ -546,23 +545,60 @@ def test_model_specific_mps_floor_catches_only_obvious_regressions() -> None:
         ],
         wall_clock_s=1.0,
     )
-    verdict = check_mps_performance(
+
+
+def test_mps_performance_fails_closed_while_references_are_uncalibrated() -> None:
+    from benchmarks.eval import tts_mps_perf
+
+    verdict = tts_mps_perf.check_mps_performance(
         model="higgs",
-        concurrency=16,
+        concurrency=tts_mps_perf.MPS_CONCURRENCY,
+        summary=_healthy_mps_summary(),
+    )
+
+    assert verdict["status"] == "fail"
+    assert verdict["uncalibrated"] == sorted(
+        tts_mps_perf.MPS_PERFORMANCE_REFERENCES["higgs"]
+    )
+    assert any("tune-ci-thresholds" in check for check in verdict["failed_checks"])
+
+
+def test_mps_performance_applies_slack_to_calibrated_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from benchmarks.eval import tts_mps_perf
+
+    healthy = _healthy_mps_summary()
+    calibrated = {
+        "higgs": {
+            "throughput_qps": (healthy["throughput_qps"], "minimum", "req/s"),
+            "latency_mean_s": (healthy["latency_mean_s"], "maximum", "s"),
+        }
+    }
+    monkeypatch.setattr(
+        tts_mps_perf, "MPS_PERFORMANCE_REFERENCES", calibrated, raising=True
+    )
+
+    verdict = tts_mps_perf.check_mps_performance(
+        model="higgs",
+        concurrency=tts_mps_perf.MPS_CONCURRENCY,
         summary=healthy,
     )
     assert verdict["status"] == "pass"
-    assert verdict["provenance"]["temporary"] is True
+    assert verdict["checks"]["throughput_qps"]["threshold"] == pytest.approx(
+        healthy["throughput_qps"] * tts_mps_perf.MPS_SLACK_HIGHER
+    )
 
-    regressed = {**healthy, "throughput_qps": 2.0}
-    verdict = check_mps_performance(
+    # Below the slackened floor, so a real regression is still caught.
+    regressed = {**healthy, "throughput_qps": healthy["throughput_qps"] * 0.5}
+    verdict = tts_mps_perf.check_mps_performance(
         model="higgs",
-        concurrency=16,
+        concurrency=tts_mps_perf.MPS_CONCURRENCY,
         summary=regressed,
     )
     assert verdict["status"] == "fail"
-    assert verdict["failed_checks"] == ["throughput_qps"]
-    assert verdict["checks"]["throughput_qps"]["observed"] == 2.0
+    assert verdict["checks"]["throughput_qps"]["pass"] is False
+    assert any("throughput_qps" in check for check in verdict["failed_checks"])
 
 
 def test_gpu_client_delta_flags_only_clients_created_by_the_mps_stage() -> None:

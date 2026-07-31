@@ -309,7 +309,7 @@ jobs:
         shell: bash
         run: |
           source omni/bin/activate
-          python .github/scripts/tts_mps_runtime.py initialize \
+          python -m tests.utils.tts_mps_runtime initialize \
             --summary "${TTS_MPS_OUTPUT_ROOT}/tts_mps_summary.json" \
             --exact-sha "${{ inputs.exact_sha }}" \
             --run-id "${TTS_MPS_RUN_ID}" \
@@ -321,7 +321,7 @@ jobs:
         run: |
           source omni/bin/activate
           export PYTHONPATH=$PWD
-          pytest tests/test_model/test_tts_mps_ci.py -v -s -x --concurrency 16
+          pytest tests/test_ci/test_tts_mps_dp2.py -v -s -x
         env:
           HF_ENDPOINT: https://huggingface.co
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -336,7 +336,7 @@ jobs:
         shell: bash
         run: |
           source omni/bin/activate
-          python .github/scripts/tts_mps_runtime.py finalize \
+          python -m tests.utils.tts_mps_runtime finalize \
             --summary "${TTS_MPS_OUTPUT_ROOT}/tts_mps_summary.json" \
             --repo "${GITHUB_WORKSPACE}" \
             --output "${TTS_MPS_OUTPUT_ROOT}" \

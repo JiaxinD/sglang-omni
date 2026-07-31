@@ -38,7 +38,7 @@ def test_workflow_keeps_ordinary_stage_and_adds_isolated_mps_validation() -> Non
     assert mps["needs"] == "stage-4-serving"
     assert "always()" in mps["if"]
     assert (
-        "test_tts_mps_ci.py"
+        "tests/test_ci/test_tts_mps_dp2.py"
         in _step(mps, "Run TTS MPS non-streaming validation")["run"]
     )
     assert "--cap-add SYS_NICE" in mps["container"]["options"]
