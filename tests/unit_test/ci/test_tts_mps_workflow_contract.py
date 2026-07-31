@@ -42,10 +42,14 @@ def test_workflow_keeps_ordinary_stage_and_adds_isolated_mps_validation() -> Non
         in _step(mps, "Run TTS MPS non-streaming validation")["run"]
     )
     assert "--cap-add SYS_NICE" in mps["container"]["options"]
-    assert (
-        _step(mps, "Upload TTS MPS evidence")["with"]["name"]
-        == "tts-mps-${{ inputs.tts_ci_model }}-attempt-${{ github.run_attempt }}"
-    )
+    # Same shape as the other TTS stages: fixed name, overwritten per rerun,
+    # evidence paths only, and the run outputs removed from the CI home.
+    upload = _step(mps, "Upload TTS MPS evidence")["with"]
+    assert upload["name"] == "tts-stage-mps-nonstream-evidence"
+    assert str(upload["overwrite"]).lower() == "true"
+    assert upload["if-no-files-found"] == "error"
+    assert "canonical/*.json" in upload["path"]
+    assert "rm -rf" in _step(mps, "Remove TTS MPS run outputs")["run"]
     assert "${{ env.OMNI_CI_HOME }}" not in mps["env"]["TTS_MPS_OUTPUT_ROOT"]
     assert "${{ env.OMNI_CI_HOME }}" not in mps["env"]["TTS_MPS_STATE_ROOT"]
     assert mps["env"]["TTS_MPS_OUTPUT_ROOT"].startswith("${{ inputs.omni_ci_home")

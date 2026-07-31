@@ -357,7 +357,23 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tts-mps-${{ inputs.tts_ci_model }}-attempt-${{ github.run_attempt }}
-          path: ${{ env.TTS_MPS_OUTPUT_ROOT }}
-          if-no-files-found: warn
+          name: tts-stage-mps-nonstream-evidence
+          # Evidence only: the canonical directory also holds 1088 generated
+          # wavs, which the other TTS stages likewise never upload.
+          path: |
+            ${{ env.TTS_MPS_OUTPUT_ROOT }}/*.json
+            ${{ env.TTS_MPS_OUTPUT_ROOT }}/*.jsonl
+            ${{ env.TTS_MPS_OUTPUT_ROOT }}/canonical/*.json
+            ${{ env.TTS_MPS_OUTPUT_ROOT }}/overlap-canary/*.json
+            ${{ env.TTS_MPS_OUTPUT_ROOT }}/raw/**
+          if-no-files-found: error
           retention-days: 7
+          overwrite: true
+
+      - name: Remove TTS MPS run outputs
+        if: always()
+        shell: bash
+        run: |
+          # Evidence is uploaded above; leaving the generated audio behind
+          # accumulates one attempt-sized copy per rerun in the CI home.
+          rm -rf "${TTS_MPS_OUTPUT_ROOT}" "${TTS_MPS_STATE_ROOT}"
