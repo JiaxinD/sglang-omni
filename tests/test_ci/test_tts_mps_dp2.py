@@ -218,7 +218,8 @@ def test_tts_mps_non_streaming(
 ) -> None:
     model = _selected_model()
     output_root, state_root = _resolve_roots(tmp_path_factory)
-    run_id = _env_or(RUN_ID_ENV, f"local-{os.getpid()}")
+    # new_summary() requires a run-<suffix> path component.
+    run_id = _env_or(RUN_ID_ENV, f"run-local-{os.getpid()}")
     summary_path = _ensure_summary(model, output_root, run_id)
     spec = _launch_spec(model, output_root, state_root, run_id)
     dataset_repo = DATASETS["seedtts"]
