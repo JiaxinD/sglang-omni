@@ -307,6 +307,15 @@ def test_tts_mps_non_streaming(
                 label="TTS MPS canonical generation",
                 min_total_requests=SEEDTTS_EN_FULLSET_SAMPLES,
             )
+            # The canonical benchmark produced a complete result set, so the
+            # observation stands even when a reference assertion below fails.
+            # Calibration needs that distinction; see CONTRACT.md.
+            _write_validation(
+                output_root,
+                valid=True,
+                threshold_assertion_failed=bool(canonical_checks.failures),
+                detail={"performance": performance},
+            )
             canonical_checks.assert_all()
 
             start_request_profiles(snapshot, spec.run_id)
