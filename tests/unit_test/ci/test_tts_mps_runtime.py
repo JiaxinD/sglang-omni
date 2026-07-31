@@ -55,6 +55,31 @@ def test_launch_contract_is_one_gpu_dp2_without_weight_sharing(tmp_path: Path) -
     )
 
 
+def test_launch_spec_rejects_a_control_socket_over_the_sun_path_limit(
+    tmp_path: Path,
+) -> None:
+    runtime = _load(RUNTIME_SCRIPT, "tts_mps_runtime_sun_path")
+    config = tmp_path / "config.yaml"
+    config.write_text("config_cls: HiggsTtsPipelineConfig\n", encoding="utf-8")
+    launcher = tmp_path / "examples/mps_dp/launch.sh"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    deep_state_root = tmp_path.joinpath(*[f"segment{index:02d}" for index in range(12)])
+
+    with pytest.raises(ValueError, match="sun_path"):
+        runtime.MpsLaunchSpec(
+            repository_root=tmp_path,
+            output_dir=tmp_path / "output",
+            state_root=deep_state_root,
+            run_id="run-unit",
+            config_path=config,
+            gpu_id=0,
+            base_port=8801,
+            core_blocks=("0-3", "4-7"),
+            python_bin="python",
+        )
+
+
 def test_core_blocks_preserve_the_pci_domain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

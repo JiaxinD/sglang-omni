@@ -20,6 +20,8 @@ import requests
 
 REPLICA_COUNT = 2
 RUN_ID_PATTERN = re.compile(r"run-[A-Za-z0-9_-]+")
+# AF_UNIX sun_path is 108 bytes including the terminator on Linux.
+SUN_PATH_LIMIT = 107
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
@@ -203,6 +205,16 @@ class MpsLaunchSpec:
             raise ValueError(f"MPS config does not exist: {self.config_path}")
         if not (self.repository_root / "examples/mps_dp/launch.sh").is_file():
             raise ValueError("production MPS launcher does not exist")
+        socket_bytes = len(str(self.control_socket).encode())
+        if socket_bytes > SUN_PATH_LIMIT:
+            # Note: (Jiaxin Deng) over the limit the daemon starts, fails to
+            # bind, and exits, and the launcher only ever reports "Cannot find
+            # MPS control daemon process". Name the real cause here instead.
+            raise ValueError(
+                f"MPS control socket path is {socket_bytes} bytes, over the "
+                f"{SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit: "
+                f"{self.control_socket}. Use a shorter state root."
+            )
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -224,6 +236,10 @@ class MpsLaunchSpec:
     @property
     def state_dir(self) -> Path:
         return self.state_root / f"gpu-{self.gpu_id}" / self.run_id
+
+    @property
+    def control_socket(self) -> Path:
+        return self.state_dir / "mps" / "pipe" / "control"
 
     @property
     def worker_urls(self) -> tuple[str, ...]:

@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -135,10 +136,13 @@ def _resolve_roots(
         else tmp_path_factory.mktemp("tts-mps-ci")
     )
     configured_state = os.environ.get(STATE_ENV, "").strip()
+    # The state root carries the MPS control socket, which must fit AF_UNIX
+    # sun_path, so the fallback is a short temp dir rather than the deep
+    # pytest basetemp.
     state_root = (
         Path(configured_state).resolve()
         if configured_state
-        else tmp_path_factory.mktemp("tts-mps-state")
+        else Path(tempfile.mkdtemp(prefix="omni-mps-"))
     )
     output_root.mkdir(parents=True, exist_ok=True)
     return output_root, state_root
