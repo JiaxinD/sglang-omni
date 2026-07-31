@@ -117,6 +117,43 @@ def test_core_blocks_preserve_the_pci_domain(
     ) == ("0-2", "3-5")
 
 
+@pytest.mark.parametrize("core_count", [4, 5])
+def test_core_blocks_keep_the_hard_minimum_when_the_node_is_small(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    core_count: int,
+) -> None:
+    runtime = _load(RUNTIME_SCRIPT, f"tts_mps_runtime_small_node_{core_count}")
+    pci_devices = tmp_path / "pci"
+    numa_nodes = tmp_path / "nodes"
+    device = pci_devices / "0000:08:00.0"
+    device.mkdir(parents=True)
+    (device / "numa_node").write_text("0\n", encoding="utf-8")
+    node = numa_nodes / "node0"
+    node.mkdir(parents=True)
+    (node / "cpulist").write_text(f"0-{core_count - 1}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="00000000:08:00.0\n"),
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "sched_getaffinity",
+        lambda _pid: set(range(core_count)),
+        raising=False,
+    )
+
+    # The host reserve must not truncate below the minimum and report a real
+    # host as insufficient.
+    assert runtime.derive_core_blocks(
+        0,
+        pci_devices_root=pci_devices,
+        numa_nodes_root=numa_nodes,
+    ) == ("0-1", "2-3")
+
+
 def test_stale_launcher_state_is_archived_and_reconciled_before_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -268,18 +305,16 @@ def test_overlap_requires_repeated_server_monotonic_intervals() -> None:
         events,
         expected_run_id="run-unit",
         min_successes_per_replica=2,
-        min_matched_overlap_count=2,
         measurement_uncertainty_ns=10,
     )
     assert verdict["matched_overlap_count"] == 2
     assert verdict["aggregate_overlap_ns"] == 600
 
-    with pytest.raises(ValueError, match="at least two"):
+    with pytest.raises(ValueError, match="insufficient successful requests"):
         overlap.build_overlap_verdict(
             events[:2],
             expected_run_id="run-unit",
             min_successes_per_replica=2,
-            min_matched_overlap_count=2,
             measurement_uncertainty_ns=10,
         )
     with pytest.raises(ValueError, match="expected run"):
@@ -287,7 +322,6 @@ def test_overlap_requires_repeated_server_monotonic_intervals() -> None:
             events,
             expected_run_id="run-other",
             min_successes_per_replica=2,
-            min_matched_overlap_count=2,
             measurement_uncertainty_ns=10,
         )
 

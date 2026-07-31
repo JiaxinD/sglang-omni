@@ -22,6 +22,9 @@ REPLICA_COUNT = 2
 RUN_ID_PATTERN = re.compile(r"run-[A-Za-z0-9_-]+")
 # AF_UNIX sun_path is 108 bytes including the terminator on Linux.
 SUN_PATH_LIMIT = 107
+# Two pinned cores per replica.
+MINIMUM_CORES = 2 * REPLICA_COUNT
+HOST_RESERVE_RATIO = 0.25
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
@@ -154,11 +157,16 @@ def derive_core_blocks(
         )
     )
     allowed = sorted(node_cpus & set(os.sched_getaffinity(0)))
-    usable = allowed[: max(REPLICA_COUNT, len(allowed) * 3 // 4)]
-    if len(usable) < 4:
+    if len(allowed) < MINIMUM_CORES:
         raise RuntimeError(
-            "MPS DP2 requires four allowed CPU cores on the GPU NUMA node"
+            f"MPS DP2 requires {MINIMUM_CORES} allowed CPU cores on the GPU "
+            f"NUMA node, found {len(allowed)}"
         )
+    # Reserve a slice for host-side work, but never below the hard minimum, so
+    # a host that does have enough cores is not reported as insufficient.
+    usable = allowed[
+        : max(MINIMUM_CORES, int(len(allowed) * (1 - HOST_RESERVE_RATIO)))
+    ]
     split = len(usable) // 2
     return format_cpu_list(usable[:split]), format_cpu_list(usable[split:])
 

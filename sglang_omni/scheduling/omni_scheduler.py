@@ -1561,8 +1561,14 @@ class OmniScheduler:
         self._deferred_request_payloads.pop(request_id, None)
         self._dirty_deferred_request_ids.discard(request_id)
         self._first_emit_done.discard(request_id)
+        # Note: (Jiaxin Deng) emit before discarding, and discard whether or
+        # not the request is still in a running batch. A running abort that
+        # never reaches stream_output used to leave its rid here forever,
+        # which grew unbounded on a long-lived server and then swallowed a
+        # later prefill_start for the same id.
+        self._emit_model_path_end_once(request_id, status="aborted")
+        self._prefill_start_done.discard(request_id)
         if not running_abort:
-            self._emit_model_path_end_once(request_id, status="aborted")
             self._release_immediate_request_resources(request_id)
             _remove_from_batch(self.running_batch, request_id)
             _remove_from_batch(self.cur_batch, request_id)

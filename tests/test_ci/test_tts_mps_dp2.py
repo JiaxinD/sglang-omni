@@ -365,7 +365,6 @@ def test_tts_mps_non_streaming(
                 events,
                 expected_run_id=spec.run_id,
                 min_successes_per_replica=2,
-                min_matched_overlap_count=2,
                 measurement_uncertainty_ns=1_000_000,
             )
             overlap["canary_wall_time_s"] = time.perf_counter() - canary_started

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import collections
 import threading
 import weakref
 from array import array
@@ -655,8 +656,10 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
     assert scheduler._deferred_request_payloads == {}
     assert scheduler._dirty_deferred_request_ids == set()
     assert scheduler._first_emit_done == set()
-    assert scheduler._prefill_start_done == {"req-run"}
-    assert model_path_ends == []
+    # The model-path interval closes at abort time rather than waiting for
+    # stream_output, which a running abort is not guaranteed to reach.
+    assert scheduler._prefill_start_done == set()
+    assert model_path_ends == [("req-run", "aborted")]
     req.finished = lambda: True
     scheduler.stream_output([req])
     assert cleaned == ["req-run"]
@@ -2268,3 +2271,42 @@ def test_omni_scheduler_result_adapter_failure_emits_error_without_raise(
     assert request_data.decode_input_embeds is None
     assert req._omni_data is None
     assert request_data.req is req
+
+
+def test_omni_scheduler_running_abort_does_not_leak_prefill_dedup_state(
+    monkeypatch,
+) -> None:
+    """A running abort that never reaches stream_output must not leak.
+
+    The rid used to stay in the set that also dedups prefill_start, so the set
+    grew without bound and a later prefill_start for the same id was silently
+    swallowed.
+    """
+    ends: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        omni_scheduler_module,
+        "_emit_model_path_end",
+        lambda rid, *, status: ends.append((rid, status)),
+    )
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._mark_running_request_aborted = lambda _rid: True
+    scheduler._request_admission_lock = threading.Lock()
+    scheduler._aborted_request_ids = set()
+    scheduler._aborted_request_id_order = collections.deque()
+    scheduler._pending_request_builds = {}
+    scheduler._backlogged_request_build_payloads = []
+    scheduler.waiting_queue = []
+    scheduler._abort_callback = None
+    scheduler._pending_stream_chunks = {}
+    scheduler._pending_stream_done = set()
+    scheduler._deferred_request_payloads = {}
+    scheduler._dirty_deferred_request_ids = set()
+    scheduler._first_emit_done = {"req-1"}
+    scheduler._prefill_start_done = {"req-1"}
+    scheduler._drain_inbox_for_request = lambda _rid: None
+
+    scheduler.abort("req-1")
+
+    assert ends == [("req-1", "aborted")]
+    assert scheduler._prefill_start_done == set()
+    assert scheduler._prefill_start_done == set()

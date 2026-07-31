@@ -8,6 +8,9 @@ from itertools import combinations
 from typing import Any, Iterable
 
 MAX_INTERVALS_PER_REPLICA = 20
+# A bounded canary only needs to prove concurrency happened twice; this is a
+# fixed property of the oracle, not a knob.
+REQUIRED_ONE_TO_ONE_MATCHES = 2
 
 
 @dataclass(frozen=True)
@@ -68,13 +71,13 @@ def build_overlap_verdict(
     *,
     expected_run_id: str,
     min_successes_per_replica: int,
-    min_matched_overlap_count: int,
     measurement_uncertainty_ns: int,
 ) -> dict[str, Any]:
-    if min_successes_per_replica < 2:
-        raise ValueError("overlap proof requires at least two repeated intervals")
-    if min_matched_overlap_count != 2:
-        raise ValueError("bounded overlap proof requires exactly two matches")
+    if min_successes_per_replica < REQUIRED_ONE_TO_ONE_MATCHES:
+        raise ValueError(
+            "overlap proof requires at least "
+            f"{REQUIRED_ONE_TO_ONE_MATCHES} repeated intervals"
+        )
     if measurement_uncertainty_ns < 0:
         raise ValueError("measurement uncertainty must be non-negative")
 
@@ -87,7 +90,7 @@ def build_overlap_verdict(
     if min(counts.values()) < min_successes_per_replica:
         raise ValueError(
             f"insufficient successful requests per replica: {counts}; "
-            f"required at least two"
+            f"required at least {min_successes_per_replica}"
         )
 
     candidates: list[tuple[int, int, int]] = []
@@ -101,15 +104,15 @@ def build_overlap_verdict(
     pairs = next(
         (
             pair
-            for pair in combinations(candidates, 2)
+            for pair in combinations(candidates, REQUIRED_ONE_TO_ONE_MATCHES)
             if pair[0][0] != pair[1][0] and pair[0][1] != pair[1][1]
         ),
         None,
     )
     if pairs is None:
         raise ValueError(
-            "insufficient repeated cross-replica overlap: required two "
-            "one-to-one matches"
+            "insufficient repeated cross-replica overlap: required "
+            f"{REQUIRED_ONE_TO_ONE_MATCHES} one-to-one matches"
         )
     matched_count = len(pairs)
     aggregate_ns = sum(item[2] for item in pairs)

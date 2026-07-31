@@ -301,7 +301,9 @@ def test_stage_stop_waits_for_scheduler_model_path_terminalization(
     asyncio.run(_run())
 
 
-def test_stage_stop_reports_stuck_scheduler_thread(monkeypatch) -> None:
+def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
+    monkeypatch, caplog
+) -> None:
     async def _run() -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -329,10 +331,11 @@ def test_stage_stop_reports_stuck_scheduler_thread(monkeypatch) -> None:
         assert await asyncio.to_thread(entered.wait, 1.0)
 
         try:
-            with pytest.raises(RuntimeError, match="Stage stage cleanup failed") as exc:
+            # Shutdown must not start failing because of this join; the stage
+            # only waits so the scheduler thread can flush its terminal events.
+            with caplog.at_level(logging.WARNING):
                 await stage_obj.stop()
-            assert isinstance(exc.value.__cause__, TimeoutError)
-            assert "scheduler thread did not stop within" in str(exc.value.__cause__)
+            assert "scheduler thread did not stop within" in caplog.text
             assert stage_obj._scheduler_thread is not None
             assert stage_obj._scheduler_thread.is_alive()
         finally:
