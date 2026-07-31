@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
+from itertools import combinations
 from typing import Any, Iterable
 
 MAX_INTERVALS_PER_REPLICA = 20
@@ -71,8 +71,10 @@ def build_overlap_verdict(
     min_matched_overlap_count: int,
     measurement_uncertainty_ns: int,
 ) -> dict[str, Any]:
-    if min_successes_per_replica < 2 or min_matched_overlap_count < 2:
+    if min_successes_per_replica < 2:
         raise ValueError("overlap proof requires at least two repeated intervals")
+    if min_matched_overlap_count != 2:
+        raise ValueError("bounded overlap proof requires exactly two matches")
     if measurement_uncertainty_ns < 0:
         raise ValueError("measurement uncertainty must be non-negative")
 
@@ -88,37 +90,29 @@ def build_overlap_verdict(
             f"required at least two"
         )
 
-    @lru_cache(maxsize=None)
-    def match(
-        left_index: int, used: int
-    ) -> tuple[int, int, tuple[tuple[int, int, int], ...]]:
-        if left_index == len(left):
-            return 0, 0, ()
-        best = match(left_index + 1, used)
+    candidates: list[tuple[int, int, int]] = []
+    for left_index, source in enumerate(left):
         for right_index, candidate in enumerate(right):
-            if used & (1 << right_index):
-                continue
-            overlap_ns = min(left[left_index].end_ns, candidate.end_ns) - max(
-                left[left_index].start_ns, candidate.start_ns
+            overlap_ns = min(source.end_ns, candidate.end_ns) - max(
+                source.start_ns, candidate.start_ns
             )
-            if overlap_ns <= measurement_uncertainty_ns:
-                continue
-            count, aggregate, pairs = match(left_index + 1, used | (1 << right_index))
-            option = (
-                count + 1,
-                aggregate + overlap_ns,
-                ((left_index, right_index, overlap_ns), *pairs),
-            )
-            if option[:2] > best[:2]:
-                best = option
-        return best
-
-    matched_count, aggregate_ns, pairs = match(0, 0)
-    if matched_count < min_matched_overlap_count:
+            if overlap_ns > measurement_uncertainty_ns:
+                candidates.append((left_index, right_index, overlap_ns))
+    pairs = next(
+        (
+            pair
+            for pair in combinations(candidates, 2)
+            if pair[0][0] != pair[1][0] and pair[0][1] != pair[1][1]
+        ),
+        None,
+    )
+    if pairs is None:
         raise ValueError(
-            f"insufficient repeated cross-replica overlap: {matched_count}; "
-            f"required {min_matched_overlap_count}"
+            "insufficient repeated cross-replica overlap: required two "
+            "one-to-one matches"
         )
+    matched_count = len(pairs)
+    aggregate_ns = sum(item[2] for item in pairs)
     matches = [
         {
             "replica_0_request_id": left[left_index].request_id,

@@ -155,7 +155,7 @@ jobs:
           fi
 
           if [[ "${selected_model}" == "higgs" ]]; then
-            resolved_config="examples/mps_dp/configs/higgs_h100_dp2.yaml"
+            resolved_config="examples/mps_dp/configs/higgs_h100_dp3.yaml"
             expected_config_cls="HiggsTtsPipelineConfig"
           else
             resolved_config="examples/mps_dp/configs/moss_local_h100_dp2.yaml"

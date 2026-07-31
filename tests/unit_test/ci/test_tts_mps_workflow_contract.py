@@ -95,7 +95,7 @@ def test_cpu_selection_is_rerun_stable_and_conflicts_fail_before_h100() -> None:
 def test_mps_config_resolution_covers_both_selected_models() -> None:
     omni = _workflow(OMNI_WORKFLOW)
     run = _step(omni["jobs"]["preflight"], "Select TTS model once")["run"]
-    assert "examples/mps_dp/configs/higgs_h100_dp2.yaml" in run
+    assert "examples/mps_dp/configs/higgs_h100_dp3.yaml" in run
     assert "HiggsTtsPipelineConfig" in run
     assert "examples/mps_dp/configs/moss_local_h100_dp2.yaml" in run
     assert "MossTTSLocalPipelineConfig" in run

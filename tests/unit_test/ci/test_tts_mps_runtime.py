@@ -55,6 +55,43 @@ def test_launch_contract_is_one_gpu_dp2_without_weight_sharing(tmp_path: Path) -
     )
 
 
+def test_core_blocks_preserve_the_pci_domain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _load(RUNTIME_SCRIPT, "tts_mps_runtime_pci_domain")
+    pci_devices = tmp_path / "pci"
+    numa_nodes = tmp_path / "nodes"
+    for domain, numa_node in (("0000", 0), ("0001", 1)):
+        device = pci_devices / f"{domain}:08:00.0"
+        device.mkdir(parents=True)
+        (device / "numa_node").write_text(f"{numa_node}\n", encoding="utf-8")
+        node = numa_nodes / f"node{numa_node}"
+        node.mkdir(parents=True)
+        (node / "cpulist").write_text(
+            "0-7\n" if numa_node == 0 else "8-15\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="00000000:08:00.0\n"),
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "sched_getaffinity",
+        lambda _pid: set(range(16)),
+        raising=False,
+    )
+
+    assert runtime.derive_core_blocks(
+        0,
+        pci_devices_root=pci_devices,
+        numa_nodes_root=numa_nodes,
+    ) == ("0-2", "3-5")
+
+
 def test_stale_launcher_state_is_archived_and_reconciled_before_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -79,6 +116,9 @@ def test_stale_launcher_state_is_archived_and_reconciled_before_launch(
     stale = spec.state_root / "gpu-0" / "run-stale"
     stale.mkdir(parents=True)
     (stale / "mps_ctl.err").write_text("retained\n", encoding="utf-8")
+    mps_logs = stale / "mps" / "log"
+    mps_logs.mkdir(parents=True)
+    (mps_logs / "control.log").write_text("daemon root cause\n", encoding="utf-8")
     commands: list[tuple[str, ...]] = []
 
     def fake_run(command, **_kwargs):
@@ -106,6 +146,15 @@ def test_stale_launcher_state_is_archived_and_reconciled_before_launch(
         / "raw"
         / "mps_ctl.err"
     ).read_text(encoding="utf-8") == "retained\n"
+    assert (
+        spec.output_dir
+        / "recovered-stale-launcher-state"
+        / "run-stale"
+        / "raw"
+        / "mps"
+        / "log"
+        / "control.log"
+    ).read_text(encoding="utf-8") == "daemon root cause\n"
 
 
 def test_launcher_state_rejects_shared_weights_and_consumes_verified_kv(
@@ -379,6 +428,58 @@ def test_activity_reader_waits_for_all_terminal_events(
 
     assert len(events) == 2
     assert all(item["event"] == "model_path_end" for item in events)
+
+
+def test_activity_reader_does_not_count_failed_terminal_events(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _load(RUNTIME_SCRIPT, "tts_mps_runtime_failed_terminal")
+    snapshot = SimpleNamespace(state_dir=tmp_path, replicas=())
+    events = [
+        {
+            "event": "model_path_end",
+            "status": "success" if index < 4 else "error",
+        }
+        for index in range(8)
+    ]
+    monkeypatch.setattr(
+        runtime,
+        "_read_model_path_activity_once",
+        lambda _snapshot: events,
+    )
+
+    with pytest.raises(RuntimeError, match="successful terminal events"):
+        runtime.read_model_path_activity(
+            snapshot,
+            min_terminal_events=8,
+            timeout_s=0.0,
+        )
+
+
+def test_canary_request_counts_require_every_request_to_succeed() -> None:
+    runtime = _load(RUNTIME_SCRIPT, "tts_mps_runtime_request_counts")
+    assert runtime.require_exact_request_counts(
+        {
+            "total_requests": 8,
+            "completed_requests": 8,
+            "failed_requests": 0,
+        },
+        expected_requests=8,
+    ) == {
+        "total_requests": 8,
+        "completed_requests": 8,
+        "failed_requests": 0,
+    }
+    with pytest.raises(RuntimeError, match="request counts"):
+        runtime.require_exact_request_counts(
+            {
+                "total_requests": 8,
+                "completed_requests": 4,
+                "failed_requests": 4,
+            },
+            expected_requests=8,
+        )
 
 
 def test_managed_router_lifecycle_accepts_two_external_mps_workers(

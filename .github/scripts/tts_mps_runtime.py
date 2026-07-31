@@ -117,7 +117,12 @@ def format_cpu_list(cpus: list[int]) -> str:
     return ",".join(ranges)
 
 
-def derive_core_blocks(gpu_id: int) -> tuple[str, str]:
+def derive_core_blocks(
+    gpu_id: int,
+    *,
+    pci_devices_root: Path = Path("/sys/bus/pci/devices"),
+    numa_nodes_root: Path = Path("/sys/devices/system/node"),
+) -> tuple[str, str]:
     result = subprocess.run(
         [
             "nvidia-smi",
@@ -130,18 +135,20 @@ def derive_core_blocks(gpu_id: int) -> tuple[str, str]:
         capture_output=True,
         text=True,
     )
-    bus_suffix = result.stdout.strip().lower().split(":", 1)[-1]
-    matches = list(Path("/sys/bus/pci/devices").glob(f"*:{bus_suffix}"))
-    if len(matches) != 1:
+    bus_id = result.stdout.strip().lower()
+    try:
+        domain, bus, device = bus_id.split(":")
+        pci_device = pci_devices_root / f"{int(domain, 16):04x}:{bus}:{device}"
+    except ValueError as exc:
+        raise RuntimeError(f"invalid PCI bus ID for GPU {gpu_id}: {bus_id!r}") from exc
+    if not pci_device.is_dir():
         raise RuntimeError(f"cannot resolve one PCI device for GPU {gpu_id}")
-    numa_node = int((matches[0] / "numa_node").read_text().strip())
+    numa_node = int((pci_device / "numa_node").read_text().strip())
     if numa_node < 0:
         raise RuntimeError(f"GPU {gpu_id} has no usable NUMA node")
     node_cpus = set(
         parse_cpu_list(
-            Path(f"/sys/devices/system/node/node{numa_node}/cpulist")
-            .read_text()
-            .strip()
+            (numa_nodes_root / f"node{numa_node}" / "cpulist").read_text().strip()
         )
     )
     allowed = sorted(node_cpus & set(os.sched_getaffinity(0)))
@@ -154,22 +161,20 @@ def derive_core_blocks(gpu_id: int) -> tuple[str, str]:
     return format_cpu_list(usable[:split]), format_cpu_list(usable[split:])
 
 
-def find_free_port_pair() -> int:
-    for base in range(18000, 28000, 2):
-        sockets: list[socket.socket] = []
-        try:
-            for port in (base, base + 1):
-                handle = socket.socket()
-                handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                handle.bind(("127.0.0.1", port))
-                sockets.append(handle)
-            return base
-        except OSError:
-            pass
-        finally:
-            for handle in sockets:
-                handle.close()
-    raise RuntimeError("no free adjacent port pair is available")
+def require_exact_request_counts(
+    summary: dict[str, Any],
+    *,
+    expected_requests: int,
+) -> dict[str, int]:
+    expected = {
+        "total_requests": expected_requests,
+        "completed_requests": expected_requests,
+        "failed_requests": 0,
+    }
+    counts = {key: summary.get(key) for key in expected}
+    if any(type(value) is not int for value in counts.values()) or counts != expected:
+        raise RuntimeError(f"request counts do not match {expected}: {counts}")
+    return {key: summary[key] for key in expected}
 
 
 @dataclass(frozen=True)
@@ -348,6 +353,9 @@ def _copy_raw_state(state: Path, output_dir: Path) -> Path:
     logs = state / "logs"
     if logs.is_dir() and not logs.is_symlink():
         shutil.copytree(logs, target / "logs", dirs_exist_ok=True)
+    mps_logs = state / "mps" / "log"
+    if mps_logs.is_dir() and not mps_logs.is_symlink():
+        shutil.copytree(mps_logs, target / "mps" / "log", dirs_exist_ok=True)
     for activity in state.glob("activity-*"):
         if activity.is_dir() and not activity.is_symlink():
             shutil.copytree(
@@ -686,12 +694,15 @@ def read_model_path_activity(
     deadline = time.monotonic() + timeout_s
     while True:
         events = _read_model_path_activity_once(snapshot)
-        terminal_count = sum(item.get("event") == "model_path_end" for item in events)
+        terminal_count = sum(
+            item.get("event") == "model_path_end" and item.get("status") == "success"
+            for item in events
+        )
         if terminal_count >= min_terminal_events:
             return events
         if time.monotonic() >= deadline:
             raise RuntimeError(
-                "request profiler did not flush all terminal model-path events: "
+                "request profiler did not flush all successful terminal events: "
                 f"{terminal_count} < {min_terminal_events}"
             )
         time.sleep(poll_interval_s)

@@ -20,11 +20,11 @@ from tts_mps_runtime import (  # noqa: E402
     atomic_write_json,
     capture_gpu_clients,
     derive_core_blocks,
-    find_free_port_pair,
     launch_replicas,
     new_summary,
     read_model_path_activity,
     require_clean_cleanup,
+    require_exact_request_counts,
     start_request_profiles,
     stop_request_profiles,
     teardown_replicas,
@@ -36,6 +36,7 @@ from benchmarks.dataset.prepare import DATASETS, download_dataset  # noqa: E402
 from benchmarks.eval.tts_mps_perf import check_mps_performance  # noqa: E402
 from benchmarks.metrics.wer import print_wer_summary  # noqa: E402
 from tests.test_model.omni_router_utils import (  # noqa: E402
+    _find_available_port_range,
     assert_workers_served_requests_since,
     launch_managed_router,
     router_get_json,
@@ -124,7 +125,7 @@ def _launch_spec() -> MpsLaunchSpec:
         base_port=(
             int(os.environ[BASE_PORT_ENV])
             if os.environ.get(BASE_PORT_ENV)
-            else find_free_port_pair()
+            else _find_available_port_range(2)
         ),
         core_blocks=derive_core_blocks(int(os.environ.get(GPU_ENV, "0"))),
         python_bin=sys.executable,
@@ -248,9 +249,14 @@ def test_tts_mps_non_streaming(
                     str(canary_dir),
                     concurrency=CANARY_CONCURRENCY,
                     max_samples=CANARY_REQUESTS,
+                    warmup=0,
                 )
             finally:
                 stop_request_profiles(snapshot, spec.run_id)
+            canary_counts = require_exact_request_counts(
+                canary_results["summary"],
+                expected_requests=CANARY_REQUESTS,
+            )
             events = read_model_path_activity(
                 snapshot,
                 min_terminal_events=CANARY_REQUESTS,
@@ -264,7 +270,7 @@ def test_tts_mps_non_streaming(
                 measurement_uncertainty_ns=1_000_000,
             )
             overlap["canary_wall_time_s"] = time.perf_counter() - canary_started
-            overlap["request_count"] = CANARY_REQUESTS
+            overlap["request_counts"] = canary_counts
             after_workers = router_get_json(router.port, "/workers")
 
         cleanup = teardown_replicas(
