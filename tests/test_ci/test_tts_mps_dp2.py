@@ -122,6 +122,22 @@ def _env_or(name: str, fallback: str) -> str:
     return os.environ.get(name, "").strip() or fallback
 
 
+def _physical_gpu_id() -> int:
+    """Resolve the physical GPU index the launcher should bind.
+
+    The launcher resolves a GPU UUID through nvidia-smi, which enumerates
+    physically and ignores CUDA_VISIBLE_DEVICES, so a harness that scopes this
+    process with CVD would otherwise be silently overridden and the stage would
+    run on physical GPU 0.
+    """
+    explicit = os.environ.get(GPU_ENV, "").strip()
+    if explicit:
+        return int(explicit)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    first = visible.split(",")[0].strip() if visible else ""
+    return int(first) if first.isdigit() else 0
+
+
 def _resolve_roots(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[Path, Path]:
@@ -172,7 +188,7 @@ def _launch_spec(
     config = Path(_env_or(CONFIG_ENV, DEFAULT_CONFIGS[model]))
     if not config.is_absolute():
         config = PROJECT_ROOT / config
-    gpu_id = int(os.environ.get(GPU_ENV, "0"))
+    gpu_id = _physical_gpu_id()
     return MpsLaunchSpec(
         repository_root=PROJECT_ROOT,
         output_dir=output_root,
