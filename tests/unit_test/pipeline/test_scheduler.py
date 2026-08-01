@@ -634,6 +634,7 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
     req = SimpleNamespace(
         rid="req-run",
         to_finish=None,
+        finished_reason=None,
         req_pool_idx=1,
         is_retracted=False,
         finished=lambda: False,
@@ -723,6 +724,7 @@ def test_omni_scheduler_abort_treats_retracted_alias_as_waiting_owned() -> None:
         is_retracted=True,
         finished=lambda: False,
         to_finish=None,
+        finished_reason=None,
         req_pool_idx=None,
         mamba_pool_idx=None,
         _omni_terminal_claimed=False,
