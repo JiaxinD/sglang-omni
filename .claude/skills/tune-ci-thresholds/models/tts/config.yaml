@@ -79,8 +79,10 @@ auto_env:
 gpus_per_test:
   test_tts_ci.py: 2
   test_tts_serving_ci.py: 1
-  # Both replicas share one physical H100 through a private MPS namespace.
-  test_tts_mps_dp2.py: 1
+  # The two MPS replicas share one physical H100, but the WER evaluation that
+  # follows launches the Qwen3-ASR router at num_workers=2, so the stage needs
+  # two cards over its lifetime.
+  test_tts_mps_dp2.py: 2
 test_globs:
   - "tests/test_model/test_tts_ci.py"
   - "tests/test_model/test_tts_serving_ci.py"
@@ -287,7 +289,7 @@ metric_sources:
       higgs:
         extra_env:
           TTS_CI_MODEL: "higgs"
-        gpus: 1
+        gpus: 2
         constant_filter: "^MPS_HIGGS_"
         hf_model_ids:
           - "bosonai/higgs-tts-3-4b"
@@ -295,7 +297,7 @@ metric_sources:
       moss:
         extra_env:
           TTS_CI_MODEL: "moss"
-        gpus: 1
+        gpus: 2
         constant_filter: "^MPS_MOSS_"
         hf_model_ids:
           - "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5"
