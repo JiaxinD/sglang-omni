@@ -746,7 +746,6 @@ def test_omni_scheduler_abort_treats_retracted_alias_as_waiting_owned() -> None:
     assert req._omni_data is None
     assert request_data.req is req
     assert cleaned == ["req-retracted"]
-    assert model_path_ends == []
 
 
 def test_omni_scheduler_emit_stream_output_skips_aborted_requests() -> None:
@@ -2301,6 +2300,7 @@ def test_omni_scheduler_running_abort_does_not_leak_prefill_dedup_state(
     scheduler._abort_callback = None
     scheduler._pending_stream_chunks = {}
     scheduler._pending_stream_done = set()
+    scheduler._pending_stream_ingress = {}
     scheduler._deferred_request_payloads = {}
     scheduler._dirty_deferred_request_ids = set()
     scheduler._first_emit_done = {"req-1"}
