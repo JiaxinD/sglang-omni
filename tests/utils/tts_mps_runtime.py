@@ -172,9 +172,7 @@ def derive_core_blocks(
         )
     # Reserve a slice for host-side work, but never below the hard minimum, so
     # a host that does have enough cores is not reported as insufficient.
-    usable = allowed[
-        : max(MINIMUM_CORES, int(len(allowed) * (1 - HOST_RESERVE_RATIO)))
-    ]
+    usable = allowed[: max(MINIMUM_CORES, int(len(allowed) * (1 - HOST_RESERVE_RATIO)))]
     split = len(usable) // 2
     return format_cpu_list(usable[:split]), format_cpu_list(usable[split:])
 

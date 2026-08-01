@@ -41,7 +41,7 @@ from typing import Any, Iterator
 import pytest
 
 from benchmarks.dataset.prepare import DATASETS, download_dataset
-from benchmarks.eval.tts_mps_perf import MPS_PERFORMANCE_REFERENCES, check_mps_performance
+from benchmarks.eval.tts_mps_perf import check_mps_performance
 from benchmarks.metrics.wer import print_wer_summary
 from tests.test_model.omni_router_utils import (
     _find_available_port_range,

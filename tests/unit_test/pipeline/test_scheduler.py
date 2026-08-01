@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import gc
 import collections
+import gc
 import threading
 import weakref
 from array import array
