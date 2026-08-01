@@ -1425,6 +1425,14 @@ class OmniScheduler:
                             terminal_error = exc
                 data.prefill_input_embeds = None
                 data.decode_input_embeds = None
+                # Note: (Jiaxin Deng) close the model-path interval before
+                # _close_completed_request, which discards the same rid that
+                # _emit_model_path_end_once dedups on. Emitting afterwards
+                # silently drops every terminal event on the success path.
+                self._emit_model_path_end_once(
+                    rid,
+                    status="error" if terminal_error is not None else "success",
+                )
                 abort_cleanup_needed = self._close_completed_request(req)
 
             if abort_cleanup_needed:
@@ -1432,12 +1440,10 @@ class OmniScheduler:
 
             if terminal_error is not None:
                 self._first_emit_done.discard(rid)
-                self._emit_model_path_end_once(rid, status="error")
                 self._emit_request_error(rid, terminal_error)
                 continue
 
             self._first_emit_done.discard(rid)
-            self._emit_model_path_end_once(rid, status="success")
             self.outbox.put(
                 OutgoingMessage(
                     request_id=rid,
