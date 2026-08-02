@@ -281,8 +281,11 @@ metric_sources:
     threshold_file: "benchmarks/eval/tts_mps_perf.py"
     # The canonical benchmark runs the full SeedTTS EN set. Declared explicitly
     # because the only sample-shaped literal in the file is CANARY_REQUESTS,
-    # which sizes the overlap canary, not the observation.
-    expected_samples: 1088
+    # which sizes the overlap canary, not the observation. Similarity scores a
+    # fixed 50-sample subset, so it carries its own scope.
+    expected_samples:
+      speed: 1088
+      similarity: 50
     observation_validity: "tts-mps-ci0/benchmark_validation.json::valid"
     allowed_pytest_failure: "tts-mps-ci0/benchmark_validation.json::threshold_assertion_failed"
     calibration_presets:

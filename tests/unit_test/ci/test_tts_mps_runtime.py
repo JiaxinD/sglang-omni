@@ -628,11 +628,6 @@ def test_mps_performance_fails_closed_on_an_uncalibrated_reference(
     assert any("tune-ci-thresholds" in check for check in verdict["failed_checks"])
 
 
-@pytest.mark.xfail(
-    reason="references reset for the SGLang 0.5.16 recalibration; remove the "
-    "marker once apply-plan writes the new worst-of-five values",
-    strict=True,
-)
 def test_shipped_mps_references_are_all_calibrated() -> None:
     from benchmarks.eval import tts_mps_perf
 
