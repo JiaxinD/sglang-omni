@@ -451,7 +451,7 @@ def _run_mps_session(
     output_root: Path,
     summary_path: Path,
     baseline_gpu_clients: list[dict],
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, MetricCheckCollector]:
     """Generate under two MPS replicas and prove they ran concurrently."""
     with _mps_replicas(spec, summary_path, baseline_gpu_clients) as snapshot:
         with launch_managed_router(
@@ -471,7 +471,6 @@ def _run_mps_session(
                 output_root=output_root,
                 summary_path=summary_path,
             )
-            canonical_checks.assert_all()
             overlap = _run_overlap_canary(
                 snapshot=snapshot,
                 spec=spec,
@@ -487,7 +486,7 @@ def _run_mps_session(
                     "router_workers_after": router_get_json(router.port, "/workers"),
                 },
             )
-    return speed_results, overlap
+    return speed_results, overlap, canonical_checks
 
 
 def _record_failure(summary_path: Path, exc: BaseException) -> None:
@@ -518,7 +517,7 @@ def test_tts_mps_non_streaming(tmp_path_factory: pytest.TempPathFactory) -> None
         },
     )
     try:
-        speed_results, overlap = _run_mps_session(
+        speed_results, overlap, canonical_checks = _run_mps_session(
             tmp_path_factory=tmp_path_factory,
             spec=spec,
             model=model,
@@ -569,4 +568,10 @@ def test_tts_mps_non_streaming(tmp_path_factory: pytest.TempPathFactory) -> None
     print_wer_summary(
         wer_results["summary"], TTS_MODEL_PATH, dataset=SEEDTTS_DATASET_LABEL
     )
+    # Note: (Jiaxin Deng) assert once, at the end. Raising on a reference miss
+    # mid-stage skipped the canary and the quality evaluation, so one
+    # uncalibrated speed value stopped the run from ever producing the
+    # similarity observation needed to calibrate it.
+    for failure in canonical_checks.failures:
+        quality.fail(failure)
     quality.assert_all()
