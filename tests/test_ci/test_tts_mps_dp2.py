@@ -41,7 +41,7 @@ from typing import Any, Iterator
 import pytest
 
 from benchmarks.dataset.prepare import DATASETS, download_dataset
-from benchmarks.eval.tts_mps_perf import check_mps_performance
+from benchmarks.eval.tts_mps_perf import MPS_SIMILARITY_MEAN_MIN, check_mps_performance
 from benchmarks.metrics.wer import print_wer_summary
 from tests.test_model.omni_router_utils import (
     _find_available_port_range,
@@ -381,6 +381,7 @@ def _run_overlap_canary(
 
 def _evaluate_quality(
     *,
+    model: str,
     tmp_path_factory: pytest.TempPathFactory,
     dataset_repo: str,
     canonical_dir: Path,
@@ -422,9 +423,20 @@ def _evaluate_quality(
         wer_results, label="TTS MPS non-stream c16", collector=quality
     )
     assert_wer_results(wer_results, _THRESHOLDS.wer_corpus, collector=quality)
-    _assert_similarity_results(
-        similarity_results, _THRESHOLDS.similarity_mean_min, collector=quality
-    )
+    # Note: (Jiaxin Deng) the canonical reference is calibrated under ordinary
+    # DP2; under a shared card the spread straddles it, so this stage carries
+    # its own worst-of-five baseline rather than borrowing a line it fails
+    # about half the time without a measured MPS penalty.
+    similarity_min = MPS_SIMILARITY_MEAN_MIN[model]
+    if similarity_min is None:
+        quality.fail(
+            "uncalibrated MPS speaker-similarity baseline; run "
+            ".claude/skills/tune-ci-thresholds with 5 repeats"
+        )
+    else:
+        _assert_similarity_results(
+            similarity_results, similarity_min, collector=quality
+        )
     _assert_utmos_results(utmos_results, _THRESHOLDS.utmos_mean_min, collector=quality)
     return wer_results, similarity_results, utmos_results, quality
 
@@ -526,6 +538,7 @@ def test_tts_mps_non_streaming(tmp_path_factory: pytest.TempPathFactory) -> None
         raise
 
     wer_results, similarity_results, utmos_results, quality = _evaluate_quality(
+        model=model,
         tmp_path_factory=tmp_path_factory,
         dataset_repo=dataset_repo,
         canonical_dir=canonical_dir,

@@ -38,6 +38,18 @@ MPS_MOSS_OUTPUT_TOK_PER_REQ_S_REF: float | None = 53.9
 MPS_MOSS_LATENCY_MEAN_S_REF: float | None = 2.253
 MPS_MOSS_RTF_MEAN_REF: float | None = 0.5363
 
+# Speaker similarity gets its own MPS baseline. The canonical reference is
+# calibrated under ordinary DP2, and under a shared card the observed spread
+# straddles it (65.08 to 67.37 against a 66.06 line), so reusing it would make
+# the stage fail about half the time without any measured MPS penalty.
+MPS_HIGGS_SIMILARITY_MEAN_MIN: float | None = None
+MPS_MOSS_SIMILARITY_MEAN_MIN: float | None = None
+
+MPS_SIMILARITY_MEAN_MIN = {
+    "higgs": MPS_HIGGS_SIMILARITY_MEAN_MIN,
+    "moss": MPS_MOSS_SIMILARITY_MEAN_MIN,
+}
+
 _MINIMUM = "minimum"
 _MAXIMUM = "maximum"
 

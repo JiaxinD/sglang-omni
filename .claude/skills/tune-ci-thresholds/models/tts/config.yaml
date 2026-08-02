@@ -306,8 +306,13 @@ metric_sources:
     sample_counts:
       total: "summary.total_requests"
       ok: "summary.completed_requests"
+    sample_counts_by_group:
+      similarity:
+        total: "tts-mps-ci0/canonical/similarity_results.json::summary.total_samples"
+        ok: "tts-mps-ci0/canonical/similarity_results.json::summary.evaluated"
     paths:
       throughput_qps: "summary.throughput_qps"
       output_tok_per_req_s: "summary.output_tok_per_req_s"
       latency_mean_s: "summary.latency_mean_s"
       rtf_mean: "summary.rtf_mean"
+      similarity_mean: "tts-mps-ci0/canonical/similarity_results.json::summary.speaker_similarity_mean"
