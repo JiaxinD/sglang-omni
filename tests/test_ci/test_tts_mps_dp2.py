@@ -557,6 +557,15 @@ def test_tts_mps_non_streaming(tmp_path_factory: pytest.TempPathFactory) -> None
         },
         timing={"total_s": time.perf_counter() - total_started},
     )
+    # A quality threshold miss is a threshold failure, not a missing
+    # observation: every metric and the full sample scope were produced, so
+    # calibration must still be able to consume this repeat.
+    _write_validation(
+        output_root,
+        valid=True,
+        threshold_assertion_failed=bool(quality.failures),
+        detail={"quality_failures": list(quality.failures)},
+    )
     print_wer_summary(
         wer_results["summary"], TTS_MODEL_PATH, dataset=SEEDTTS_DATASET_LABEL
     )
