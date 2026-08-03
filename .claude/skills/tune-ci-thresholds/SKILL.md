@@ -23,7 +23,7 @@ Read these files before running a calibration:
 | Model | Scope |
 |---|---|
 | `asr` | MOSS-Transcribe-Diarize and Qwen3-ASR CI |
-| `tts` | Every configured Higgs and MOSS preset; CI may select one preset, calibration observes both. Includes the Stage 5 MPS placement stages (`tts_mps_dp2_*`), whose references live in `benchmarks/eval/tts_mps_perf.py` rather than a test file |
+| `tts` | Every configured Higgs and MOSS preset; CI may select one preset, calibration observes both. Includes the Stage 5 MPS placement stages (`tts_mps_dp2_*`), whose references live in `tests/test_ci/tts_mps_ci_config.py` rather than the test file itself |
 | `omni` | Numeric threshold stages in Qwen3-Omni CI |
 
 `stages.yaml` is generated from the current test files and `config.yaml`. It is

@@ -275,10 +275,10 @@ metric_sources:
           output_tok_per_req_s: "metrics.by_stage_and_workload.closed-1.long_prefill_decode.output_tok_per_req_s"
   # Stage 5 MPS placement validation. Calibration runs the file once per preset
   # exactly like test_tts_ci.py; CI itself only ever runs the preselected one.
-  # References live in benchmarks/eval/tts_mps_perf.py, not in the test file,
-  # so threshold_file points there.
+  # References live in tests/test_ci/tts_mps_ci_config.py, not in the test
+  # file, so threshold_file points there.
   test_tts_mps_dp2.py:
-    threshold_file: "benchmarks/eval/tts_mps_perf.py"
+    threshold_file: "tests/test_ci/tts_mps_ci_config.py"
     # The canonical benchmark runs the full SeedTTS EN set. Declared explicitly
     # because the only sample-shaped literal in the file is CANARY_REQUESTS,
     # which sizes the overlap canary, not the observation. Similarity scores a

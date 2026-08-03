@@ -10,19 +10,17 @@ recalibration only ever rewrites the `_REF` literals.
 and reports the observation, then fails the assertion, so an uncalibrated gate
 can never pass silently.
 
-Calibrated 2026-07-31 on one H100 of the CI host, five strict-valid repeats per
-preset at concurrency 16 over the full SeedTTS EN set. Higgs held a 0.9 to 2.8
-percent spread. MOSS is host-bound and its runs were bimodal under a shared
-host at load 20 to 165, so its references are correspondingly wider; tightening
-them needs a quiescent runner or a MOSS-side fix, not a hand-picked number.
+Calibrated 2026-08-02 on one H100 of the CI host against SGLang 0.5.16, five
+strict-valid repeats per stage at concurrency 16 over the full SeedTTS EN set
+(run `20260802T033000Z_tts-mps_all_r8`); every metric held a spread under 3.1
+percent.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Same uniform slack the TTS generation stages use, kept here so this policy
-# does not import from the test tree.
+# Same uniform slack the TTS generation stages use.
 MPS_SLACK_HIGHER = 0.75
 MPS_SLACK_LOWER = 1.25
 

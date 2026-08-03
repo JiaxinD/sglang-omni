@@ -20,7 +20,7 @@ Three claims have to hold together, and each has its own oracle here:
   UTMOS and audio-integrity assertions unchanged rather than restating them.
 
 Performance references are separate from those assertions and are calibrated
-worst-of-five, see `benchmarks/eval/tts_mps_perf.py`.
+worst-of-five, see `tests/test_ci/tts_mps_ci_config.py`.
 
 Teardown is part of the contract. A dirty process, port, state directory, or
 leftover GPU client fails the test, because the next CI stage on the same
@@ -41,7 +41,10 @@ from typing import Any, Iterator
 import pytest
 
 from benchmarks.dataset.prepare import DATASETS, download_dataset
-from benchmarks.eval.tts_mps_perf import MPS_SIMILARITY_MEAN_MIN, check_mps_performance
+from tests.test_ci.tts_mps_ci_config import (
+    MPS_SIMILARITY_MEAN_MIN,
+    check_mps_performance,
+)
 from benchmarks.metrics.wer import print_wer_summary
 from tests.test_model.omni_router_utils import (
     _find_available_port_range,

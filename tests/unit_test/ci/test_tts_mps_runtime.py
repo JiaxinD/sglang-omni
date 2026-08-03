@@ -609,17 +609,17 @@ def _healthy_mps_summary() -> dict:
 def test_mps_performance_fails_closed_on_an_uncalibrated_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from benchmarks.eval import tts_mps_perf
+    from tests.test_ci import tts_mps_ci_config
 
     monkeypatch.setattr(
-        tts_mps_perf,
+        tts_mps_ci_config,
         "MPS_PERFORMANCE_REFERENCES",
         {"higgs": {"throughput_qps": (None, "minimum", "req/s")}},
         raising=True,
     )
-    verdict = tts_mps_perf.check_mps_performance(
+    verdict = tts_mps_ci_config.check_mps_performance(
         model="higgs",
-        concurrency=tts_mps_perf.MPS_CONCURRENCY,
+        concurrency=tts_mps_ci_config.MPS_CONCURRENCY,
         summary=_healthy_mps_summary(),
     )
 
@@ -629,11 +629,11 @@ def test_mps_performance_fails_closed_on_an_uncalibrated_reference(
 
 
 def test_shipped_mps_references_are_all_calibrated() -> None:
-    from benchmarks.eval import tts_mps_perf
+    from tests.test_ci import tts_mps_ci_config
 
     uncalibrated = [
         f"{model}.{metric}"
-        for model, metrics in tts_mps_perf.MPS_PERFORMANCE_REFERENCES.items()
+        for model, metrics in tts_mps_ci_config.MPS_PERFORMANCE_REFERENCES.items()
         for metric, (reference, _direction, _unit) in metrics.items()
         if reference is None
     ]
@@ -643,7 +643,7 @@ def test_shipped_mps_references_are_all_calibrated() -> None:
 def test_mps_performance_applies_slack_to_calibrated_references(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from benchmarks.eval import tts_mps_perf
+    from tests.test_ci import tts_mps_ci_config
 
     healthy = _healthy_mps_summary()
     calibrated = {
@@ -653,24 +653,24 @@ def test_mps_performance_applies_slack_to_calibrated_references(
         }
     }
     monkeypatch.setattr(
-        tts_mps_perf, "MPS_PERFORMANCE_REFERENCES", calibrated, raising=True
+        tts_mps_ci_config, "MPS_PERFORMANCE_REFERENCES", calibrated, raising=True
     )
 
-    verdict = tts_mps_perf.check_mps_performance(
+    verdict = tts_mps_ci_config.check_mps_performance(
         model="higgs",
-        concurrency=tts_mps_perf.MPS_CONCURRENCY,
+        concurrency=tts_mps_ci_config.MPS_CONCURRENCY,
         summary=healthy,
     )
     assert verdict["status"] == "pass"
     assert verdict["checks"]["throughput_qps"]["threshold"] == pytest.approx(
-        healthy["throughput_qps"] * tts_mps_perf.MPS_SLACK_HIGHER
+        healthy["throughput_qps"] * tts_mps_ci_config.MPS_SLACK_HIGHER
     )
 
     # Below the slackened floor, so a real regression is still caught.
     regressed = {**healthy, "throughput_qps": healthy["throughput_qps"] * 0.5}
-    verdict = tts_mps_perf.check_mps_performance(
+    verdict = tts_mps_ci_config.check_mps_performance(
         model="higgs",
-        concurrency=tts_mps_perf.MPS_CONCURRENCY,
+        concurrency=tts_mps_ci_config.MPS_CONCURRENCY,
         summary=regressed,
     )
     assert verdict["status"] == "fail"
