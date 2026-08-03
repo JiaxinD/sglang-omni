@@ -41,11 +41,11 @@ from typing import Any, Iterator
 import pytest
 
 from benchmarks.dataset.prepare import DATASETS, download_dataset
+from benchmarks.metrics.wer import print_wer_summary
 from tests.test_ci.tts_mps_ci_config import (
     MPS_SIMILARITY_MEAN_MIN,
     check_mps_performance,
 )
-from benchmarks.metrics.wer import print_wer_summary
 from tests.test_model.omni_router_utils import (
     _find_available_port_range,
     assert_workers_served_requests_since,
