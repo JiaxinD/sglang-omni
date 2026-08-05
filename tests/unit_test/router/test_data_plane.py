@@ -89,8 +89,8 @@ def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
     tmp_path: Path,
 ) -> None:
     # Note (Jiaxin Deng): changing only --router-processes must not break generated
-    # clients: the forwarded admin routes keep the single-process operation ids and the
-    # worker_id path parameter name
+    # clients: the forwarded admin routes keep the single-process operation ids, the
+    # worker_id path parameter name, and the Authorization parameter/security shape
     from sglang_omni_router.app import create_app
 
     single = create_app(
@@ -98,13 +98,18 @@ def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
         client=httpx.AsyncClient(
             transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))
         ),
+        admin_api_key="parity-key",
     )
-    dp = _dp_app_forwarding_to_cp(tmp_path, _CPRecorder())
+    dp = _dp_app_forwarding_to_cp(tmp_path, _CPRecorder(), admin_api_key="parity-key")
 
     def _ops(app):
         spec = app.openapi()
         return {
-            (path, method): op.get("operationId")
+            (path, method): {
+                "operationId": op.get("operationId"),
+                "parameters": op.get("parameters"),
+                "security": op.get("security"),
+            }
             for path, item in spec["paths"].items()
             for method, op in item.items()
         }
@@ -114,9 +119,18 @@ def test_forwarded_admin_routes_publish_the_single_process_schema_identity(
     assert ("/workers/{worker_id}", "get") in shared  # not {worker_path}
     for key in shared:
         assert dp_ops[key] == single_ops[key], key
+    authed = [
+        params
+        for (path, _), op in single_ops.items()
+        if path == "/update_weights_from_disk"
+        for params in [op["parameters"] or []]
+    ]
+    assert any(
+        param.get("name") == "authorization" for params in authed for param in params
+    )
 
     def _duplicates(ops):
-        ids = [op for op in ops.values() if op]
+        ids = [op["operationId"] for op in ops.values() if op["operationId"]]
         return {op for op in ids if ids.count(op) > 1}
 
     # Note (Jiaxin Deng): the split must not introduce a collision the single-process
@@ -344,6 +358,39 @@ def test_dp_heartbeats_the_applied_seq_and_reacts_to_fencing(
     assert fenced == [True]
 
 
+def test_a_snapshot_apply_wakes_the_heartbeat_without_a_full_period(
+    tmp_path: Path,
+) -> None:
+    import json as jsonlib
+
+    # Note (Jiaxin Deng): the weight-update ACK barrier learns last_applied_seq
+    # only from heartbeats; an apply must reach the CP promptly even when the
+    # next periodic beat is a full interval away
+    upstream = _Recorder()
+    internal = _Recorder()
+    app, snapshot_path = _dp_app(
+        tmp_path,
+        upstream,
+        internal=internal,
+        heartbeat_interval_secs=600,
+    )
+    writer = SnapshotWriter(snapshot_path, cp_epoch="e")
+    with TestClient(app) as client:
+        _snapshot(writer, _entry())
+        _wait_for(lambda: client.get("/ready").status_code == 200)
+        published = _snapshot(writer, _entry(), _entry(url="http://worker-b:8102"))
+
+        def _acked() -> bool:
+            for path, body in internal.requests:
+                if path != "/internal/heartbeat":
+                    continue
+                if jsonlib.loads(body).get("last_applied_seq") == published.seq:
+                    return True
+            return False
+
+        _wait_for(_acked)
+
+
 def test_cp_keepalive_republishes_without_state_changes(tmp_path: Path) -> None:
     from sglang_omni_router.control_plane import create_control_plane_app
     from sglang_omni_router.snapshot import SnapshotReader
@@ -382,7 +429,7 @@ class _CPRecorder:
         )
 
 
-def _dp_app_forwarding_to_cp(tmp_path: Path, cp: _CPRecorder):
+def _dp_app_forwarding_to_cp(tmp_path: Path, cp: _CPRecorder, **kwargs):
     from sglang_omni_router.data_plane import create_data_plane_app
 
     upstream = _Recorder()
@@ -401,6 +448,7 @@ def _dp_app_forwarding_to_cp(tmp_path: Path, cp: _CPRecorder):
         internal_client=internal_client,
         dp_refresh_interval_secs=0.02,
         heartbeat_interval_secs=600,  # keep heartbeats out of cp.requests
+        **kwargs,
     )
 
 

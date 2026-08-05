@@ -669,6 +669,51 @@ launcher:
     assert events == ["model", "shutdown"]
 
 
+def test_invalid_multiprocess_config_launches_no_workers(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "launcher.yaml"
+    config_path.write_text(
+        """
+launcher:
+  backend: local
+  model_path: model
+  num_workers: 1
+""",
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    class FakeLauncher:
+        def __init__(self, config) -> None:
+            events.append("init")
+
+        def launch_and_wait(self) -> list[str]:
+            events.append("launch")
+            return ["http://127.0.0.1:8011"]
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    monkeypatch.setattr(serve_module, "LocalLauncher", FakeLauncher)
+    monkeypatch.setattr(serve_module.logging.config, "dictConfig", lambda config: None)
+
+    with pytest.raises(SystemExit) as exc:
+        serve_module.main(
+            [
+                "--launcher-config",
+                str(config_path),
+                "--router-processes",
+                "2",
+                "--policy",
+                "least_request",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert events == []
+
+
 def test_selector_filters_by_health_and_capability() -> None:
     workers = build_workers(
         [

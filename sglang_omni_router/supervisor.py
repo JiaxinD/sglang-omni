@@ -199,6 +199,42 @@ def _default_spawn_cp(ctx: SupervisorContext) -> ChildProcess:
     )
 
 
+def validate_multiprocess_settings(
+    *,
+    router_processes: int,
+    effective_max_inflight: int | None,
+    policy: str,
+) -> None:
+    """Deterministic rejects, callable before any GPU worker is launched.
+
+    effective_max_inflight is None when the bound is still to be derived from
+    the worker count; the supervisor re-validates with the resolved value.
+    """
+    if router_processes < 1:
+        raise ValueError("router_processes must be >= 1")
+    if effective_max_inflight is not None and effective_max_inflight < router_processes:
+        raise ValueError(
+            f"max in-flight bound {effective_max_inflight} is below "
+            f"router_processes={router_processes}; raise --max-connections/"
+            "--max-inflight or lower the process count (the soft bound's "
+            "N-1 overshoot would dominate such a small budget)"
+        )
+    machine = platform.machine().lower()
+    if router_processes > 1 and machine not in SUPPORTED_MACHINES:
+        raise ValueError(
+            f"multi-process admission is validated on x86-64 only and this "
+            f"machine reports {machine or 'unknown'}; run with "
+            "--router-processes 1"
+        )
+    if policy == "least_request" and router_processes > 1:
+        raise ValueError(
+            "least_request needs the cross-request counters of a single "
+            "process and is not supported with multiple router processes; "
+            "use --policy round_robin, --policy random, or run with "
+            "--router-processes 1"
+        )
+
+
 class RouterSupervisor:
     def __init__(
         self,
@@ -213,29 +249,11 @@ class RouterSupervisor:
         rapid_window_secs: float = 5.0,
         max_rapid_restarts: int = 3,
     ) -> None:
-        if router_processes < 1:
-            raise ValueError("router_processes must be >= 1")
-        if config.effective_max_inflight < router_processes:
-            raise ValueError(
-                f"max in-flight bound {config.effective_max_inflight} is below "
-                f"router_processes={router_processes}; raise --max-connections/"
-                "--max-inflight or lower the process count (the soft bound's "
-                "N-1 overshoot would dominate such a small budget)"
-            )
-        machine = platform.machine().lower()
-        if router_processes > 1 and machine not in SUPPORTED_MACHINES:
-            raise ValueError(
-                f"multi-process admission is validated on x86-64 only and this "
-                f"machine reports {machine or 'unknown'}; run with "
-                "--router-processes 1"
-            )
-        if config.policy == "least_request" and router_processes > 1:
-            raise ValueError(
-                "least_request needs the cross-request counters of a single "
-                "process and is not supported with multiple router processes; "
-                "use --policy round_robin, --policy random, or run with "
-                "--router-processes 1"
-            )
+        validate_multiprocess_settings(
+            router_processes=router_processes,
+            effective_max_inflight=config.effective_max_inflight,
+            policy=config.policy,
+        )
         self._config = config
         self._router_processes = router_processes
         self._workdir = workdir

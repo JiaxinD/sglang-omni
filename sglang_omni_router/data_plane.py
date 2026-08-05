@@ -22,10 +22,11 @@ from contextlib import asynccontextmanager
 from typing import Callable
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from sglang_omni.http.admin_auth import resolve_admin_api_key
 from sglang_omni_router.app import (
     _merge_models,
     _worker_pool_status_response,
@@ -182,6 +183,7 @@ def create_data_plane_app(
     heartbeat_interval_secs: float = DEFAULT_HEARTBEAT_INTERVAL_SECS,
     counter_flush_interval_secs: float = DEFAULT_COUNTER_FLUSH_INTERVAL_SECS,
     on_fenced: Callable[[], None] = _default_fence_reaction,
+    admin_api_key: str | None = None,
 ) -> FastAPI:
     view = DataPlaneWorkerView()
     reader = SnapshotReader(snapshot_path)
@@ -275,10 +277,19 @@ def create_data_plane_app(
             },
         )
 
+    # Note (Jiaxin Deng): the weight-update ACK barrier waits on
+    # last_applied_seq, which the CP only learns from heartbeats. Without this
+    # wake-up an apply sits invisible for up to a full heartbeat period, and
+    # the barrier holds the pool disabled for the slowest DP's beat phase.
+    applied_event = asyncio.Event()
+
     async def _refresh_loop() -> None:
         while True:
             if reader.maybe_reload():
+                before = (view.last_applied_seq, view.last_applied_epoch)
                 view.apply(reader.snapshot)
+                if (view.last_applied_seq, view.last_applied_epoch) != before:
+                    applied_event.set()
             await asyncio.sleep(dp_refresh_interval_secs)
 
     async def _heartbeat_loop() -> None:
@@ -352,7 +363,14 @@ def create_data_plane_app(
                 # Note (Jiaxin Deng): CP unreachable; the stale-snapshot gate
                 # governs serving, keep retrying until the CP is back.
                 registered = False
-            await asyncio.sleep(heartbeat_interval_secs)
+            try:
+                await asyncio.wait_for(
+                    applied_event.wait(), timeout=heartbeat_interval_secs
+                )
+            except asyncio.TimeoutError:
+                pass
+            else:
+                applied_event.clear()
 
     async def _counter_flush_loop() -> None:
         if internal_client is None:
@@ -480,7 +498,12 @@ def create_data_plane_app(
         forward_client if forward_client is not None else internal_client
     )
     if forwarding_client is not None:
-        _register_cp_forwarding(app, forwarding_client, config)
+        _register_cp_forwarding(
+            app,
+            forwarding_client,
+            config,
+            admin_api_key=resolve_admin_api_key(admin_api_key),
+        )
     return app
 
 
@@ -488,28 +511,41 @@ def create_data_plane_app(
 # CP owns the admin surface and re-checks it. The route names mirror the
 # single-process handlers so the published schema stays identical across
 # --router-processes, and a client generated against N=1 still works at N>=2.
-_FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...], str], ...] = (
-    ("/health", ("GET",), "health"),
-    ("/workers", ("GET",), "list_workers"),
-    ("/workers", ("POST",), "create_worker"),
-    ("/workers/{worker_id:path}", ("GET",), "get_worker"),
-    ("/workers/{worker_id:path}", ("PUT",), "update_worker"),
-    ("/workers/{worker_id:path}", ("DELETE",), "delete_worker"),
-    ("/model_info", ("GET",), "model_info"),
-    ("/model_info", ("POST",), "model_info_post"),
-    ("/pause_generation", ("POST",), "pause_generation"),
-    ("/continue_generation", ("POST",), "continue_generation"),
-    ("/update_weights_from_disk", ("POST",), "update_weights_from_disk"),
+# The authed flag mirrors which single-process routes carry the admin auth
+# dependency, so the published Authorization parameter stays identical too.
+_FORWARDED_CP_ROUTES: tuple[tuple[str, tuple[str, ...], str, bool], ...] = (
+    ("/health", ("GET",), "health", False),
+    ("/workers", ("GET",), "list_workers", False),
+    ("/workers", ("POST",), "create_worker", False),
+    ("/workers/{worker_id:path}", ("GET",), "get_worker", False),
+    ("/workers/{worker_id:path}", ("PUT",), "update_worker", False),
+    ("/workers/{worker_id:path}", ("DELETE",), "delete_worker", False),
+    ("/model_info", ("GET",), "model_info", True),
+    ("/model_info", ("POST",), "model_info_post", True),
+    ("/pause_generation", ("POST",), "pause_generation", True),
+    ("/continue_generation", ("POST",), "continue_generation", True),
+    ("/update_weights_from_disk", ("POST",), "update_weights_from_disk", True),
     (
         "/weight_update_journal/resolve",
         ("POST",),
         "resolve_weight_update_journal",
+        True,
     ),
-    ("/update_weights_from_tensor", ("POST",), "update_weights_from_tensor"),
-    ("/init_weights_update_group", ("POST",), "init_weights_update_group"),
-    ("/destroy_weights_update_group", ("POST",), "destroy_weights_update_group"),
-    ("/update_weights_from_distributed", ("POST",), "update_weights_from_distributed"),
-    ("/weights_checker", ("GET", "POST"), "weights_checker"),
+    ("/update_weights_from_tensor", ("POST",), "update_weights_from_tensor", True),
+    ("/init_weights_update_group", ("POST",), "init_weights_update_group", True),
+    (
+        "/destroy_weights_update_group",
+        ("POST",),
+        "destroy_weights_update_group",
+        True,
+    ),
+    (
+        "/update_weights_from_distributed",
+        ("POST",),
+        "update_weights_from_distributed",
+        True,
+    ),
+    ("/weights_checker", ("GET", "POST"), "weights_checker", True),
 )
 
 # Note (Jiaxin Deng): the body is re-framed as fixed-length bytes, so a client
@@ -530,7 +566,11 @@ _FORWARD_RESPONSE_STRIP = {
 
 
 def _register_cp_forwarding(
-    app: FastAPI, internal_client: httpx.AsyncClient, config: RouterConfig
+    app: FastAPI,
+    internal_client: httpx.AsyncClient,
+    config: RouterConfig,
+    *,
+    admin_api_key: str | None = None,
 ) -> None:
     in_flight = 0
 
@@ -627,9 +667,28 @@ def _register_cp_forwarding(
         # schema names the path parameter as the single-process routes do.
         return await _forward(request)
 
-    for path, methods, name in _FORWARDED_CP_ROUTES:
+    async def _declare_admin_authorization(
+        authorization: str | None = Header(default=None),
+    ) -> None:
+        # Note (Jiaxin Deng): schema-only, never enforced here; the CP owns
+        # the check. Same signature as the single-process auth dependency so
+        # the published Authorization parameter is identical across N.
+        return
+
+    for path, methods, name, authed in _FORWARDED_CP_ROUTES:
         handler = _forward_worker if "{worker_id" in path else _forward
-        app.add_api_route(path, handler, methods=list(methods), name=name)
+        dependencies = (
+            [Depends(_declare_admin_authorization)]
+            if authed and admin_api_key
+            else None
+        )
+        app.add_api_route(
+            path,
+            handler,
+            methods=list(methods),
+            name=name,
+            dependencies=dependencies,
+        )
 
 
 def _internal_headers(token: str | None) -> dict[str, str]:

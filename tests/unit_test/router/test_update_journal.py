@@ -63,6 +63,20 @@ def test_malformed_journal_schema_fails_closed(tmp_path: Path, payload) -> None:
     assert journal.has_pending() is True
 
 
+def test_keep_retains_the_recorded_admin_path(tmp_path: Path) -> None:
+    path = tmp_path / "j.json"
+    journal = UpdateJournal(str(path))
+    journal.begin("/update_weights_from_disk", ["w0", "w1"])
+    journal.keep(["w1"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document == {
+        "path": "/update_weights_from_disk",
+        "worker_ids": ["w1"],
+    }
+    journal.discard("w1")
+    assert journal.pending() == []
+
+
 def test_discard_removes_one_entry(tmp_path: Path) -> None:
     journal = UpdateJournal(str(tmp_path / "j.json"))
     journal.begin("/x", ["w0", "w1"])

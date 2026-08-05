@@ -30,7 +30,10 @@ from sglang_omni_router.launcher import (
     LocalLauncherConfig,
     load_launcher_config,
 )
-from sglang_omni_router.supervisor import RouterSupervisor
+from sglang_omni_router.supervisor import (
+    RouterSupervisor,
+    validate_multiprocess_settings,
+)
 from sglang_omni_router.update_journal import (
     JournalUnwritableError,
     ensure_state_dir,
@@ -290,6 +293,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     launcher: LocalLauncher | None = None
     try:
         validate_worker_source_args(args)
+        if args.router_processes > 1:
+            # Note (Jiaxin Deng): these rejects are deterministic from the CLI
+            # alone; failing here keeps an invalid multiprocess invocation from
+            # launching (and then tearing down) real GPU workers first.
+            validate_multiprocess_settings(
+                router_processes=args.router_processes,
+                effective_max_inflight=(
+                    args.max_inflight
+                    if args.max_inflight is not None
+                    else args.max_connections
+                ),
+                policy=args.policy,
+            )
         if args.launcher_config:
             launcher_config = load_launcher_config(args.launcher_config)
             launcher = LocalLauncher(launcher_config)

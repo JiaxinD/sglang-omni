@@ -479,9 +479,12 @@ Resolution order:
 
 The directory is created owner-only (`0700`, journal file `0600`) and is keyed
 by the router's `host:port`, so several routers on one machine keep separate
-journals. Startup fails if the directory cannot be created or written: there is
-no temp-directory fallback, which would look durable while a reboot silently
-dropped the record.
+journals. If the directory cannot be created or written, the failure mode
+depends on the mode: with `--router-processes >= 2` startup fails; the
+single-process default still starts, logs a warning, and refuses weight
+updates (`503`) until `--router-state-dir` points at a writable persistent
+path. In neither mode is there a temp-directory fallback, which would look
+durable while a reboot silently dropped the record.
 
 If the journal itself becomes unreadable, re-enabling cannot resolve it and
 every weight update stays blocked with `409`. Verify the pool's weight
@@ -520,7 +523,10 @@ What this directory does **not** manage:
 > x86-64 Linux only: the shared admission seqlock relies on x86-64 store
 > ordering, and any other machine is refused at startup. Enabled with
 > `--router-processes N`; the default `1` keeps the
-> single-process router described above, unchanged.
+> single-process router described above. The one behavioral addition at
+> `N = 1` is the weight-update journal: recovery at startup can keep workers
+> from an earlier interrupted update disabled until an operator re-enables
+> them.
 
 At `N >= 2` the router runs as a small process tree:
 

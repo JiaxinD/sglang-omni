@@ -110,12 +110,7 @@ class UpdateJournal:
     def exists(self) -> bool:
         return os.path.exists(self._path)
 
-    def pending(self) -> list[str]:
-        """Journaled target worker ids, or [] if there is no transaction.
-
-        Raises JournalUnreadableError if the file is present but corrupt, so
-        callers can fail closed instead of treating it as "no transaction".
-        """
+    def _read_document(self) -> dict | None:
         try:
             with open(self._path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -124,11 +119,22 @@ class UpdateJournal:
             # regular file. No journal can exist under such a path, so treating
             # it as unreadable would fail closed and disable the pool for a
             # router that never wrote one.
-            return []
+            return None
         except (OSError, ValueError) as exc:
             raise JournalUnreadableError(str(exc)) from exc
         if not isinstance(data, dict):
             raise JournalUnreadableError("journal is not an object")
+        return data
+
+    def pending(self) -> list[str]:
+        """Journaled target worker ids, or [] if there is no transaction.
+
+        Raises JournalUnreadableError if the file is present but corrupt, so
+        callers can fail closed instead of treating it as "no transaction".
+        """
+        data = self._read_document()
+        if data is None:
+            return []
         workers = data.get("worker_ids")
         if not isinstance(workers, list) or not all(
             isinstance(worker_id, str) for worker_id in workers
@@ -149,10 +155,20 @@ class UpdateJournal:
 
     def keep(self, worker_ids: list[str]) -> None:
         """Persist the still-unresolved target set (empty clears)."""
-        if worker_ids:
-            self._write({"worker_ids": sorted(worker_ids)})
-        else:
+        if not worker_ids:
             self.clear()
+            return
+        document: dict = {"worker_ids": sorted(worker_ids)}
+        try:
+            existing = self._read_document()
+        except JournalUnreadableError:
+            existing = None
+        # Note (Jiaxin Deng): the admin path is the only durable clue to which
+        # operation (disk reload, distributed update, pause) left the journal
+        # behind; narrowing the target set must not erase it.
+        if existing is not None and isinstance(existing.get("path"), str):
+            document["path"] = existing["path"]
+        self._write(document)
 
     def discard(self, worker_id: str) -> bool:
         """Remove one id; False when the entry could not be durably resolved.
