@@ -669,6 +669,18 @@ launcher:
     assert events == ["model", "shutdown"]
 
 
+def test_shutdown_drain_defaults_to_the_request_timeout() -> None:
+    args = build_parser().parse_args(
+        ["--worker-urls", "http://127.0.0.1:8101", "--request-timeout-secs", "300"]
+    )
+    assert build_config_from_args(args).effective_shutdown_drain_secs == 300
+
+    args = build_parser().parse_args(
+        ["--worker-urls", "http://127.0.0.1:8101", "--shutdown-drain-secs", "42"]
+    )
+    assert build_config_from_args(args).effective_shutdown_drain_secs == 42
+
+
 def test_invalid_multiprocess_config_launches_no_workers(
     monkeypatch, tmp_path: Path
 ) -> None:

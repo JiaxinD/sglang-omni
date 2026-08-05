@@ -13,26 +13,33 @@ import socket
 
 import uvicorn
 
+from sglang_omni_router.app_factory import load_config_from_env
 from sglang_omni_router.supervisor import (
-    CHILD_GRACEFUL_SHUTDOWN_SECS,
     LOG_LEVEL_ENV,
     SOCKET_FD_ENV,
     watch_supervisor_liveness,
 )
 
 
-def main() -> None:
-    watch_supervisor_liveness()
-    fd = int(os.environ[SOCKET_FD_ENV])
-    listen_socket = socket.socket(fileno=fd)
-    config = uvicorn.Config(
+def build_server_config() -> uvicorn.Config:
+    config = load_config_from_env()
+    return uvicorn.Config(
         "sglang_omni_router.data_plane:create_dp_app_from_env",
         factory=True,
         log_level=os.environ.get(LOG_LEVEL_ENV, "warning").lower(),
         access_log=False,
-        timeout_graceful_shutdown=CHILD_GRACEFUL_SHUTDOWN_SECS,
+        # Note (Jiaxin Deng): a routine SIGTERM must drain, not truncate:
+        # TTS/Omni requests routinely outlive a short fixed deadline, and the
+        # single-process router sets no graceful deadline at all.
+        timeout_graceful_shutdown=config.effective_shutdown_drain_secs,
     )
-    server = uvicorn.Server(config)
+
+
+def main() -> None:
+    watch_supervisor_liveness()
+    fd = int(os.environ[SOCKET_FD_ENV])
+    listen_socket = socket.socket(fileno=fd)
+    server = uvicorn.Server(build_server_config())
     server.run(sockets=[listen_socket])
 
 

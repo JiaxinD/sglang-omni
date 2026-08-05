@@ -22,20 +22,24 @@ class FakeProcess:
         self.pid = FakeProcess._next_pid
         self.returncode: int | None = None
         self.wait_called = False
+        self.wait_timeouts: list[float | None] = []
         self.stop_order: list[str] | None = None
         self.label = ""
+        self.exits_on_terminate = True
 
     def poll(self) -> int | None:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
         self.wait_called = True
+        self.wait_timeouts.append(timeout)
         if self.returncode is None:
             raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout or 0)
         return self.returncode
 
     def terminate(self) -> None:
-        self.returncode = -15
+        if self.exits_on_terminate:
+            self.returncode = -15
         if self.stop_order is not None:
             self.stop_order.append(self.label)
 
@@ -90,11 +94,12 @@ def _free_port() -> int:
     return port
 
 
-def _config() -> RouterConfig:
+def _config(**overrides) -> RouterConfig:
     return RouterConfig(
         host="127.0.0.1",
         port=_free_port(),
         workers=[WorkerConfig(url="http://127.0.0.1:8101")],
+        **overrides,
     )
 
 
@@ -241,6 +246,42 @@ def test_shutdown_stops_dps_before_the_cp(tmp_path: Path) -> None:
     harness.supervisor.shutdown()
 
     assert order == ["dp0", "dp1", "cp"]
+
+
+def test_shutdown_waits_out_the_dp_drain_before_killing(tmp_path: Path) -> None:
+    # Note (Jiaxin Deng): the DP's uvicorn drain runs up to the configured
+    # shutdown drain; a supervisor that only waits its fixed grace period
+    # SIGKILLs mid-drain and truncates exactly what the drain protects
+    harness = Harness(_config(shutdown_drain_secs=120), n=1, tmp_path=tmp_path)
+    harness.supervisor.start()
+    dp = harness.dp_spawns[0][2]
+    cp = harness.cp_spawns[0][1]
+    dp.exits_on_terminate = False  # still draining when the supervisor waits
+    cp.exits_on_terminate = False
+
+    harness.supervisor.shutdown()
+
+    assert dp.wait_timeouts and dp.wait_timeouts[0] >= 120
+    assert cp.wait_timeouts and cp.wait_timeouts[0] < 120
+
+
+def test_dp_runner_drain_deadline_follows_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sglang_omni_router import dp_runner
+    from sglang_omni_router.app_factory import CONFIG_FILE_ENV
+
+    path = tmp_path / "router_config.json"
+    path.write_text(_config(shutdown_drain_secs=77).model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv(CONFIG_FILE_ENV, str(path))
+    assert dp_runner.build_server_config().timeout_graceful_shutdown == 77
+
+    # Note (Jiaxin Deng): default = the request timeout, so a routine shutdown
+    # never truncates a request its own timeout would have allowed
+    path.write_text(
+        _config(request_timeout_secs=300).model_dump_json(), encoding="utf-8"
+    )
+    assert dp_runner.build_server_config().timeout_graceful_shutdown == 300
 
 
 def test_cp_restart_gets_a_fresh_epoch(tmp_path: Path) -> None:

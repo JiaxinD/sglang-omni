@@ -199,6 +199,7 @@ The table below lists the router command-line arguments.
 | `--log-level` | `info` | Router and Uvicorn log level. |
 | `--strict-limits` | off | Fail startup instead of warning when the `nofile` soft limit is too low for the resolved upstream pool size (`max(--max-connections, --max-inflight)`). |
 | `--router-processes` | `1` | Number of data-plane relay processes. `1` keeps the single-process router below; `N >= 2` enables the [multi-process router](#multi-process-router-controldata-plane-split) (x86-64 Linux only, and rejected at startup together with an explicit `--policy least_request`). |
+| `--shutdown-drain-secs` | `--request-timeout-secs` | Multi-process only: how long a stopping data-plane process waits for in-flight requests before cancelling them. The default matches the request timeout, so a routine shutdown never truncates a request its own timeout would have allowed. |
 
 Routing policies:
 
@@ -542,7 +543,10 @@ At `N >= 2` the router runs as a small process tree:
   itself, `/health` is the CP's aggregate view.
 - The supervisor restarts crashed children (with a fail-closed budget for
   rapid crash loops), fences replaced processes by generation, and tears the
-  tree down in order on SIGTERM.
+  tree down in order on SIGTERM. A stopping DP drains in-flight requests for
+  up to `--shutdown-drain-secs` (default: `--request-timeout-secs`) before
+  remaining tasks are cancelled, and the supervisor waits out that drain
+  before escalating to SIGKILL.
 
 Behavior differences to know about:
 

@@ -73,9 +73,13 @@ SUPPORTED_MACHINES = ("x86_64", "amd64")
 
 _LISTEN_BACKLOG = 2048
 _SHUTDOWN_GRACE_SECS = 10.0
+# Note (Jiaxin Deng): CP only. A DP's graceful deadline is the configurable
+# shutdown drain (default --request-timeout-secs); the CP is stopped after the
+# DPs have drained and runs short admin handlers.
 CHILD_GRACEFUL_SHUTDOWN_SECS = 5
 # Note (Jiaxin Deng): a dead supervisor cannot escalate, so the child arms its
-# own hard exit; twice the drain bound leaves the graceful path room to win.
+# own hard exit. Deliberately short and NOT scaled by the shutdown drain: an
+# orphan is holding the public socket of a router that no longer exists.
 _ORPHAN_HARD_EXIT_SECS = 2 * CHILD_GRACEFUL_SHUTDOWN_SECS
 
 
@@ -529,11 +533,13 @@ class RouterSupervisor:
         if process.poll() is None:
             process.terminate()
 
-    def _await_child(self, process: ChildProcess) -> None:
+    def _await_child(
+        self, process: ChildProcess, *, timeout: float = _SHUTDOWN_GRACE_SECS
+    ) -> None:
         if process.poll() is not None:
             return
         try:
-            process.wait(timeout=_SHUTDOWN_GRACE_SECS)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
@@ -541,6 +547,12 @@ class RouterSupervisor:
     def _stop_child(self, process: ChildProcess) -> None:
         self._signal_child(process)
         self._await_child(process)
+
+    def _dp_stop_budget(self) -> float:
+        # Note (Jiaxin Deng): the wait must outlast the DP's own drain
+        # deadline, or the supervisor SIGKILLs mid-drain and truncates exactly
+        # what the drain protects.
+        return self._config.effective_shutdown_drain_secs + _SHUTDOWN_GRACE_SECS
 
     def _close_death_pipe(self) -> None:
         for fd_attr in ("_death_pipe_write", "_death_pipe_read"):
@@ -608,7 +620,7 @@ class RouterSupervisor:
         for slot in self._dp_slots.values():
             self._signal_child(slot.process)
         for slot in self._dp_slots.values():
-            self._await_child(slot.process)
+            self._await_child(slot.process, timeout=self._dp_stop_budget())
         self._dp_slots.clear()
         if self._cp_process is not None:
             self._stop_child(self._cp_process)

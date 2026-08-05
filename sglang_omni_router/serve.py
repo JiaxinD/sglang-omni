@@ -171,6 +171,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--shutdown-drain-secs",
+        type=int,
+        default=None,
+        help=(
+            "Multi-process only: seconds a stopping data-plane process waits "
+            "for in-flight requests before cancelling them (default: "
+            "--request-timeout-secs, so a routine shutdown never truncates a "
+            "request its own timeout would have allowed)."
+        ),
+    )
+    parser.add_argument(
         "--router-state-dir",
         default=None,
         help=(
@@ -260,6 +271,7 @@ def build_config_from_args(
         max_payload_size=args.max_payload_size,
         max_connections=args.max_connections,
         max_inflight=args.max_inflight,
+        shutdown_drain_secs=args.shutdown_drain_secs,
         health_failure_threshold=args.health_failure_threshold,
         health_success_threshold=args.health_success_threshold,
         health_check_timeout_secs=args.health_check_timeout_secs,
