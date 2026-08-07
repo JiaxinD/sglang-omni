@@ -23,7 +23,7 @@ def _parse_cpuset(spec: str) -> set[int]:
     for part in spec.split(","):
         part = part.strip()
         if not part:
-            continue
+            raise ValueError(f"Empty component in OMNI_CI_CPUSET {spec!r}")
         if "-" in part:
             lo_text, hi_text = part.split("-", 1)
             lo, hi = int(lo_text), int(hi_text)
@@ -41,9 +41,18 @@ def _apply_omni_ci_cpuset() -> set[int] | None:
     spec = os.environ.get("OMNI_CI_CPUSET", "").strip()
     if not spec or not hasattr(os, "sched_setaffinity"):
         return None
-    cpus = _parse_cpuset(spec)
-    os.sched_setaffinity(0, cpus)
-    return cpus
+    requested = _parse_cpuset(spec)
+    previous = os.sched_getaffinity(0)
+    os.sched_setaffinity(0, requested)
+    # Note: (Jiaxin Deng) Linux may silently intersect the request with the
+    # cgroup/cpuset-allowed CPUs; a partial pin would invalidate calibration.
+    effective = os.sched_getaffinity(0)
+    if effective != requested:
+        raise RuntimeError(
+            f"OMNI_CI_CPUSET pinning ineffective: requested {sorted(requested)}, "
+            f"previously allowed {sorted(previous)}, effective {sorted(effective)}"
+        )
+    return requested
 
 
 @pytest.fixture(autouse=True, scope="session")

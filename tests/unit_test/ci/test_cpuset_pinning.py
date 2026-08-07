@@ -18,9 +18,10 @@ def test_parse_cpuset_single_cpu():
     assert _parse_cpuset("7") == {7}
 
 
-def test_parse_cpuset_rejects_empty():
+@pytest.mark.parametrize("spec", ["", " , ", "0,,1", ",0-3", "0-3,", ","])
+def test_parse_cpuset_rejects_empty_components(spec):
     with pytest.raises(ValueError):
-        _parse_cpuset(" , ")
+        _parse_cpuset(spec)
 
 
 def test_parse_cpuset_rejects_inverted_range():
@@ -36,6 +37,14 @@ def test_parse_cpuset_rejects_garbage():
 def test_apply_noop_without_env(monkeypatch):
     monkeypatch.delenv("OMNI_CI_CPUSET", raising=False)
     assert _apply_omni_ci_cpuset() is None
+
+
+def test_apply_fails_when_kernel_narrows_affinity(monkeypatch):
+    monkeypatch.setenv("OMNI_CI_CPUSET", "0-1")
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, cpus: None, raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    with pytest.raises(RuntimeError, match=r"requested \[0, 1\].*effective \[0\]"):
+        _apply_omni_ci_cpuset()
 
 
 @pytest.mark.skipif(
