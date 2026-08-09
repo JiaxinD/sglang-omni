@@ -8,7 +8,13 @@ kernel's per-CPU counters, not from process affinity masks: the cpuset's
 busy ticks minus the session tree's ticks (the tree is pinned, so its time
 is entirely inside the cpuset). Time spent by outsiders on other cores never
 enters the counters, and short-lived intruders are still charged because the
-per-CPU counters survive process exit.
+per-CPU counters survive process exit. Reaped tree children are deducted
+through their parent's cutime/cstime. Known blind spots, accepted: a tree
+thread that widens its own affinity is over-deducted (nothing in the tree
+does this; the runner-side partition check owns that invariant), and kernel
+work the session induces asynchronously (softirq, kworkers) counts as
+foreign by policy, since the alarm measures cpuset capacity not owned by
+the tree.
 """
 
 from __future__ import annotations
@@ -29,6 +35,8 @@ FAIL_FOREIGN_CORES = 2.0
 class _Proc:
     ppid: int
     ticks: int
+    child_ticks: int = 0
+    start: int = 0
 
 
 def _parse_cpu_list(spec: str) -> set[int]:
@@ -50,7 +58,9 @@ def cpuset_busy_ticks(cpuset: set[int]) -> int:
             if line.startswith("cpu") and line[3:4].isdigit():
                 parts = line.split()
                 if int(parts[0][3:]) in cpuset:
-                    nums = list(map(int, parts[1:]))
+                    # note (Jiaxin Deng): first 8 fields only; guest time is
+                    # already inside user/nice and would be double-counted.
+                    nums = list(map(int, parts[1:9]))
                     busy += sum(nums) - nums[3] - nums[4]
     return busy
 
@@ -65,7 +75,12 @@ def _snapshot() -> dict[int, _Proc]:
             with open(f"/proc/{pid}/stat", "rb") as f:
                 data = f.read().decode("ascii", "replace")
             rest = data[data.rindex(")") + 2 :].split()
-            procs[pid] = _Proc(ppid=int(rest[1]), ticks=int(rest[11]) + int(rest[12]))
+            procs[pid] = _Proc(
+                ppid=int(rest[1]),
+                ticks=int(rest[11]) + int(rest[12]),
+                child_ticks=int(rest[13]) + int(rest[14]),
+                start=int(rest[19]),
+            )
         except (OSError, ValueError):
             continue
     return procs
@@ -92,15 +107,23 @@ def foreign_ticks(
 ) -> int:
     """Cpuset busy ticks not accounted for by the pinned session tree.
 
-    A tree process born inside the window is charged its full tick count; a
-    tree process that exited mid-window cannot be deducted, which biases the
-    result upward, the conservative direction for a contention alarm.
+    Reaped children surface in their parent's cutime/cstime, so a server
+    killed mid-window is still deducted instead of masquerading as multiple
+    foreign cores. A pid is the same process only if starttime matches;
+    otherwise it is treated as born in this window. Per-pid deltas clamp at
+    zero so a reused pid cannot inject a negative deduction.
     """
-    tree_delta = sum(
-        cur[pid].ticks - (prev[pid].ticks if pid in prev else 0)
-        for pid in cur
-        if pid in tree
-    )
+    tree_delta = 0
+    for pid in cur:
+        if pid not in tree:
+            continue
+        proc = cur[pid]
+        before = prev.get(pid)
+        if before is not None and before.start == proc.start:
+            tree_delta += max(0, proc.ticks - before.ticks)
+            tree_delta += max(0, proc.child_ticks - before.child_ticks)
+        else:
+            tree_delta += proc.ticks + proc.child_ticks
     return max(0, busy_delta - tree_delta)
 
 
