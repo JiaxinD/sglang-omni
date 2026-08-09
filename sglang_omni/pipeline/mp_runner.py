@@ -24,6 +24,9 @@ from sglang_omni.config.runtime import (
 )
 from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.config.topology import ProcessTopologyPlan
+from sglang_omni.cpu_alloc.allocator import CpuAllocationPlan
+from sglang_omni.cpu_alloc.pipeline_plan import build_pipeline_cpu_plan
+from sglang_omni.cpu_alloc.supervisor import CpuLeaseSupervisor
 from sglang_omni.pipeline import Coordinator
 from sglang_omni.pipeline.runtime_config import (
     IpcRuntimeDir,
@@ -50,6 +53,7 @@ def _build_stage_groups(
     endpoints: dict[str, str],
     placement_plan: StagePlacementPlan,
     process_plan: ProcessTopologyPlan,
+    cpu_plan: CpuAllocationPlan | None = None,
 ) -> list[StageGroup]:
     """Build lifecycle groups from prepared endpoints and process topology.
 
@@ -187,8 +191,22 @@ def _build_stage_groups(
         )
     groups.extend(tp_groups)
     _attach_process_memory_fraction_defaults(groups)
+    _attach_cpu_plan(groups, cpu_plan)
 
     return groups
+
+
+def _attach_cpu_plan(
+    groups: list[StageGroup],
+    cpu_plan: CpuAllocationPlan | None,
+) -> None:
+    if cpu_plan is None:
+        return
+    for group in groups:
+        for process_spec in group.process_specs:
+            assignment = cpu_plan.assignments.get(process_spec.process_name)
+            if assignment is not None and assignment.cpu_ids:
+                process_spec.cpu_ids = tuple(assignment.cpu_ids)
 
 
 def _attach_process_memory_fraction_defaults(groups: list[StageGroup]) -> None:
@@ -398,6 +416,7 @@ class MultiProcessPipelineRunner:
         self._fatal_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
         self._prep: PipelineRuntimePrep | None = None
+        self._cpu_supervisor: CpuLeaseSupervisor | None = None
         self._started = False
 
     @property
@@ -437,6 +456,13 @@ class MultiProcessPipelineRunner:
             )
             self._prep = prep
             self._ipc_runtime_dir = prep.runtime_dir
+            cpu_plan: CpuAllocationPlan | None = None
+            if self._config.placement.cpu_allocator != "off":
+                cpu_plan = build_pipeline_cpu_plan(
+                    self._config,
+                    placement_plan=prep.placement_plan,
+                    process_plan=prep.process_plan,
+                )
             groups = _build_stage_groups(
                 self._config,
                 ctx,
@@ -445,6 +471,7 @@ class MultiProcessPipelineRunner:
                 endpoints=prep.endpoints,
                 placement_plan=prep.placement_plan,
                 process_plan=prep.process_plan,
+                cpu_plan=cpu_plan,
             )
 
             terminal_stages_resolver = (
@@ -483,6 +510,21 @@ class MultiProcessPipelineRunner:
             for group in self._groups:
                 for stage_name, endpoint in group.stage_control_endpoints.items():
                     self._coordinator.register_stage(stage_name, endpoint)
+
+            if (
+                cpu_plan is not None
+                and self._config.placement.cpu_allocator == "dynamic"
+            ):
+                pids = {
+                    process_spec.process_name: proc.pid
+                    for group in groups
+                    for process_spec, proc in zip(
+                        group.process_specs, group.processes, strict=True
+                    )
+                    if proc.pid is not None
+                }
+                self._cpu_supervisor = CpuLeaseSupervisor(cpu_plan, pids)
+                self._cpu_supervisor.start()
 
             self._started = True
             self._monitor_task = asyncio.create_task(self._monitor_children())
@@ -550,6 +592,8 @@ class MultiProcessPipelineRunner:
             return
         self._started = False
 
+        self._stop_cpu_supervisor()
+
         if self._monitor_task is not None:
             current = asyncio.current_task()
             if current != self._monitor_task:
@@ -576,8 +620,14 @@ class MultiProcessPipelineRunner:
 
         self._close_runtime_dir()
 
+    def _stop_cpu_supervisor(self) -> None:
+        if self._cpu_supervisor is not None:
+            self._cpu_supervisor.stop()
+            self._cpu_supervisor = None
+
     async def _cleanup_on_failure(self) -> None:
         """Best-effort cleanup after a failed start()."""
+        self._stop_cpu_supervisor()
         for group in self._groups:
             for p in group.processes:
                 if p.is_alive():

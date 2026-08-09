@@ -1076,6 +1076,18 @@ def serve(
             ),
         ),
     ] = None,
+    cpu_allocator: Annotated[
+        str | None,
+        typer.Option(
+            "--cpu-allocator",
+            help=(
+                "CPU affinity planning for stage processes: 'off' (default), "
+                "'static' (pin once at startup from the NUMA/SMT-aware plan), "
+                "or 'dynamic' (static plus lending idle exclusive cores to "
+                "the shared pool). No-op for models without stage_cpu_costs()."
+            ),
+        ),
+    ] = None,
     host: Annotated[
         str, typer.Option(help="Server bind address (default: 0.0.0.0).")
     ] = "0.0.0.0",
@@ -1489,6 +1501,13 @@ def serve(
         isolate_stages=isolate_stage,
         stage_processes=stage_process,
     )
+    if cpu_allocator is not None:
+        if cpu_allocator not in ("off", "static", "dynamic"):
+            raise typer.BadParameter(
+                f"--cpu-allocator must be off, static, or dynamic, "
+                f"got {cpu_allocator!r}"
+            )
+        merged_config.placement.cpu_allocator = cpu_allocator
     merged_config = apply_cuda_graph_cli_overrides(
         merged_config,
         thinker_cuda_graph=thinker_cuda_graph,

@@ -1,0 +1,188 @@
+# SPDX-License-Identifier: Apache-2.0
+from types import SimpleNamespace
+
+import pytest
+
+from sglang_omni.config.placement import StagePlacement, StagePlacementPlan
+from sglang_omni.config.topology import ProcessGroupPlacement, ProcessTopologyPlan
+from sglang_omni.cpu_alloc.cost import StageCpuCost, resolve_stage_cpu_costs
+from sglang_omni.cpu_alloc.pipeline_plan import (
+    _logical_to_physical_gpus,
+    build_pipeline_cpu_plan,
+)
+from sglang_omni.cpu_alloc.topology import discover_topology
+
+
+def make_config(stage_names, costs):
+    class FakeConfig:
+        stages = [SimpleNamespace(name=name) for name in stage_names]
+
+        @classmethod
+        def stage_cpu_costs(cls):
+            return costs
+
+    return FakeConfig()
+
+
+class TestStageCpuCost:
+    def test_valid_declarations(self):
+        config = make_config(
+            ["ar", "enc", "voc"],
+            {
+                "ar": {"host_class": "serial-loop", "exclusive_cores": 2},
+                "enc": {"host_class": "parallel-pool", "pool_width": 4},
+                "voc": {"host_class": "gpu-bound"},
+            },
+        )
+        costs = resolve_stage_cpu_costs(config)
+        assert costs["ar"] == StageCpuCost("serial-loop", exclusive_cores=2)
+        assert costs["enc"].pool_width == 4
+
+    def test_empty_default(self):
+        assert resolve_stage_cpu_costs(make_config(["ar"], {})) == {}
+
+    def test_unknown_stage_raises(self):
+        config = make_config(["ar"], {"nope": {"host_class": "gpu-bound"}})
+        with pytest.raises(ValueError, match="unknown stage 'nope'"):
+            resolve_stage_cpu_costs(config)
+
+    def test_bad_host_class_raises(self):
+        config = make_config(["ar"], {"ar": {"host_class": "banana"}})
+        with pytest.raises(ValueError, match="host_class"):
+            resolve_stage_cpu_costs(config)
+
+    def test_parallel_pool_requires_width(self):
+        config = make_config(["ar"], {"ar": {"host_class": "parallel-pool"}})
+        with pytest.raises(ValueError, match="pool_width"):
+            resolve_stage_cpu_costs(config)
+
+    def test_unknown_keys_raise(self):
+        config = make_config(["ar"], {"ar": {"host_class": "gpu-bound", "cores": 3}})
+        with pytest.raises(ValueError, match="unknown keys"):
+            resolve_stage_cpu_costs(config)
+
+    def test_serial_loop_rejects_zero_cores(self):
+        with pytest.raises(ValueError, match="exclusive_cores"):
+            StageCpuCost("serial-loop", exclusive_cores=0)
+
+
+class TestLogicalToPhysical:
+    def test_no_env_is_identity(self, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        assert _logical_to_physical_gpus({0, 1}) == {0: 0, 1: 1}
+
+    def test_integer_mask_maps(self, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5")
+        assert _logical_to_physical_gpus({0, 1}) == {0: 3, 1: 5}
+
+    def test_uuid_mask_returns_none(self, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-abc123")
+        assert _logical_to_physical_gpus({0}) is None
+
+    def test_out_of_range_returns_none(self, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+        assert _logical_to_physical_gpus({0, 1}) is None
+
+
+class TestBuildPipelineCpuPlan:
+    def _plans(self):
+        placement_plan = StagePlacementPlan(
+            stages={
+                "tts_engine": StagePlacement("tts_engine", (0,), 1, 0.5),
+                "vocoder": StagePlacement("vocoder", (0,), 1, 0.3),
+            },
+            gpus={},
+        )
+        process_plan = ProcessTopologyPlan(
+            groups=(
+                ProcessGroupPlacement("pipeline", ("tts_engine",), 0),
+                ProcessGroupPlacement("vocoder", ("vocoder",), 0),
+            ),
+            stage_to_process={"tts_engine": "pipeline", "vocoder": "vocoder"},
+            tp_stage_to_processes={},
+        )
+        return placement_plan, process_plan
+
+    def test_plan_pins_serial_stage_and_shares_rest(self, dual_node_sysfs):
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(
+            ["tts_engine", "vocoder"],
+            {"tts_engine": {"host_class": "serial-loop"}},
+        )
+        placement_plan, process_plan = self._plans()
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=process_plan,
+            topology=topology,
+            gpu_numa={0: 1},
+        )
+        pipeline = plan.assignments["pipeline"]
+        assert pipeline.exclusive and pipeline.numa_node == 1
+        assert pipeline.cpu_ids == (4, 12)
+        vocoder = plan.assignments["vocoder"]
+        assert not vocoder.exclusive
+        assert set(vocoder.cpu_ids) == {5, 6, 7, 13, 14, 15}
+
+    def test_no_declarations_returns_none(self, dual_node_sysfs):
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(["tts_engine", "vocoder"], {})
+        placement_plan, process_plan = self._plans()
+        assert (
+            build_pipeline_cpu_plan(
+                config,
+                placement_plan=placement_plan,
+                process_plan=process_plan,
+                topology=topology,
+                gpu_numa={0: 1},
+            )
+            is None
+        )
+
+    def test_tp_processes_each_get_stage_cost(self, dual_node_sysfs):
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(["thinker"], {"thinker": {"host_class": "serial-loop"}})
+        placement_plan = StagePlacementPlan(
+            stages={"thinker": StagePlacement("thinker", (0, 1), 2, 0.8)},
+            gpus={},
+        )
+        process_plan = ProcessTopologyPlan(
+            groups=(),
+            stage_to_process={},
+            tp_stage_to_processes={"thinker": ("thinker_tp0", "thinker_tp1")},
+        )
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=process_plan,
+            topology=topology,
+            gpu_numa={0: 0, 1: 0},
+        )
+        assert plan.assignments["thinker_tp0"].exclusive
+        assert plan.assignments["thinker_tp1"].exclusive
+        assert not (
+            set(plan.assignments["thinker_tp0"].cpu_ids)
+            & set(plan.assignments["thinker_tp1"].cpu_ids)
+        )
+
+    def test_tp_ranks_anchor_to_their_own_gpu_node(self, dual_node_sysfs):
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(["thinker"], {"thinker": {"host_class": "serial-loop"}})
+        placement_plan = StagePlacementPlan(
+            stages={"thinker": StagePlacement("thinker", (0, 1), 2, 0.8)},
+            gpus={},
+        )
+        process_plan = ProcessTopologyPlan(
+            groups=(),
+            stage_to_process={},
+            tp_stage_to_processes={"thinker": ("thinker_tp0", "thinker_tp1")},
+        )
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=process_plan,
+            topology=topology,
+            gpu_numa={0: 0, 1: 1},
+        )
+        assert plan.assignments["thinker_tp0"].numa_node == 0
+        assert plan.assignments["thinker_tp1"].numa_node == 1
