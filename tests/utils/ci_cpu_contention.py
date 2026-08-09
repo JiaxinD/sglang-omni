@@ -3,9 +3,12 @@
 
 Affinity is self-restraint, not a reservation: an unpinned process can still
 be scheduled onto the reserved cores and inflate what a perf gate measures.
-This sampler makes that attributable: each interval it charges CPU time
-consumed on the pinned cores by processes outside the session tree, and the
-fixture prints a summary so a failed speed gate can be triaged from the log.
+This sampler makes that attributable. Foreign load is measured from the
+kernel's per-CPU counters, not from process affinity masks: the cpuset's
+busy ticks minus the session tree's ticks (the tree is pinned, so its time
+is entirely inside the cpuset). Time spent by outsiders on other cores never
+enters the counters, and short-lived intruders are still charged because the
+per-CPU counters survive process exit.
 """
 
 from __future__ import annotations
@@ -26,7 +29,6 @@ FAIL_FOREIGN_CORES = 2.0
 class _Proc:
     ppid: int
     ticks: int
-    overlaps: bool
 
 
 def _parse_cpu_list(spec: str) -> set[int]:
@@ -40,7 +42,20 @@ def _parse_cpu_list(spec: str) -> set[int]:
     return cpus
 
 
-def _snapshot(cpuset: set[int]) -> dict[int, _Proc]:
+def cpuset_busy_ticks(cpuset: set[int]) -> int:
+    """Total non-idle ticks accumulated on the cpuset's cores."""
+    busy = 0
+    with open("/proc/stat", encoding="ascii", errors="replace") as f:
+        for line in f:
+            if line.startswith("cpu") and line[3:4].isdigit():
+                parts = line.split()
+                if int(parts[0][3:]) in cpuset:
+                    nums = list(map(int, parts[1:]))
+                    busy += sum(nums) - nums[3] - nums[4]
+    return busy
+
+
+def _snapshot() -> dict[int, _Proc]:
     procs: dict[int, _Proc] = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -50,18 +65,7 @@ def _snapshot(cpuset: set[int]) -> dict[int, _Proc]:
             with open(f"/proc/{pid}/stat", "rb") as f:
                 data = f.read().decode("ascii", "replace")
             rest = data[data.rindex(")") + 2 :].split()
-            ppid = int(rest[1])
-            ticks = int(rest[11]) + int(rest[12])
-            allowed = ""
-            with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as f:
-                for line in f:
-                    if line.startswith("Cpus_allowed_list"):
-                        allowed = line.split(":", 1)[1].strip()
-                        break
-            # note (Jiaxin Deng): an unreadable mask counts as overlapping;
-            # a false positive beats an invisible intruder in this report.
-            overlaps = bool(cpuset & _parse_cpu_list(allowed)) if allowed else True
-            procs[pid] = _Proc(ppid, ticks, overlaps)
+            procs[pid] = _Proc(ppid=int(rest[1]), ticks=int(rest[11]) + int(rest[12]))
         except (OSError, ValueError):
             continue
     return procs
@@ -80,21 +84,38 @@ def _tree_pids(procs: dict[int, _Proc], root: int) -> set[int]:
     return tree
 
 
-def foreign_ticks(prev: dict[int, _Proc], cur: dict[int, _Proc], tree: set[int]) -> int:
-    return sum(
-        cur[pid].ticks - prev[pid].ticks
+def foreign_ticks(
+    busy_delta: int,
+    prev: dict[int, _Proc],
+    cur: dict[int, _Proc],
+    tree: set[int],
+) -> int:
+    """Cpuset busy ticks not accounted for by the pinned session tree.
+
+    A tree process born inside the window is charged its full tick count; a
+    tree process that exited mid-window cannot be deducted, which biases the
+    result upward, the conservative direction for a contention alarm.
+    """
+    tree_delta = sum(
+        cur[pid].ticks - (prev[pid].ticks if pid in prev else 0)
         for pid in cur
-        if pid in prev and cur[pid].overlaps and pid not in tree
+        if pid in tree
     )
+    return max(0, busy_delta - tree_delta)
 
 
 class ContentionSampler:
     """Background sampler; start() before the session, summary() after."""
 
-    def __init__(self, cpuset: set[int], interval_s: float = _SAMPLE_INTERVAL_S):
+    def __init__(
+        self,
+        cpuset: set[int],
+        interval_s: float = _SAMPLE_INTERVAL_S,
+        root_pid: int | None = None,
+    ):
         self._cpuset = set(cpuset)
         self._interval = interval_s
-        self._root = os.getpid()
+        self._root = root_pid or os.getpid()
         self._hz = os.sysconf("SC_CLK_TCK")
         self._samples: list[float] = []
         self._errors = 0
@@ -112,16 +133,18 @@ class ContentionSampler:
         return max(self._samples, default=0.0)
 
     def _loop(self) -> None:
-        prev = _snapshot(self._cpuset)
+        prev_busy = cpuset_busy_ticks(self._cpuset)
+        prev = _snapshot()
         prev_t = time.monotonic()
         while not self._stop.wait(self._interval):
             try:
-                cur = _snapshot(self._cpuset)
+                cur_busy = cpuset_busy_ticks(self._cpuset)
+                cur = _snapshot()
                 now = time.monotonic()
                 tree = _tree_pids(cur, self._root)
-                cores = foreign_ticks(prev, cur, tree) / self._hz / (now - prev_t)
-                self._samples.append(cores)
-                prev, prev_t = cur, now
+                ticks = foreign_ticks(cur_busy - prev_busy, prev, cur, tree)
+                self._samples.append(ticks / self._hz / (now - prev_t))
+                prev_busy, prev, prev_t = cur_busy, cur, now
             except Exception:
                 self._errors += 1
 
