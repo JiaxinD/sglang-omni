@@ -119,6 +119,7 @@ class ModelRunner:
         self._async_query_miss: int = 0
         self._token_id_host_bufs: list[torch.Tensor] | None = None
         self._token_id_host_slot: int = 0
+        self._suppress_tensor_cache: dict[tuple, tuple[Any, torch.Tensor | None]] = {}
 
     def _stage_token_ids(self, result: Any, ids: torch.Tensor) -> None:
         # Note (wenyao): pinned host copy staged once at sample time so downstream
@@ -894,6 +895,24 @@ class ModelRunner:
     def _req_is_retracted(req: Any) -> bool:
         return bool(req.is_retracted)
 
+    @staticmethod
+    def _rep_penalty_unique_tokens(data: Any, output_ids: list, vocab: int) -> set:
+        # Note: (Jiaxin Deng) rebuilding unique(output_ids) every decode step is
+        # quadratic over the generation; track the consumed prefix and fold in
+        # only new tokens. A shrunk output_ids (retract/restart) resets the state.
+        seen_len = getattr(data, "_rep_seen_len", 0)
+        seen: set | None = getattr(data, "_rep_seen_tokens", None)
+        if seen is None or len(output_ids) < seen_len:
+            seen = set()
+            seen_len = 0
+        for t in output_ids[seen_len:]:
+            tok = int(t)
+            if 0 <= tok < vocab:
+                seen.add(tok)
+        data._rep_seen_tokens = seen
+        data._rep_seen_len = len(output_ids)
+        return seen
+
     def _apply_repetition_penalty(self, logits_output: Any, requests: list) -> None:
         logits = logits_output.next_token_logits
         if logits is None or logits.ndim != 2:
@@ -912,7 +931,7 @@ class ModelRunner:
             output_ids = req.output_ids
             if not output_ids:
                 continue
-            unique = {int(t) for t in output_ids if 0 <= int(t) < vocab}
+            unique = ModelRunner._rep_penalty_unique_tokens(data, output_ids, vocab)
             if not unique:
                 continue
             rep_rows.extend([row_idx] * len(unique))
@@ -933,8 +952,14 @@ class ModelRunner:
             return
         vocab = logits.shape[1]
         device = logits.device
-        sup_rows: list[int] = []
-        sup_toks: list[int] = []
+        # Note: (Jiaxin Deng) suppress lists are static per request and shared
+        # across a deployment in practice; cache the filtered device tensor per
+        # (list identity, vocab, device) so the decode loop stops rebuilding it.
+        cache = getattr(self, "_suppress_tensor_cache", None)
+        if cache is None:
+            cache = {}
+            self._suppress_tensor_cache = cache
+        row_groups: dict[int, tuple[torch.Tensor, list[int]]] = {}
         for row_idx, sched_req in enumerate(requests):
             data = sched_req.data
             suppress_tokens = data.suppress_tokens
@@ -946,13 +971,30 @@ class ModelRunner:
                     suppress_tokens = None
             if not suppress_tokens:
                 continue
-            for token_id in suppress_tokens:
-                tok = int(token_id)
-                if 0 <= tok < vocab:
-                    sup_rows.append(row_idx)
-                    sup_toks.append(tok)
-        if sup_rows:
-            logits[
-                torch.tensor(sup_rows, dtype=torch.long, device=device),
-                torch.tensor(sup_toks, dtype=torch.long, device=device),
-            ] = float("-inf")
+            key = (id(suppress_tokens), vocab, str(device))
+            hit = cache.get(key)
+            if hit is not None and hit[0] is suppress_tokens:
+                toks_t = hit[1]
+            else:
+                toks = [int(t) for t in suppress_tokens if 0 <= int(t) < vocab]
+                toks_t = (
+                    torch.tensor(toks, dtype=torch.long, device=device)
+                    if toks
+                    else None
+                )
+                if len(cache) >= 64:
+                    cache.clear()
+                cache[key] = (suppress_tokens, toks_t)
+            if toks_t is None:
+                continue
+            group = row_groups.get(id(suppress_tokens))
+            if group is None:
+                row_groups[id(suppress_tokens)] = (toks_t, [row_idx])
+            else:
+                group[1].append(row_idx)
+        for toks_t, rows in row_groups.values():
+            if len(rows) == logits.shape[0]:
+                logits[:, toks_t] = float("-inf")
+            else:
+                rows_t = torch.tensor(rows, dtype=torch.long, device=device)
+                logits[rows_t[:, None], toks_t[None, :]] = float("-inf")
