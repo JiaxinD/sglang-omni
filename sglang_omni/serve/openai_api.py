@@ -267,6 +267,7 @@ def create_app(
     # Register all routes
     register_favicon(app)
     _register_health(app)
+    _register_host_contention(app)
     _register_models(app)
     _register_admin(app, resolved_key)
     _register_chat_completions(app)
@@ -406,6 +407,20 @@ def _register_health(app: FastAPI) -> None:
             },
             status_code=status_code,
         )
+
+
+def _register_host_contention(app: FastAPI) -> None:
+    from sglang_omni.cpu_alloc.host_metrics import HostCpuContentionMonitor
+
+    monitor = HostCpuContentionMonitor()
+    app.state.host_contention_monitor = monitor
+    monitor.start()
+    app.add_event_handler("shutdown", monitor.stop)
+
+    @app.get("/host_contention")
+    async def host_contention() -> JSONResponse:
+        """Foreign CPU load on this server's allowed cpuset (see #1415)."""
+        return JSONResponse(content=monitor.snapshot())
 
 
 def _register_models(app: FastAPI) -> None:
