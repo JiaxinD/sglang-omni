@@ -506,6 +506,7 @@ class Qwen3TTSTalker(nn.Module):
         self._sub_sampled_has_top_p = False
         self._sub_sampled_max_top_k = 0
         self._sub_sampled_has_unbounded_top_k = False
+        self._decode_prep_rids: list | None = None
         self._predictor_graph_batch_sizes = self._normalize_predictor_graph_batch_sizes(
             server_args,
             max_batch_size=max_batch_size,
@@ -973,6 +974,13 @@ class Qwen3TTSTalker(nn.Module):
         if batch_size > self._sub_temperature_tensor.shape[0]:
             raise RuntimeError("Qwen3-TTS sampling buffers are too small")
 
+        # Note: (Jiaxin Deng) every staged value here is static per request, so
+        # an unchanged batch composition can reuse the previous staging wholesale.
+        rids = [sched_req.request_id for sched_req in requests]
+        if rids == self._decode_prep_rids:
+            return
+        self._decode_prep_rids = None
+
         semantic_seeds: list[int] = []
         sub_temperatures: list[float] = []
         sub_top_ps: list[float] = []
@@ -1034,6 +1042,7 @@ class Qwen3TTSTalker(nn.Module):
         self._sub_sampled_has_unbounded_top_k = has_unbounded_top_k
 
         if batch_size == 0:
+            self._decode_prep_rids = rids
             return
 
         device = self._sub_temperature_tensor.device
@@ -1058,6 +1067,7 @@ class Qwen3TTSTalker(nn.Module):
             self._sub_sample_row_indices_tensor[: self._sub_sample_count] = (
                 torch.tensor(self._sub_sample_rows, device=device, dtype=torch.long)
             )
+        self._decode_prep_rids = rids
 
     @torch.no_grad()
     def forward(
@@ -1225,6 +1235,9 @@ class Qwen3TTSTalker(nn.Module):
                 self._sub_sampled_max_top_k,
                 self._sub_sampled_has_unbounded_top_k,
             ) = saved
+            # Note: (Jiaxin Deng) capture overwrote the staged row-indices
+            # tensor; drop the reuse fingerprint so the next prepare restages.
+            self._decode_prep_rids = None
 
     def _predictor_graph_memory_pool(self):
         # Note: (Jiaxin Deng) one shared pool across keys; private per-graph

@@ -20,6 +20,7 @@ class Qwen3TTSModelRunner(ModelRunner):
     def __init__(self, tp_worker: Any, output_processor: Any):
         super().__init__(tp_worker, output_processor)
         self._has_pending_code_step = False
+        self._row_ids_cache: torch.Tensor | None = None
 
     def before_prefill(
         self,
@@ -147,15 +148,19 @@ class Qwen3TTSModelRunner(ModelRunner):
             return
         self._has_pending_code_step = False
         eos_id = int(self.model.config.codec_eos_token_id)
+        # Note: (Jiaxin Deng) one batched clone per buffer, not one per row;
+        # rows are views into the snapshot, which stays off the graph buffers.
+        batch_size = len(scheduler_output.requests)
+        codes_snap = self.model._output_codes[:batch_size].detach().clone()
+        embeds_snap = self.model._output_embeds[:batch_size].detach().clone()
         for row_idx, sched_req in enumerate(scheduler_output.requests):
             req_output = outputs[sched_req.request_id]
             if req_output.data is None or int(req_output.data) == eos_id:
                 continue
-            code_chunk = self.model._output_codes[row_idx].detach().clone()
-            feedback = self.model._output_embeds[row_idx].detach().clone()
+            code_chunk = codes_snap[row_idx]
             sched_req.data.output_codes.append(code_chunk)
             sched_req.data.latest_stream_code_chunk = code_chunk
-            sched_req.data.pending_feedback_queue.append(feedback)
+            sched_req.data.pending_feedback_queue.append(embeds_snap[row_idx])
 
     def _sample_positions(
         self, forward_batch: Any, device: torch.device
@@ -195,11 +200,7 @@ class Qwen3TTSModelRunner(ModelRunner):
             raise RuntimeError(
                 "Qwen3-TTS decode batch exceeds staged feedback embedding rows"
             )
-        row_ids = torch.arange(
-            batch_size,
-            device=input_ids.device,
-            dtype=input_ids.dtype,
-        )
+        row_ids = self._decode_row_ids(batch_size, input_ids)
         rows = []
 
         for row_idx, sched_req in enumerate(requests):
@@ -214,14 +215,26 @@ class Qwen3TTSModelRunner(ModelRunner):
                 )
                 combined = self.model.get_input_embeddings()(token_id).reshape(-1)
             rows.append(combined)
-        stacked = torch.stack(rows, dim=0).to(
-            device=decode_feedback_embedding.weight.device,
-            dtype=decode_feedback_embedding.weight.dtype,
-        )
         with torch.no_grad():
-            decode_feedback_embedding.weight[:batch_size].copy_(stacked)
+            torch.stack(rows, dim=0, out=decode_feedback_embedding.weight[:batch_size])
         # During graph decode, input_ids carries staged embedding row ids.
         input_ids[:batch_size].copy_(row_ids)
+
+    def _decode_row_ids(self, batch_size: int, input_ids: torch.Tensor) -> torch.Tensor:
+        cached = self._row_ids_cache
+        if (
+            cached is None
+            or cached.numel() < batch_size
+            or cached.dtype != input_ids.dtype
+            or cached.device != input_ids.device
+        ):
+            cached = torch.arange(
+                max(batch_size, 64),
+                device=input_ids.device,
+                dtype=input_ids.dtype,
+            )
+            self._row_ids_cache = cached
+        return cached[:batch_size]
 
     def _build_prefill_input_embeds(
         self,
