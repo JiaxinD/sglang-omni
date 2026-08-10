@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 import types
 from collections import deque
 from queue import Empty, Queue
@@ -2604,40 +2605,36 @@ def test_qwen3_tts_preprocessing_abort_race_cleans_late_prepared_state(
     scheduler = stages.create_preprocessing_executor("model")
     payload = make_payload(inputs="target")
     payload.request_id = request_id
-    loop = asyncio.new_event_loop()
-    errors: list[Exception] = []
 
-    def run_compute() -> None:
-        try:
-            scheduler._run_single(
-                IncomingMessage(
-                    request_id=request_id,
-                    type="new_request",
-                    data=payload,
-                ),
-                loop,
-            )
-        except Exception as exc:
-            errors.append(exc)
-
-    thread = threading.Thread(target=run_compute)
+    thread = threading.Thread(target=scheduler.start, daemon=True)
     try:
         thread.start()
+        scheduler.inbox.put(
+            IncomingMessage(
+                request_id=request_id,
+                type="new_request",
+                data=payload,
+            )
+        )
         assert started.wait(timeout=2.0)
 
         scheduler.abort(request_id)
         release.set()
-        thread.join(timeout=2.0)
 
-        assert not thread.is_alive()
-        assert errors == []
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with qwen3_request_builders._PREPARED_REQUESTS_LOCK:
+                if request_id not in qwen3_request_builders._PREPARED_REQUESTS:
+                    break
+            time.sleep(0.01)
+
         assert scheduler.outbox.empty()
         with qwen3_request_builders._PREPARED_REQUESTS_LOCK:
             assert request_id not in qwen3_request_builders._PREPARED_REQUESTS
     finally:
         release.set()
+        scheduler.stop()
         thread.join(timeout=2.0)
-        loop.close()
         qwen3_request_builders.cleanup_prepared_qwen3_tts_request(request_id)
 
 
