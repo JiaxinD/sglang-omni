@@ -221,7 +221,7 @@ class Qwen3TTSModelRunner(ModelRunner):
         input_ids[:batch_size].copy_(row_ids)
 
     def _decode_row_ids(self, batch_size: int, input_ids: torch.Tensor) -> torch.Tensor:
-        cached = self._row_ids_cache
+        cached = getattr(self, "_row_ids_cache", None)
         if (
             cached is None
             or cached.numel() < batch_size
