@@ -128,3 +128,30 @@ def test_codec_suppress_tokens_matches_reference(share_rows):
         ModelRunner._apply_codec_suppress_tokens(runner, logits_output, requests)
         expected = _suppress_reference(logits_orig, requests)
         assert torch.equal(logits_output.next_token_logits, expected)
+
+
+def test_repetition_penalty_resets_after_empty_retract():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vocab = 64
+    penalty = 1.5
+    requests = _make_requests([[3, 9]], penalty)
+    runner = types.SimpleNamespace()
+
+    logits = torch.zeros(1, vocab, device=device) + 1.0
+    ModelRunner._apply_repetition_penalty(
+        runner, types.SimpleNamespace(next_token_logits=logits), requests
+    )
+
+    # Retract replaces output_ids with an empty list, then the restart
+    # generates a different same-length prefix.
+    requests[0].data.req.output_ids = []
+    ModelRunner._apply_repetition_penalty(
+        runner, types.SimpleNamespace(next_token_logits=logits.clone()), requests
+    )
+    requests[0].data.req.output_ids = [11, 12]
+    logits_orig = torch.ones(1, vocab, device=device)
+    logits_output = types.SimpleNamespace(next_token_logits=logits_orig.clone())
+    ModelRunner._apply_repetition_penalty(runner, logits_output, requests)
+
+    expected = _scalar_reference(logits_orig, requests, penalty)
+    assert torch.equal(logits_output.next_token_logits, expected)

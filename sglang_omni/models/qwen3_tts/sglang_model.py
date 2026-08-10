@@ -976,13 +976,23 @@ class Qwen3TTSTalker(nn.Module):
 
         # Note: (Jiaxin Deng) every staged value here is static per request, so
         # an unchanged batch composition can reuse the previous staging wholesale.
-        # Requests without a request_id (test doubles) always restage.
-        rids: list | None = [
-            getattr(sched_req, "request_id", None) for sched_req in requests
-        ]
-        if None in rids:
-            rids = None
-        elif rids == self._decode_prep_rids:
+        # Request ids alone are reusable across request lifetimes, so identity is
+        # (request_id, per-data epoch); test doubles without request_id restage.
+        rids: list | None = []
+        for sched_req in requests:
+            rid = getattr(sched_req, "request_id", None)
+            if rid is None:
+                rids = None
+                break
+            data = sched_req.data
+            epoch = getattr(data, "_qwen3_tts_prep_epoch", None)
+            if epoch is None:
+                epoch = self._decode_prep_epoch = (
+                    getattr(self, "_decode_prep_epoch", 0) + 1
+                )
+                data._qwen3_tts_prep_epoch = epoch
+            rids.append((rid, epoch))
+        if rids is not None and rids == getattr(self, "_decode_prep_rids", None):
             return
         self._decode_prep_rids = None
 

@@ -148,8 +148,8 @@ class Qwen3TTSModelRunner(ModelRunner):
             return
         self._has_pending_code_step = False
         eos_id = int(self.model.config.codec_eos_token_id)
-        # Note: (Jiaxin Deng) one batched clone per buffer, not one per row;
-        # rows are views into the snapshot, which stays off the graph buffers.
+        # Note: (Jiaxin Deng) per-row clones were a c32 decode-loop hot spot;
+        # rows must stay views of a snapshot, never of the reused graph buffers.
         batch_size = len(scheduler_output.requests)
         codes_snap = self.model._output_codes[:batch_size].detach().clone()
         embeds_snap = self.model._output_embeds[:batch_size].detach().clone()
