@@ -3675,3 +3675,61 @@ def test_qwen3_tts_prefill_publishes_sglang_forward_context() -> None:
 
     assert seen == [attn_backend]
     assert result.logits_output == "logits"
+
+
+def _make_prep_talker(monkeypatch):
+    install_fake_sglang(monkeypatch)
+    from sglang_omni.models.qwen3_tts.sglang_model import Qwen3TTSTalker
+
+    talker = Qwen3TTSTalker.__new__(Qwen3TTSTalker)
+    talker.config = SimpleNamespace(
+        code_predictor_config=SimpleNamespace(vocab_size=2048)
+    )
+    talker._sub_temperature_tensor = torch.empty(2, dtype=torch.float32)
+    talker._sub_top_p_tensor = torch.empty(2, dtype=torch.float32)
+    talker._sub_top_k_tensor = torch.empty(2, dtype=torch.long)
+    talker._semantic_sampling_seed_tensor = torch.empty(2, dtype=torch.long)
+    talker._sub_sampling_seed_tensor = torch.empty(2, dtype=torch.long)
+    talker._sub_sample_row_indices_tensor = torch.empty(2, dtype=torch.long)
+    return Qwen3TTSTalker, talker
+
+
+def _prep_request(request_id, temperature):
+    return SimpleNamespace(
+        request_id=request_id,
+        data=Qwen3TTSSGLangRequestData(
+            semantic_sampling_seed=5,
+            subtalker_dosample=True,
+            subtalker_temperature=temperature,
+            subtalker_top_p=0.9,
+            subtalker_top_k=40,
+            subtalker_sampling_seed=7,
+        ),
+    )
+
+
+def test_qwen3_tts_prepare_decode_buffers_reuses_unchanged_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    talker_cls, talker = _make_prep_talker(monkeypatch)
+    requests = [_prep_request("req-a", 0.8)]
+    talker_cls.prepare_decode_buffers(talker, requests)
+    assert talker._sub_temperature_tensor[:1].tolist() == pytest.approx([0.8])
+
+    # Unchanged batch: staging is skipped, so a manual poke survives.
+    talker._sub_temperature_tensor[0] = 0.123
+    talker_cls.prepare_decode_buffers(talker, requests)
+    assert talker._sub_temperature_tensor[:1].tolist() == pytest.approx([0.123])
+
+
+def test_qwen3_tts_prepare_decode_buffers_restages_on_request_id_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed request's id may be legally reused by a new request."""
+    talker_cls, talker = _make_prep_talker(monkeypatch)
+    talker_cls.prepare_decode_buffers(talker, [_prep_request("req-a", 0.8)])
+    assert talker._sub_temperature_tensor[:1].tolist() == pytest.approx([0.8])
+
+    # Same request id, brand-new request data: must restage, not reuse.
+    talker_cls.prepare_decode_buffers(talker, [_prep_request("req-a", 0.4)])
+    assert talker._sub_temperature_tensor[:1].tolist() == pytest.approx([0.4])

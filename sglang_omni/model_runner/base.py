@@ -930,6 +930,12 @@ class ModelRunner:
                 continue
             output_ids = req.output_ids
             if not output_ids:
+                # Note: (Jiaxin Deng) a retract can replace output_ids with an
+                # empty list; drop the incremental state so a restart does not
+                # inherit stale tokens.
+                if getattr(data, "_rep_seen_len", 0):
+                    data._rep_seen_tokens = set()
+                    data._rep_seen_len = 0
                 continue
             unique = ModelRunner._rep_penalty_unique_tokens(data, output_ids, vocab)
             if not unique:
@@ -952,9 +958,9 @@ class ModelRunner:
             return
         vocab = logits.shape[1]
         device = logits.device
-        # Note: (Jiaxin Deng) suppress lists are static per request and shared
-        # across a deployment in practice; cache the filtered device tensor per
-        # (list identity, vocab, device) so the decode loop stops rebuilding it.
+        # Note: (Jiaxin Deng) suppress lists are static per request; caching the
+        # filtered device tensor by list identity makes every decode step after
+        # a request's first a cache hit instead of a rebuild.
         cache = getattr(self, "_suppress_tensor_cache", None)
         if cache is None:
             cache = {}

@@ -74,6 +74,10 @@ class ThreadedSimpleScheduler:
     def abort(self, request_id: str) -> None:
         with self._lock:
             self._aborted.add(request_id)
+            if len(self._aborted) > 10000:
+                excess = len(self._aborted) - 5000
+                for stale_request_id in list(self._aborted)[:excess]:
+                    self._aborted.discard(stale_request_id)
             future = self._pending.pop(request_id, None)
         if future is not None:
             future.cancel()
@@ -106,9 +110,12 @@ class ThreadedSimpleScheduler:
         with self._lock:
             self._pending.pop(request_id, None)
             aborted = request_id in self._aborted
+            if aborted:
+                self._aborted.discard(request_id)
         if aborted or future.cancelled():
-            # A compute that finished after the abort may have registered
-            # side effects the abort-time callback ran too early to see.
+            # Note: (Jiaxin Deng) a compute that finished after the abort may
+            # have registered side effects the abort-time callback ran too
+            # early to see.
             self._run_abort_callback(request_id)
             return
 
