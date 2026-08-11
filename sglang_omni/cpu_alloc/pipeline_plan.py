@@ -33,7 +33,7 @@ def _logical_to_physical_gpus(logical_ids: set[int]) -> dict[int, int] | None:
         return {gpu: gpu for gpu in logical_ids}
     entries = [part.strip() for part in visible.split(",") if part.strip()]
     if not all(entry.isdigit() for entry in entries):
-        # UUID-based masks cannot be mapped to nvidia-smi indices here.
+        # Note: (Jiaxin Deng) UUID masks cannot be mapped to nvidia-smi indices.
         return None
     physical = [int(entry) for entry in entries]
     mapping: dict[int, int] = {}

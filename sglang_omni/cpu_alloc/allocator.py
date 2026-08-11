@@ -183,7 +183,6 @@ def allocate(
                 f"shared pool (budget {budget} cores); exclusivity lost"
             )
 
-    # Grant cores deterministically (demand order is already name-sorted).
     assignments: dict[str, ProcessCpuAssignment] = {}
     for demand in exclusive_demands:
         node = anchored[demand.process_name]

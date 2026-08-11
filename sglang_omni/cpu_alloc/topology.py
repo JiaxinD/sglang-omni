@@ -56,9 +56,10 @@ def format_cpulist(cpus: Iterable[int]) -> str:
 
 @dataclass(frozen=True)
 class PhysicalCore:
-    """One physical core: the SMT siblings visible inside the universe."""
+    """One physical core, keyed by (physical_package_id, core_id); cpu_ids
+    are its SMT siblings visible inside the universe."""
 
-    key: tuple[int, int]  # (physical_package_id, core_id)
+    key: tuple[int, int]
     numa_node: int
     cpu_ids: tuple[int, ...]
 
@@ -172,7 +173,7 @@ def _nvidia_smi_pci_query() -> dict[int, str]:
 
 
 def _sysfs_pci_address(bus_id: str) -> str:
-    # nvidia-smi reports "00000000:0F:00.0"; sysfs uses "0000:0f:00.0".
+    # Note: (Jiaxin Deng) nvidia-smi reports "00000000:0F:00.0"; sysfs wants "0000:0f:00.0".
     text = bus_id.strip().lower()
     if len(text.split(":")[0]) == 8:
         text = text[4:]

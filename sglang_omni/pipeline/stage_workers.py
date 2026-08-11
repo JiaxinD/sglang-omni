@@ -126,7 +126,7 @@ class StageWorkerProcessSpec:
 
     process_name: str
     stage_specs: list[StageLaunchConfig]
-    # CPU affinity from the allocation plan; None leaves inherited affinity.
+    # Note: (Jiaxin Deng) None leaves the inherited affinity untouched.
     cpu_ids: tuple[int, ...] | None = None
 
 
@@ -225,8 +225,8 @@ def _patched_spawn_env(spec: StageWorkerProcessSpec):
         **worker_process_env,
         "SGLANG_OMNI_PLATFORM_SPEC": get_platform_spec(current_platform),
     }
-    # Model configs size OMP pools from the whole outer cpuset; a narrower CPU
-    # plan must cap that default or the pool oversubscribes the pinned cores.
+    # Note: (Jiaxin Deng) model configs size OMP pools from the whole outer
+    # cpuset; a narrower plan must cap the default or the pool oversubscribes.
     if spec.cpu_ids is not None and "OMP_NUM_THREADS" in updates:
         try:
             declared = int(updates["OMP_NUM_THREADS"])
@@ -431,7 +431,8 @@ def stage_process_main(
     log = logging.getLogger(f"stage_workers.{spec.process_name}")
 
     try:
-        # Pin before any allocation so NUMA first-touch lands on the right node.
+        # Note: (Jiaxin Deng) pin before any allocation so NUMA first-touch
+        # lands on the right node.
         _apply_cpu_affinity(spec, log)
         for stage_spec in spec.stage_specs:
             _prepare_accelerator_environment(stage_spec, log)

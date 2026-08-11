@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def _read_proc_cpu_seconds(pid: int) -> float:
     with open(f"/proc/{pid}/stat", "rb") as f:
         data = f.read().decode("ascii", errors="replace")
-    # Fields after the comm field, which may itself contain spaces/parens.
+    # Note: (Jiaxin Deng) split after comm, which may itself contain spaces/parens.
     fields = data.rsplit(")", 1)[1].split()
     utime_ticks = int(fields[11])
     stime_ticks = int(fields[12])
@@ -117,7 +117,7 @@ class CpuLeaseSupervisor:
         if self._thread is not None:
             self._thread.join(timeout=self._interval_s + 5.0)
             self._thread = None
-        # Fail closed: leave no widened shared mask behind.
+        # Note: (Jiaxin Deng) fail closed: leave no widened shared mask behind.
         if any(state.lent for state in self._exclusive.values()):
             for state in self._exclusive.values():
                 state.lent = False

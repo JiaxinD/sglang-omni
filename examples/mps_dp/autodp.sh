@@ -104,8 +104,8 @@ USED_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "
 # ---- derive CORE_BLOCKS lazily (server share = 3/4 of the cpuset) ------------
 core_blocks_for() {
   local planned
-  # NUMA/SMT-aware planner; whole physical cores per replica, anchored to the
-  # GPU's node. Falls back to the plain 3/4 split when it cannot run.
+  # Note (Jiaxin Deng): NUMA/SMT-aware planner, whole physical cores per
+  # replica on the GPU's node; falls back to the plain 3/4 split on failure.
   planned=$(PYTHONPATH="$HERE/../..${PYTHONPATH:+:$PYTHONPATH}" python3 -m sglang_omni.cpu_alloc plan --replicas "$1" --gpu-id "$GPU_ID" --format blocks 2>/dev/null) || planned=""
   if [ -n "$planned" ]; then
     echo "$planned"
