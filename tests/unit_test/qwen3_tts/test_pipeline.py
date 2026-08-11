@@ -3771,33 +3771,33 @@ def test_qwen3_tts_stream_prune_matches_full_history_windows() -> None:
     assert state.pruned_frames > 0, "long stream should have pruned dead chunks"
     assert len(state.code_chunks) < len(full_history)
 
-
-def test_qwen3_tts_decode_rejects_out_of_range_codes_before_lookup() -> None:
-    """An out-of-range codec id fails its batch instead of asserting in the decoder."""
+def test_qwen3_tts_decode_isolates_rows_with_out_of_range_codes() -> None:
+    """A bad row fails alone and the decoder only ever sees in-range ids."""
     scheduler = Qwen3TTSStreamingVocoderScheduler(
         _FakeQwen3TTSTokenizer(),
         device="cpu",
     )
+    seen: list[torch.Tensor] = []
 
-    def _boom(*args, **kwargs):
-        raise AssertionError("decoder must not run on out-of-range input")
+    def _decode(x):
+        seen.append(x.clone())
+        return torch.zeros(x.shape[0], 1, 16, dtype=torch.float32)
 
-    scheduler._decoder = SimpleNamespace(chunked_decode=_boom)
-    plan = _Qwen3TTSDecodePlan(
-        decoder_input=torch.tensor([[[5, 2150]]], dtype=torch.long),
-        absolute_emitted_frames=0,
-        generated_frames=1,
-        window_start=0,
-    )
+    scheduler._decoder = SimpleNamespace(chunked_decode=_decode)
 
-    with pytest.raises(ValueError, match="outside"):
-        scheduler._run_decode_plans([plan], stream=None)
+    def _plan(code):
+        return _Qwen3TTSDecodePlan(
+            decoder_input=torch.tensor([[[code]]], dtype=torch.long),
+            absolute_emitted_frames=0,
+            generated_frames=1,
+            window_start=0,
+        )
 
-    good = _Qwen3TTSDecodePlan(
-        decoder_input=torch.tensor([[[5, 7]]], dtype=torch.long),
-        absolute_emitted_frames=0,
-        generated_frames=1,
-        window_start=0,
-    )
-    with pytest.raises(AssertionError):
-        scheduler._run_decode_plans([good], stream=None)
+    with pytest.raises(ValueError) as excinfo:
+        scheduler._run_decode_plans([_plan(7), _plan(2150)], stream=None)
+    assert excinfo.value.indices == (1,)
+    assert seen == [], "decoder must not run while a row is out of range"
+
+    scheduler._run_decode_plans([_plan(7)], stream=None)
+    assert len(seen) == 1
+    assert int(seen[0].max()) < 2048

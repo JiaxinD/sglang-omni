@@ -126,6 +126,25 @@ class Qwen3TTSModelRunner(ModelRunner):
             rids.append((rid, epoch))
         return rids
 
+    @staticmethod
+    def _every_row_grew_by_one(requests: list) -> bool:
+        """True when every penalized row's history is exactly one token longer.
+
+        Rows at penalty 1.0 are exempt: their mask bits never reach the logits.
+        """
+        for sched_req in requests:
+            data = sched_req.data
+            req = data.req
+            if float(req.sampling_params.repetition_penalty) == 1.0:
+                continue
+            seen_len = getattr(data, "_rep_seen_len", None)
+            output_ids = req.output_ids
+            if seen_len is None or not output_ids:
+                return False
+            if len(output_ids) != seen_len + 1:
+                return False
+        return True
+
     def _ensure_masks(self, batch_size: int, vocab: int, device: Any) -> None:
         masks = getattr(self, "_shape_masks", None)
         if (
@@ -199,10 +218,13 @@ class Qwen3TTSModelRunner(ModelRunner):
             and fingerprint == getattr(self, "_mask_prep_rids", None)
             and last_sampled is not None
             and last_sampled.shape[0] >= batch_size
+            and self._every_row_grew_by_one(requests)
         ):
-            # Note: (Jiaxin Deng) unchanged batch: the only new information
-            # since the last step is each row's sampled token; one scatter
-            # replaces the full host-side index rebuild.
+            # Note: (Jiaxin Deng) unchanged batch, every history exactly one token
+            # longer: the only new information is each row's sampled token, so one
+            # scatter replaces the full host-side index rebuild. A history that did
+            # not grow by one (retract, restart) can need bits cleared, which the
+            # scatter cannot do, so those steps rebuild.
             if self._mask_rep_active:
                 rows = torch.arange(batch_size, device=logits.device)
                 rep_mask[rows, last_sampled[:batch_size].clamp(0, vocab - 1)] = True

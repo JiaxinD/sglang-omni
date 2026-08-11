@@ -111,3 +111,37 @@ def test_mask_shaping_batch_shrink_rebuilds():
     assert torch.equal(got, _reference(logits2, survivors))
     # row 0 now belongs to request b; request a's tokens must not be penalized
     assert got[0, 1] == logits2[0, 1]
+
+
+def test_mask_shaping_clears_bits_after_history_shrink():
+    """A retract shrinks output_ids; stale mask bits must not survive it."""
+    torch.manual_seed(9)
+    vocab = 64
+    runner = _runner()
+    reqs = [_request("a", 1, 1.5, [3, 9], [])]
+
+    logits = torch.randn(1, vocab)
+    _apply(runner, logits.clone(), reqs)
+
+    # retract/restart: history shrinks, and the next step must not penalize 9
+    reqs[0].data.req.output_ids = [3]
+    runner._mask_last_sampled = torch.tensor([3])
+    logits2 = torch.randn(1, vocab)
+    got = _apply(runner, logits2.clone(), reqs)
+    assert torch.equal(got, _reference(logits2, reqs))
+    assert got[0, 9] == logits2[0, 9]
+
+
+def test_mask_shaping_empty_history_after_retract():
+    torch.manual_seed(11)
+    vocab = 32
+    runner = _runner()
+    reqs = [_request("a", 1, 1.4, [5], [])]
+    logits = torch.randn(1, vocab)
+    _apply(runner, logits.clone(), reqs)
+
+    reqs[0].data.req.output_ids = []
+    runner._mask_last_sampled = torch.tensor([5])
+    logits2 = torch.randn(1, vocab)
+    got = _apply(runner, logits2.clone(), reqs)
+    assert torch.equal(got, logits2), "no history means no penalty anywhere"
