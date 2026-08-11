@@ -21,6 +21,10 @@ class Qwen3TTSModelRunner(ModelRunner):
         super().__init__(tp_worker, output_processor)
         self._has_pending_code_step = False
         self._row_ids_cache: torch.Tensor | None = None
+        self._mask_last_sampled: torch.Tensor | None = None
+        self._mask_prep_rids: list | None = None
+        self._mask_rep_active = False
+        self._mask_sup_active = False
 
     def before_prefill(
         self,
@@ -95,12 +99,137 @@ class Qwen3TTSModelRunner(ModelRunner):
         requests: list,
     ) -> Any:
         self._install_semantic_sampling_seeds(forward_batch, requests)
-        return super()._sample_next_token_ids(
+        next_token_ids = super()._sample_next_token_ids(
             logits_output,
             forward_batch,
             schedule_batch,
             requests,
         )
+        if isinstance(next_token_ids, torch.Tensor):
+            self._mask_last_sampled = next_token_ids
+        else:
+            self._mask_last_sampled = None
+        return next_token_ids
+
+    # ------------------------------------------------------------------
+    # Mask-based logit shaping (device-resident, replaces the per-step
+    # host index building in the base helpers for this model)
+    # ------------------------------------------------------------------
+
+    def _mask_fingerprint(self, requests: list) -> list | None:
+        rids = []
+        for sched_req in requests:
+            rid = getattr(sched_req, "request_id", None)
+            epoch = getattr(sched_req.data, "_qwen3_tts_prep_epoch", None)
+            if rid is None or epoch is None:
+                return None
+            rids.append((rid, epoch))
+        return rids
+
+    def _ensure_masks(self, batch_size: int, vocab: int, device: Any) -> None:
+        masks = getattr(self, "_shape_masks", None)
+        if (
+            masks is not None
+            and masks[0].shape[0] >= batch_size
+            and masks[0].shape[1] == vocab
+            and masks[0].device == device
+        ):
+            return
+        rows = max(batch_size, 64)
+        self._shape_masks = (
+            torch.zeros(rows, vocab, dtype=torch.bool, device=device),
+            torch.zeros(rows, vocab, dtype=torch.bool, device=device),
+            torch.ones(rows, 1, dtype=torch.float32, device=device),
+        )
+        self._mask_prep_rids = None
+
+    def _rebuild_masks(self, requests: list, vocab: int, device: Any) -> None:
+        rep_mask, sup_mask, pen_col = self._shape_masks
+        batch_size = len(requests)
+        rep_mask[:batch_size] = False
+        sup_mask[:batch_size] = False
+        rep_rows: list[int] = []
+        rep_toks: list[int] = []
+        penalties = [1.0] * batch_size
+        sup_rows: list[int] = []
+        sup_toks: list[int] = []
+        for row_idx, sched_req in enumerate(requests):
+            data = sched_req.data
+            req = data.req
+            penalty = float(req.sampling_params.repetition_penalty)
+            penalties[row_idx] = penalty
+            output_ids = req.output_ids
+            if penalty != 1.0 and output_ids:
+                seen = ModelRunner._rep_penalty_unique_tokens(data, output_ids, vocab)
+                rep_rows.extend([row_idx] * len(seen))
+                rep_toks.extend(seen)
+            suppress_tokens = data.suppress_tokens
+            if not suppress_tokens:
+                suppress_tokens = getattr(req, "_codec_suppress_tokens", None)
+            if suppress_tokens:
+                for token_id in suppress_tokens:
+                    tok = int(token_id)
+                    if 0 <= tok < vocab:
+                        sup_rows.append(row_idx)
+                        sup_toks.append(tok)
+        if rep_rows:
+            pairs = torch.tensor(rep_rows + rep_toks, dtype=torch.long, device=device)
+            rep_mask[pairs[: len(rep_rows)], pairs[len(rep_rows) :]] = True
+        if sup_rows:
+            pairs = torch.tensor(sup_rows + sup_toks, dtype=torch.long, device=device)
+            sup_mask[pairs[: len(sup_rows)], pairs[len(sup_rows) :]] = True
+        pen_col[:batch_size, 0] = torch.tensor(
+            penalties, dtype=torch.float32, device=device
+        )
+        self._mask_rep_active = bool(rep_rows) or any(p != 1.0 for p in penalties)
+        self._mask_sup_active = bool(sup_rows)
+
+    def _apply_repetition_penalty(self, logits_output: Any, requests: list) -> None:
+        logits = logits_output.next_token_logits
+        if logits is None or logits.ndim != 2:
+            return
+        batch_size = len(requests)
+        vocab = logits.shape[1]
+        self._ensure_masks(batch_size, vocab, logits.device)
+        rep_mask, sup_mask, pen_col = self._shape_masks
+        fingerprint = self._mask_fingerprint(requests)
+        last_sampled = getattr(self, "_mask_last_sampled", None)
+        if (
+            fingerprint is not None
+            and fingerprint == getattr(self, "_mask_prep_rids", None)
+            and last_sampled is not None
+            and last_sampled.shape[0] >= batch_size
+        ):
+            # Note: (Jiaxin Deng) unchanged batch: the only new information
+            # since the last step is each row's sampled token; one scatter
+            # replaces the full host-side index rebuild.
+            if self._mask_rep_active:
+                rows = torch.arange(batch_size, device=logits.device)
+                rep_mask[rows, last_sampled[:batch_size].clamp(0, vocab - 1)] = True
+                for sched_req in requests:
+                    data = sched_req.data
+                    output_ids = sched_req.data.req.output_ids
+                    if output_ids:
+                        ModelRunner._rep_penalty_unique_tokens(data, output_ids, vocab)
+        else:
+            self._rebuild_masks(requests, vocab, logits.device)
+        self._mask_prep_rids = fingerprint
+        if self._mask_rep_active:
+            pen = pen_col[:batch_size]
+            scores = logits.to(torch.float32)
+            penalized = torch.where(scores > 0, scores / pen, scores * pen)
+            logits.copy_(
+                torch.where(rep_mask[:batch_size], penalized, scores).to(logits.dtype)
+            )
+
+    def _apply_codec_suppress_tokens(self, logits_output: Any, requests: list) -> None:
+        logits = logits_output.next_token_logits
+        if logits is None or logits.ndim != 2:
+            return
+        masks = getattr(self, "_shape_masks", None)
+        if masks is None or not getattr(self, "_mask_sup_active", False):
+            return
+        logits.masked_fill_(masks[1][: len(requests)], float("-inf"))
 
     def _install_semantic_sampling_seeds(
         self,
