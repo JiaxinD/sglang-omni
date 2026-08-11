@@ -496,6 +496,21 @@ class Qwen3TTSStreamingVocoderScheduler(
     ) -> torch.Tensor:
         return self._run_decode_plans([plan], stream=stream)[0]
 
+    def _reject_out_of_range_codes(self, decoder_input: torch.Tensor) -> None:
+        # Note: (Jiaxin Deng) the codec embedding lookup turns an out-of-range id
+        # into a device-side assert, which poisons the CUDA context and kills
+        # every in-flight stream in this process. Screen the batch first so a bad
+        # id fails its own batch instead. validate_chunk cannot cover this: it
+        # skips device tensors to avoid a per-chunk sync.
+        bad = (decoder_input < 0) | (decoder_input >= _QWEN3_TTS_CODEBOOK_SIZE)
+        if not bool(bad.any()):
+            return
+        values = decoder_input[bad][:8].tolist()
+        raise ValueError(
+            "Qwen3-TTS decoder input contains codec ids outside "
+            f"[0, {_QWEN3_TTS_CODEBOOK_SIZE}): {values}"
+        )
+
     def _run_decode_plans(
         self,
         plans: list[_Qwen3TTSDecodePlan],
@@ -503,6 +518,7 @@ class Qwen3TTSStreamingVocoderScheduler(
         stream: torch.cuda.Stream | None,
     ) -> list[torch.Tensor]:
         decoder_input = torch.cat([plan.decoder_input for plan in plans], dim=0)
+        self._reject_out_of_range_codes(decoder_input)
         with torch.inference_mode():
             if stream is None:
                 waveform = self._decoder.chunked_decode(decoder_input)

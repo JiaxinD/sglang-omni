@@ -31,6 +31,7 @@ from sglang_omni.models.qwen3_tts.request_builders import (
 )
 from sglang_omni.models.qwen3_tts.streaming_vocoder import (
     Qwen3TTSStreamingVocoderScheduler,
+    _Qwen3TTSDecodePlan,
     _Qwen3TTSInitialDecodeGraphs,
 )
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
@@ -3769,3 +3770,34 @@ def test_qwen3_tts_stream_prune_matches_full_history_windows() -> None:
 
     assert state.pruned_frames > 0, "long stream should have pruned dead chunks"
     assert len(state.code_chunks) < len(full_history)
+
+
+def test_qwen3_tts_decode_rejects_out_of_range_codes_before_lookup() -> None:
+    """An out-of-range codec id fails its batch instead of asserting in the decoder."""
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("decoder must not run on out-of-range input")
+
+    scheduler._decoder = SimpleNamespace(chunked_decode=_boom)
+    plan = _Qwen3TTSDecodePlan(
+        decoder_input=torch.tensor([[[5, 2150]]], dtype=torch.long),
+        absolute_emitted_frames=0,
+        generated_frames=1,
+        window_start=0,
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        scheduler._run_decode_plans([plan], stream=None)
+
+    good = _Qwen3TTSDecodePlan(
+        decoder_input=torch.tensor([[[5, 7]]], dtype=torch.long),
+        absolute_emitted_frames=0,
+        generated_frames=1,
+        window_start=0,
+    )
+    with pytest.raises(AssertionError):
+        scheduler._run_decode_plans([good], stream=None)
