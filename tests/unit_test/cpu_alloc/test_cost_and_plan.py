@@ -186,3 +186,38 @@ class TestBuildPipelineCpuPlan:
         )
         assert plan.assignments["thinker_tp0"].numa_node == 0
         assert plan.assignments["thinker_tp1"].numa_node == 1
+
+    @pytest.mark.parametrize("as_property", [True, False])
+    def test_replicated_process_stays_in_shared_pool(
+        self, dual_node_sysfs, as_property
+    ):
+        # Merge-order guard for whole-process replicas: an exclusive grant
+        # computed once would be inherited by every replica, so replicated
+        # groups keep today's shared-pool behavior until per-replica
+        # planning lands.
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(
+            ["tts_engine", "vocoder"],
+            {"tts_engine": {"host_class": "serial-loop"}},
+        )
+        placement_plan, process_plan = self._plans()
+
+        names = ("pipeline",)
+        processes = SimpleNamespace(
+            replicated_process_names=names if as_property else (lambda: names)
+        )
+        replicated_plan = SimpleNamespace(
+            groups=process_plan.groups,
+            stage_to_process=process_plan.stage_to_process,
+            tp_stage_to_processes={},
+            processes=processes,
+        )
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=replicated_plan,
+            topology=topology,
+            gpu_numa={0: 1},
+        )
+        assert not plan.assignments["pipeline"].exclusive
+        assert plan.assignments["pipeline"].cpu_ids == plan.shared_pools[1]

@@ -44,6 +44,26 @@ def _logical_to_physical_gpus(logical_ids: set[int]) -> dict[int, int] | None:
     return mapping
 
 
+def _replicated_process_names(process_plan) -> set[str]:
+    """Names of process groups that expand into multiple replicas.
+
+    Duck-typed against the process-replica work (whole-process
+    ``num_replicas``): an exclusive grant computed once per logical process
+    would be inherited by every replica and stop being exclusive, so those
+    groups stay in the shared pool until per-replica planning lands.
+    """
+    processes = getattr(process_plan, "processes", None)
+    names = getattr(processes, "replicated_process_names", None)
+    if callable(names):
+        try:
+            names = names()
+        except TypeError:
+            return set()
+    if names is None:
+        return set()
+    return {str(name) for name in names}
+
+
 def _iter_process_entries(
     process_plan: ProcessTopologyPlan,
     placement_plan: StagePlacementPlan,
@@ -148,6 +168,7 @@ def build_pipeline_cpu_plan(
             len(topology.universe),
         )
 
+    replicated = _replicated_process_names(process_plan)
     demands = []
     entries = sorted(
         _iter_process_entries(process_plan, placement_plan), key=lambda e: e[0]
@@ -163,6 +184,13 @@ def build_pipeline_cpu_plan(
             for s in stage_names
             if s in costs and costs[s].host_class == "parallel-pool"
         )
+        if process_name in replicated and (serial or pool):
+            logger.warning(
+                "cpu_alloc: process %s is replicated; per-replica planning is "
+                "not supported yet, keeping it in the shared pool",
+                process_name,
+            )
+            serial = pool = 0
         demands.append(
             ProcessCpuDemand(
                 process_name=process_name,
