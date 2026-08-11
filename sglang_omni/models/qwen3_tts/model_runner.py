@@ -286,6 +286,10 @@ class Qwen3TTSModelRunner(ModelRunner):
             hidden,
             semantic_positions=semantic_positions,
         )
+        # Note: (Jiaxin Deng) stage the ids into pinned host memory now so the
+        # output processor's .tolist() waits on an event instead of issuing a
+        # blocking pageable copy inside the decode loop.
+        self._stage_token_ids(result, result.next_token_ids)
         self._has_pending_code_step = True
 
     def post_process_outputs(
