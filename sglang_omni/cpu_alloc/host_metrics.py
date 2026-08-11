@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Continuous host CPU contention monitor for serving.
 
-Ports the CI cpuset-contention sampling idea (#1415) into a long-running
+Ports the CI cpuset-contention sampling idea into a long-running
 serving observation: how much foreign load runs on the CPUs this server is
 allowed to use. "Foreign" is total busy time on the allowed cpuset minus the
 busy time of this process tree, so a p99 wobble can be attributed to (or

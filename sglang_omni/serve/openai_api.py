@@ -420,7 +420,7 @@ def _register_host_contention(app: FastAPI) -> None:
 
     @app.get("/host_contention")
     async def host_contention() -> JSONResponse:
-        """Foreign CPU load on this server's allowed cpuset (see #1415)."""
+        """Foreign CPU load on this server's allowed cpuset."""
         return JSONResponse(content=monitor.snapshot())
 
 

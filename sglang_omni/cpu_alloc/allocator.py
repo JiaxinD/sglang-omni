@@ -122,7 +122,6 @@ def allocate(
         d.process_name: _anchor_node(d, node_states, events) for d in exclusive_demands
     }
 
-    # Per node, fit demands under (free - reserved_shared) with the ladder.
     serial_grant: dict[str, int] = {
         d.process_name: d.serial_cores for d in exclusive_demands
     }
@@ -140,7 +139,6 @@ def allocate(
                 serial_grant[d.process_name] + pool_grant[d.process_name] for d in local
             )
 
-        # Step 1: shrink pool widths round-robin down to 1.
         while total() > budget and any(pool_grant[d.process_name] > 1 for d in local):
             widest = max(
                 (d for d in local if pool_grant[d.process_name] > 1),
@@ -151,7 +149,6 @@ def allocate(
                 f"node {node}: shrank pool width of {widest.process_name} to "
                 f"{pool_grant[widest.process_name]} (budget {budget} cores)"
             )
-        # Step 2: move pool processes to shared.
         while total() > budget and any(pool_grant[d.process_name] for d in local):
             victim = max(
                 (d for d in local if pool_grant[d.process_name]),
@@ -162,7 +159,6 @@ def allocate(
                 f"node {node}: pool demand of {victim.process_name} moved to the "
                 f"shared pool (budget {budget} cores)"
             )
-        # Step 3: move serial processes to shared.
         while total() > budget and any(serial_grant[d.process_name] for d in local):
             victim = max(
                 (d for d in local if serial_grant[d.process_name]),
