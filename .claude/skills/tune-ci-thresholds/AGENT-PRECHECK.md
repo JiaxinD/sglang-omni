@@ -35,6 +35,10 @@ writing reports.
   `TUNE_GPU_INCLUDE` is set. Lane `0,1` deliberately excludes cores
   `0,1,64,65`: those are the system cores where host daemons (categraf,
   dockerd) are confined; including them measures daemon noise, not the model.
+- Calibrations that write thresholds must anchor on the `0,1` lane: its
+  28-core bundle is the conservative baseline for every lane. A threshold
+  calibrated on a 32-core lane can be too aggressive when a CI job lands on
+  `0,1`; use the 32-core lanes for measurement-only runs.
 - Inside a two-GPU container the picked ids are always `0,1`, so the host
   table cannot resolve the physical lane; export `OMNI_CI_CPUSET` with the
   borrowed lane's cores explicitly.
