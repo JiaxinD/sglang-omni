@@ -3733,3 +3733,39 @@ def test_qwen3_tts_prepare_decode_buffers_restages_on_request_id_reuse(
     # Same request id, brand-new request data: must restage, not reuse.
     talker_cls.prepare_decode_buffers(talker, [_prep_request("req-a", 0.4)])
     assert talker._sub_temperature_tensor[:1].tolist() == pytest.approx([0.4])
+
+
+def test_qwen3_tts_stream_prune_matches_full_history_windows() -> None:
+    """Pruned decode windows must be byte-identical to full-history slicing."""
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        stream_left_context_frames=6,
+        initial_chunk_frames=4,
+        stream_stride=4,
+        stream_followup_stride=3,
+    )
+    state = scheduler.create_stream_state("request")
+    full_history: list[torch.Tensor] = []
+    frame = 0
+    for step in range(30):
+        chunk = torch.arange(frame, frame + 2, dtype=torch.long).reshape(2, 1)
+        frame += 2
+        full_history.append(chunk.clone())
+        scheduler.ingest("request", state, chunk)
+        plan = scheduler._build_decode_plan(state, is_final=False)
+        if plan is None:
+            continue
+        codes_full = torch.cat(full_history, dim=0)
+        window_end = state.ref_frames + plan.generated_frames
+        expected = (
+            codes_full[plan.window_start : window_end].transpose(0, 1).unsqueeze(0)
+        )
+        assert torch.equal(plan.decoder_input, expected), step
+        # commit bookkeeping only (no real decode on the fake tokenizer path)
+        state.emitted_generated_frames = plan.generated_frames
+        state.decoded_chunks += 1
+        state.next_decode_generated_frames = plan.generated_frames + 3
+
+    assert state.pruned_frames > 0, "long stream should have pruned dead chunks"
+    assert len(state.code_chunks) < len(full_history)
