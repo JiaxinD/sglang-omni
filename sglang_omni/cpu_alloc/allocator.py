@@ -16,7 +16,7 @@ recorded in ``CpuAllocationPlan.events``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sglang_omni.cpu_alloc.topology import CpuTopology, PhysicalCore, format_cpulist
 
