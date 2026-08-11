@@ -412,10 +412,11 @@ def _register_health(app: FastAPI) -> None:
 def _register_host_contention(app: FastAPI) -> None:
     from sglang_omni.cpu_alloc.host_metrics import HostCpuContentionMonitor
 
+    # Daemon sampler thread; lives for the process lifetime. stop() exists
+    # for tests and embedders, but this FastAPI build has no shutdown hooks.
     monitor = HostCpuContentionMonitor()
     app.state.host_contention_monitor = monitor
     monitor.start()
-    app.add_event_handler("shutdown", monitor.stop)
 
     @app.get("/host_contention")
     async def host_contention() -> JSONResponse:
