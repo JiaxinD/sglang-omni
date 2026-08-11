@@ -2892,8 +2892,8 @@ def test_qwen3_tts_steady_decode_reports_cuda_graph_ready(
     class FakeOutputProcessor:
         _capture_hidden = False
 
-        def process(self, model_output, scheduler_output):
-            del model_output
+        def process(self, model_output, scheduler_output, host_token_ids=None):
+            del model_output, host_token_ids
             return {
                 req.request_id: RequestOutput(req.request_id, data=7)
                 for req in scheduler_output.requests
