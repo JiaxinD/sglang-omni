@@ -79,27 +79,34 @@ class _NodeState:
 def _anchor_node(
     demand: ProcessCpuDemand,
     node_states: dict[int, _NodeState],
+    projected: dict[int, int],
     events: list[str],
 ) -> int | None:
     """Node to grant exclusive cores on, or None to stay in the shared pool.
 
-    An exclusive grant on a guessed node can pin a GPU process to the wrong
-    socket, which is worse than not pinning; without a resolvable anchor the
-    demand keeps today's behavior instead.
+    An explicit node is honored; without one the demand goes to the node with
+    the most remaining capacity, so exclusive grants spread across sockets
+    instead of piling onto the first one. An explicit node that has no usable
+    cores stays in the shared pool: a guessed grant could pin the process to
+    the wrong socket, which is worse than not pinning.
     """
-    if demand.numa_node is not None and demand.numa_node in node_states:
-        return demand.numa_node
-    if demand.numa_node is None:
-        events.append(
-            f"process {demand.process_name}: no resolvable NUMA anchor; "
-            f"keeping it in the shared pool"
-        )
-    else:
+    if demand.numa_node is not None:
+        if demand.numa_node in node_states:
+            return demand.numa_node
         events.append(
             f"process {demand.process_name}: NUMA node {demand.numa_node} has "
             f"no usable cores in the universe; keeping it in the shared pool"
         )
-    return None
+        return None
+    return max(
+        node_states,
+        key=lambda n: (
+            len(node_states[n].free_cores)
+            - node_states[n].reserved_shared
+            - projected[n],
+            -n,
+        ),
+    )
 
 
 def allocate(
@@ -129,10 +136,12 @@ def allocate(
         key=lambda d: d.process_name,
     )
     anchored: dict[str, int] = {}
+    projected = dict.fromkeys(node_states, 0)
     for demand in exclusive_demands:
-        node = _anchor_node(demand, node_states, events)
+        node = _anchor_node(demand, node_states, projected, events)
         if node is not None:
             anchored[demand.process_name] = node
+            projected[node] += demand.serial_cores + demand.pool_cores
     exclusive_demands = [d for d in exclusive_demands if d.process_name in anchored]
 
     serial_grant: dict[str, int] = {

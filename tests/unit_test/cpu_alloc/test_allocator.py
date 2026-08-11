@@ -47,11 +47,17 @@ class TestAllocate:
         assert not plan.assignments["a"].exclusive
         assert any("node 7" in event for event in plan.events)
 
-    def test_unanchored_exclusive_demand_stays_shared(self, topology):
-        plan = allocate(topology, [demand("a", node=None, serial=1)])
-        assert not plan.assignments["a"].exclusive
-        assert plan.assignments["a"].cpu_ids == tuple(range(16))
-        assert any("no resolvable NUMA anchor" in event for event in plan.events)
+    def test_unanchored_demands_spread_across_nodes(self, topology):
+        plan = allocate(
+            topology,
+            [demand("a", node=None, serial=1), demand("b", node=None, serial=1)],
+        )
+        assert plan.assignments["a"].exclusive
+        assert plan.assignments["b"].exclusive
+        assert {
+            plan.assignments["a"].numa_node,
+            plan.assignments["b"].numa_node,
+        } == {0, 1}
 
     def test_pool_width_shrinks_before_serial(self, topology):
         # Node 0 has 4 physical cores; 1 stays shared, budget = 3.

@@ -20,10 +20,14 @@ Modes:
 | `static` | Plan once at startup from the NUMA/SMT topology and pin every stage process. |
 | `dynamic` | `static`, plus idle exclusive cores are lent to the shared pool and reclaimed with hysteresis. |
 
-At startup the allocator discovers the CPU/NUMA/SMT topology, anchors every
-stage process to its GPU's NUMA node, grants whole physical cores (both SMT
-siblings together) exclusively to declared serial dispatch loops, and leaves
-everything else on the node's shared pool. The plan and any degradations are
+At startup the allocator discovers the CPU/NUMA/SMT topology, grants whole
+physical cores (both SMT siblings together) exclusively to declared serial
+dispatch loops, spreads those grants across NUMA nodes by remaining
+capacity, and leaves everything else on the node's shared pool. Grants are
+not tied to the GPU's NUMA node: an ablation with identical exclusive
+carving on the GPU-local vs the far socket measured no difference on H200,
+so locality anchoring buys nothing there while capacity spreading prevents
+every service from piling onto node 0. The plan and any degradations are
 logged as one JSON line (`cpu_alloc plan: ...`).
 
 The universe is `sched_getaffinity`, so a container cpuset or an outer

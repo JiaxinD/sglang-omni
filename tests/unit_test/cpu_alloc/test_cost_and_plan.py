@@ -6,10 +6,7 @@ import pytest
 from sglang_omni.config.placement import StagePlacement, StagePlacementPlan
 from sglang_omni.config.topology import ProcessGroupPlacement, ProcessTopologyPlan
 from sglang_omni.cpu_alloc.cost import StageCpuCost, resolve_stage_cpu_costs
-from sglang_omni.cpu_alloc.pipeline_plan import (
-    _logical_to_physical_gpus,
-    build_pipeline_cpu_plan,
-)
+from sglang_omni.cpu_alloc.pipeline_plan import build_pipeline_cpu_plan
 from sglang_omni.cpu_alloc.topology import discover_topology
 
 
@@ -66,24 +63,6 @@ class TestStageCpuCost:
             StageCpuCost("serial-loop", exclusive_cores=0)
 
 
-class TestLogicalToPhysical:
-    def test_no_env_is_identity(self, monkeypatch):
-        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        assert _logical_to_physical_gpus({0, 1}) == {0: 0, 1: 1}
-
-    def test_integer_mask_maps(self, monkeypatch):
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5")
-        assert _logical_to_physical_gpus({0, 1}) == {0: 3, 1: 5}
-
-    def test_uuid_mask_returns_none(self, monkeypatch):
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-abc123")
-        assert _logical_to_physical_gpus({0}) is None
-
-    def test_out_of_range_returns_none(self, monkeypatch):
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
-        assert _logical_to_physical_gpus({0, 1}) is None
-
-
 class TestBuildPipelineCpuPlan:
     def _plans(self):
         placement_plan = StagePlacementPlan(
@@ -115,14 +94,12 @@ class TestBuildPipelineCpuPlan:
             placement_plan=placement_plan,
             process_plan=process_plan,
             topology=topology,
-            gpu_numa={0: 1},
         )
         pipeline = plan.assignments["pipeline"]
-        assert pipeline.exclusive and pipeline.numa_node == 1
-        assert pipeline.cpu_ids == (4, 12)
+        assert pipeline.exclusive and len(pipeline.cpu_ids) == 2
         vocoder = plan.assignments["vocoder"]
         assert not vocoder.exclusive
-        assert set(vocoder.cpu_ids) == {5, 6, 7, 13, 14, 15}
+        assert not set(vocoder.cpu_ids) & set(pipeline.cpu_ids)
 
     def test_no_declarations_returns_none(self, dual_node_sysfs):
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
@@ -134,12 +111,11 @@ class TestBuildPipelineCpuPlan:
                 placement_plan=placement_plan,
                 process_plan=process_plan,
                 topology=topology,
-                gpu_numa={0: 1},
             )
             is None
         )
 
-    def test_tp_processes_each_get_stage_cost(self, dual_node_sysfs):
+    def test_tp_ranks_get_disjoint_grants_spread_across_nodes(self, dual_node_sysfs):
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
         config = make_config(["thinker"], {"thinker": {"host_class": "serial-loop"}})
         placement_plan = StagePlacementPlan(
@@ -156,36 +132,12 @@ class TestBuildPipelineCpuPlan:
             placement_plan=placement_plan,
             process_plan=process_plan,
             topology=topology,
-            gpu_numa={0: 0, 1: 0},
         )
-        assert plan.assignments["thinker_tp0"].exclusive
-        assert plan.assignments["thinker_tp1"].exclusive
-        assert not (
-            set(plan.assignments["thinker_tp0"].cpu_ids)
-            & set(plan.assignments["thinker_tp1"].cpu_ids)
-        )
-
-    def test_tp_ranks_anchor_to_their_own_gpu_node(self, dual_node_sysfs):
-        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
-        config = make_config(["thinker"], {"thinker": {"host_class": "serial-loop"}})
-        placement_plan = StagePlacementPlan(
-            stages={"thinker": StagePlacement("thinker", (0, 1), 2, 0.8)},
-            gpus={},
-        )
-        process_plan = ProcessTopologyPlan(
-            groups=(),
-            stage_to_process={},
-            tp_stage_to_processes={"thinker": ("thinker_tp0", "thinker_tp1")},
-        )
-        plan = build_pipeline_cpu_plan(
-            config,
-            placement_plan=placement_plan,
-            process_plan=process_plan,
-            topology=topology,
-            gpu_numa={0: 0, 1: 1},
-        )
-        assert plan.assignments["thinker_tp0"].numa_node == 0
-        assert plan.assignments["thinker_tp1"].numa_node == 1
+        tp0 = plan.assignments["thinker_tp0"]
+        tp1 = plan.assignments["thinker_tp1"]
+        assert tp0.exclusive and tp1.exclusive
+        assert not set(tp0.cpu_ids) & set(tp1.cpu_ids)
+        assert {tp0.numa_node, tp1.numa_node} == {0, 1}
 
     @pytest.mark.parametrize("as_property", [True, False])
     def test_replicated_process_stays_in_shared_pool(
@@ -217,7 +169,6 @@ class TestBuildPipelineCpuPlan:
             placement_plan=placement_plan,
             process_plan=replicated_plan,
             topology=topology,
-            gpu_numa={0: 1},
         )
         assert not plan.assignments["pipeline"].exclusive
-        assert plan.assignments["pipeline"].cpu_ids == plan.shared_pools[1]
+        assert plan.assignments["pipeline"].cpu_ids == plan.shared_pools[None]
