@@ -38,8 +38,18 @@ cpuset (cgroup, Docker `--cpuset-cpus`, or Kubernetes CPU manager).
 ## Model declarations
 
 A model opts in by declaring per-stage host costs
-(`PipelineConfig.stage_cpu_costs()`); a model without declarations is a
-no-op even when the allocator is enabled. Shipped declarations:
+(`PipelineConfig.stage_cpu_costs()`): `serial-loop` for a dispatch loop that
+needs exclusive physical cores, `gpu-bound` for everything else. A stage
+without a declaration is `gpu-bound`, so a model that declares nothing is a
+no-op even when the allocator is enabled.
+
+Inside a container the plan uses the container's own CPU set
+(`sched_getaffinity`) while reading core and SMT relationships from sysfs,
+which stays visible and truthful under `--cpuset-cpus`. When a cpuset hands
+out only one sibling of a physical core, only that sibling is planned; the
+other one belongs to whoever owns the outer cpuset.
+
+Shipped declarations:
 
 | model | declared stages (exclusive physical cores) |
 | --- | --- |

@@ -24,16 +24,15 @@ def make_config(stage_names, costs):
 class TestStageCpuCost:
     def test_valid_declarations(self):
         config = make_config(
-            ["ar", "enc", "voc"],
+            ["ar", "voc"],
             {
                 "ar": {"host_class": "serial-loop", "exclusive_cores": 2},
-                "enc": {"host_class": "parallel-pool", "pool_width": 4},
                 "voc": {"host_class": "gpu-bound"},
             },
         )
         costs = resolve_stage_cpu_costs(config)
         assert costs["ar"] == StageCpuCost("serial-loop", exclusive_cores=2)
-        assert costs["enc"].pool_width == 4
+        assert costs["voc"].host_class == "gpu-bound"
 
     def test_empty_default(self):
         assert resolve_stage_cpu_costs(make_config(["ar"], {})) == {}
@@ -48,13 +47,8 @@ class TestStageCpuCost:
         with pytest.raises(ValueError, match="host_class"):
             resolve_stage_cpu_costs(config)
 
-    def test_parallel_pool_requires_width(self):
-        config = make_config(["ar"], {"ar": {"host_class": "parallel-pool"}})
-        with pytest.raises(ValueError, match="pool_width"):
-            resolve_stage_cpu_costs(config)
-
     def test_unknown_keys_raise(self):
-        config = make_config(["ar"], {"ar": {"host_class": "gpu-bound", "cores": 3}})
+        config = make_config(["ar"], {"ar": {"host_class": "gpu-bound", "width": 3}})
         with pytest.raises(ValueError, match="unknown keys"):
             resolve_stage_cpu_costs(config)
 

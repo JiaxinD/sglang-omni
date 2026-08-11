@@ -10,10 +10,8 @@ def topology(dual_node_sysfs):
     return discover_topology(range(16), sysfs_root=dual_node_sysfs)
 
 
-def demand(name, node=0, serial=0, pool=0):
-    return ProcessCpuDemand(
-        process_name=name, numa_node=node, serial_cores=serial, pool_cores=pool
-    )
+def demand(name, node=0, serial=0):
+    return ProcessCpuDemand(process_name=name, numa_node=node, exclusive_cores=serial)
 
 
 class TestAllocate:
@@ -59,34 +57,15 @@ class TestAllocate:
             plan.assignments["b"].numa_node,
         } == {0, 1}
 
-    def test_pool_width_shrinks_before_serial(self, topology):
-        # Node 0 has 4 physical cores; 1 stays shared, budget = 3.
-        plan = allocate(
-            topology,
-            [demand("loop", serial=1), demand("pool", pool=4)],
-        )
-        loop = plan.assignments["loop"]
-        pool = plan.assignments["pool"]
-        assert loop.exclusive and len(loop.cpu_ids) == 2
-        assert pool.exclusive and len(pool.cpu_ids) == 4  # shrunk 4 -> 2 cores
-        assert any("shrank pool width" in event for event in plan.events)
+    def test_demand_over_node_budget_moves_to_shared(self, topology):
+        # Node 0 has 4 physical cores; 1 stays shared, so the budget is 3.
+        plan = allocate(topology, [demand("big", serial=4), demand("small", serial=1)])
+        assert not plan.assignments["big"].exclusive
+        assert plan.assignments["small"].exclusive
+        assert any("moved to the shared pool" in e for e in plan.events)
 
-    def test_pool_moves_to_shared_before_serial(self, topology):
-        # Budget 3: three serial demands + one pool cannot all fit.
-        plan = allocate(
-            topology,
-            [
-                demand("s1", serial=1),
-                demand("s2", serial=1),
-                demand("s3", serial=1),
-                demand("p1", pool=2),
-            ],
-        )
-        assert all(plan.assignments[n].exclusive for n in ("s1", "s2", "s3"))
-        assert not plan.assignments["p1"].exclusive
-        assert any("moved to the shared pool" in event for event in plan.events)
-
-    def test_serial_degrades_last_and_is_logged(self, topology):
+    def test_overflow_degrades_and_is_logged(self, topology):
+        # Node 0 fits 3 single-core demands; the rest go to the shared pool.
         plan = allocate(
             topology,
             [demand(f"s{i}", serial=1) for i in range(5)],
@@ -94,12 +73,12 @@ class TestAllocate:
         exclusive = [n for n, a in plan.assignments.items() if a.exclusive]
         shared = [n for n, a in plan.assignments.items() if not a.exclusive]
         assert len(exclusive) == 3 and len(shared) == 2
-        assert any("exclusivity lost" in event for event in plan.events)
+        assert any("moved to the shared pool" in e for e in plan.events)
 
     def test_exclusive_grants_are_disjoint(self, topology):
         plan = allocate(
             topology,
-            [demand("a", serial=1), demand("b", serial=1), demand("c", pool=1)],
+            [demand("a", serial=1), demand("b", serial=1), demand("c", serial=1)],
         )
         seen: set[int] = set()
         for assignment in plan.assignments.values():
@@ -123,7 +102,7 @@ class TestAllocate:
 
     def test_negative_demand_raises(self, topology):
         with pytest.raises(ValueError, match="must be >= 0"):
-            ProcessCpuDemand(process_name="a", numa_node=0, serial_cores=-1)
+            ProcessCpuDemand(process_name="a", numa_node=0, exclusive_cores=-1)
 
     def test_no_anchor_shared_gets_union(self, topology):
         plan = allocate(topology, [demand("cpuonly", node=None)])

@@ -90,29 +90,23 @@ def build_pipeline_cpu_plan(
     demands = []
     entries = sorted(_iter_process_entries(process_plan), key=lambda e: e[0])
     for process_name, stage_names in entries:
-        serial = sum(
+        exclusive = sum(
             costs[s].exclusive_cores
             for s in stage_names
             if s in costs and costs[s].host_class == "serial-loop"
         )
-        pool = sum(
-            costs[s].pool_width or 0
-            for s in stage_names
-            if s in costs and costs[s].host_class == "parallel-pool"
-        )
-        if process_name in replicated and (serial or pool):
+        if process_name in replicated and exclusive:
             logger.warning(
                 "cpu_alloc: process %s is replicated; per-replica planning is "
                 "not supported yet, keeping it in the shared pool",
                 process_name,
             )
-            serial = pool = 0
+            exclusive = 0
         demands.append(
             ProcessCpuDemand(
                 process_name=process_name,
                 numa_node=None,
-                serial_cores=serial,
-                pool_cores=pool,
+                exclusive_cores=exclusive,
             )
         )
 

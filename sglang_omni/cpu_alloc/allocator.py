@@ -4,14 +4,9 @@
 Exclusive demands are granted whole physical cores (all SMT siblings move
 together, so no foreign thread lands on a sibling). Everything else shares
 the remaining CPUs of its NUMA node. When a node cannot satisfy every
-exclusive demand the allocator degrades explicitly, in order:
-
-1. shrink parallel-pool widths (round-robin, floor 1);
-2. move parallel-pool processes to the shared pool;
-3. move serial-loop processes to the shared pool (today's behavior).
-
-It never silently oversubscribes an exclusive grant; every degradation is
-recorded in ``CpuAllocationPlan.events``.
+exclusive demand, the processes that do not fit move to the shared pool,
+which is today's behavior; it never silently oversubscribes an exclusive
+grant, and every degradation is recorded in ``CpuAllocationPlan.events``.
 """
 
 from __future__ import annotations
@@ -27,14 +22,11 @@ class ProcessCpuDemand:
 
     process_name: str
     numa_node: int | None
-    serial_cores: int = 0
-    pool_cores: int = 0
+    exclusive_cores: int = 0
 
     def __post_init__(self) -> None:
-        if self.serial_cores < 0 or self.pool_cores < 0:
-            raise ValueError(
-                f"Process {self.process_name!r}: core demands must be >= 0"
-            )
+        if self.exclusive_cores < 0:
+            raise ValueError(f"Process {self.process_name!r}: core demand must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -132,7 +124,7 @@ def allocate(
     }
 
     exclusive_demands = sorted(
-        (d for d in demands if d.serial_cores or d.pool_cores),
+        (d for d in demands if d.exclusive_cores),
         key=lambda d: d.process_name,
     )
     anchored: dict[str, int] = {}
@@ -141,67 +133,39 @@ def allocate(
         node = _anchor_node(demand, node_states, projected, events)
         if node is not None:
             anchored[demand.process_name] = node
-            projected[node] += demand.serial_cores + demand.pool_cores
+            projected[node] += demand.exclusive_cores
     exclusive_demands = [d for d in exclusive_demands if d.process_name in anchored]
 
-    serial_grant: dict[str, int] = {
-        d.process_name: d.serial_cores for d in exclusive_demands
-    }
-    pool_grant: dict[str, int] = {
-        d.process_name: d.pool_cores for d in exclusive_demands
+    granted: dict[str, int] = {
+        d.process_name: d.exclusive_cores for d in exclusive_demands
     }
     for node, state in node_states.items():
-        local = [d for d in exclusive_demands if anchored[d.process_name] == node]
-        if not local:
-            continue
+        local = sorted(
+            (d for d in exclusive_demands if anchored[d.process_name] == node),
+            key=lambda d: (d.exclusive_cores, d.process_name),
+        )
         budget = len(state.free_cores) - state.reserved_shared
-
-        def total() -> int:
-            return sum(
-                serial_grant[d.process_name] + pool_grant[d.process_name] for d in local
-            )
-
-        while total() > budget and any(pool_grant[d.process_name] > 1 for d in local):
-            widest = max(
-                (d for d in local if pool_grant[d.process_name] > 1),
-                key=lambda d: (pool_grant[d.process_name], d.process_name),
-            )
-            pool_grant[widest.process_name] -= 1
+        for demand in local:
+            if demand.exclusive_cores <= budget:
+                budget -= demand.exclusive_cores
+                continue
+            granted[demand.process_name] = 0
             events.append(
-                f"node {node}: shrank pool width of {widest.process_name} to "
-                f"{pool_grant[widest.process_name]} (budget {budget} cores)"
-            )
-        while total() > budget and any(pool_grant[d.process_name] for d in local):
-            victim = max(
-                (d for d in local if pool_grant[d.process_name]),
-                key=lambda d: d.process_name,
-            )
-            pool_grant[victim.process_name] = 0
-            events.append(
-                f"node {node}: pool demand of {victim.process_name} moved to the "
-                f"shared pool (budget {budget} cores)"
-            )
-        while total() > budget and any(serial_grant[d.process_name] for d in local):
-            victim = max(
-                (d for d in local if serial_grant[d.process_name]),
-                key=lambda d: d.process_name,
-            )
-            serial_grant[victim.process_name] = 0
-            events.append(
-                f"node {node}: serial demand of {victim.process_name} moved to the "
-                f"shared pool (budget {budget} cores); exclusivity lost"
+                f"node {node}: {demand.process_name} wants "
+                f"{demand.exclusive_cores} core(s) but only {max(budget, 0)} "
+                f"remain; moved to the shared pool"
             )
 
     assignments: dict[str, ProcessCpuAssignment] = {}
     for demand in exclusive_demands:
         node = anchored[demand.process_name]
         state = node_states[node]
-        granted = serial_grant[demand.process_name] + pool_grant[demand.process_name]
-        if granted == 0:
+        count = granted[demand.process_name]
+        if count == 0:
             continue
         cores, state.free_cores = (
-            state.free_cores[:granted],
-            state.free_cores[granted:],
+            state.free_cores[:count],
+            state.free_cores[count:],
         )
         cpu_ids = tuple(sorted(c for core in cores for c in core.cpu_ids))
         assignments[demand.process_name] = ProcessCpuAssignment(

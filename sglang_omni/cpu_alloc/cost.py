@@ -6,8 +6,6 @@ A stage declares how it consumes host CPU, not how many CPUs it wants:
 - ``serial-loop``: a dispatch loop bound by single-thread cycles. It needs a
   small number of exclusive physical cores (SMT siblings reserved with them),
   not width.
-- ``parallel-pool``: a thread pool that scales with physical cores up to
-  ``pool_width``.
 - ``gpu-bound``: negligible host cost; stays in the shared pool.
 
 Undeclared stages default to ``gpu-bound``, so a model without declarations
@@ -18,31 +16,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-HOST_CLASSES = ("serial-loop", "parallel-pool", "gpu-bound")
+HOST_CLASSES = ("serial-loop", "gpu-bound")
 
 
 @dataclass(frozen=True)
 class StageCpuCost:
     host_class: str
     exclusive_cores: int = 1
-    pool_width: int | None = None
 
     def __post_init__(self) -> None:
         if self.host_class not in HOST_CLASSES:
             raise ValueError(
                 f"host_class must be one of {HOST_CLASSES}, got {self.host_class!r}"
             )
-        if self.host_class == "serial-loop":
-            if self.exclusive_cores < 1:
-                raise ValueError(
-                    f"serial-loop requires exclusive_cores >= 1, "
-                    f"got {self.exclusive_cores}"
-                )
-        if self.host_class == "parallel-pool":
-            if self.pool_width is None or self.pool_width < 1:
-                raise ValueError(
-                    f"parallel-pool requires pool_width >= 1, got {self.pool_width}"
-                )
+        if self.host_class == "serial-loop" and self.exclusive_cores < 1:
+            raise ValueError(
+                f"serial-loop requires exclusive_cores >= 1, "
+                f"got {self.exclusive_cores}"
+            )
 
 
 def resolve_stage_cpu_costs(config) -> dict[str, StageCpuCost]:
@@ -68,7 +59,7 @@ def resolve_stage_cpu_costs(config) -> dict[str, StageCpuCost]:
                 f"stage_cpu_costs()[{stage_name!r}] must be a dict with a "
                 f"'host_class' key, got {entry!r}"
             )
-        unknown = set(entry) - {"host_class", "exclusive_cores", "pool_width"}
+        unknown = set(entry) - {"host_class", "exclusive_cores"}
         if unknown:
             raise ValueError(
                 f"stage_cpu_costs()[{stage_name!r}] has unknown keys {sorted(unknown)}"
@@ -76,10 +67,5 @@ def resolve_stage_cpu_costs(config) -> dict[str, StageCpuCost]:
         costs[stage_name] = StageCpuCost(
             host_class=entry["host_class"],
             exclusive_cores=int(entry.get("exclusive_cores", 1)),
-            pool_width=(
-                int(entry["pool_width"])
-                if entry.get("pool_width") is not None
-                else None
-            ),
         )
     return costs
