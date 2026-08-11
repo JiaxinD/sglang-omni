@@ -3771,6 +3771,7 @@ def test_qwen3_tts_stream_prune_matches_full_history_windows() -> None:
     assert state.pruned_frames > 0, "long stream should have pruned dead chunks"
     assert len(state.code_chunks) < len(full_history)
 
+
 def test_qwen3_tts_decode_isolates_rows_with_out_of_range_codes() -> None:
     """A bad row fails alone and the decoder only ever sees in-range ids."""
     scheduler = Qwen3TTSStreamingVocoderScheduler(

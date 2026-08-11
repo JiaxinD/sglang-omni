@@ -479,8 +479,7 @@ class Qwen3TTSStreamingVocoderScheduler(
         # O(stream) per decode. Slices below translate by the pruned offset.
         while (
             state.code_chunks
-            and state.pruned_frames + int(state.code_chunks[0].shape[0])
-            <= window_start
+            and state.pruned_frames + int(state.code_chunks[0].shape[0]) <= window_start
         ):
             state.pruned_frames += int(state.code_chunks.pop(0).shape[0])
         codes = torch.cat(state.code_chunks, dim=0)
@@ -513,8 +512,10 @@ class Qwen3TTSStreamingVocoderScheduler(
         # decode's existing sync: rows that needed clamping are failed, never
         # emitted, so no added synchronization buys the same protection.
         bad_rows = (
-            (decoder_input < 0) | (decoder_input >= _QWEN3_TTS_CODEBOOK_SIZE)
-        ).flatten(start_dim=1).any(dim=1)
+            ((decoder_input < 0) | (decoder_input >= _QWEN3_TTS_CODEBOOK_SIZE))
+            .flatten(start_dim=1)
+            .any(dim=1)
+        )
         decoder_input.clamp_(0, _QWEN3_TTS_CODEBOOK_SIZE - 1)
         return bad_rows
 
@@ -746,7 +747,9 @@ class Qwen3TTSStreamingVocoderScheduler(
         group: list[tuple[str, _Qwen3TTSStreamState, _Qwen3TTSDecodePlan]],
         *,
         stream: torch.cuda.Stream | None,
-    ) -> tuple[list[tuple[str, _Qwen3TTSStreamState, _Qwen3TTSDecodePlan]], list] | None:
+    ) -> (
+        tuple[list[tuple[str, _Qwen3TTSStreamState, _Qwen3TTSDecodePlan]], list] | None
+    ):
         """Decode a group, failing only the rows that carried invalid codes."""
         while group:
             try:
