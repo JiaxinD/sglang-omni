@@ -38,6 +38,7 @@ _QWEN3_TTS_CODEBOOK_SIZE = 2048
 class _Qwen3TTSStreamState:
     code_chunks: list[torch.Tensor] = field(default_factory=list)
     total_frames: int = 0
+    pruned_frames: int = 0
     ref_frames: int = 0
     emitted_generated_frames: int = 0
     next_decode_generated_frames: int = 0
@@ -465,8 +466,21 @@ class Qwen3TTSStreamingVocoderScheduler(
         absolute_emitted = state.ref_frames + state.emitted_generated_frames
         window_start = max(0, absolute_emitted - self._stream_left_context_frames)
         window_end = state.ref_frames + generated_frames
+        # Note: (Jiaxin Deng) window_start only moves forward, so frames behind
+        # it are dead; prune whole chunks to keep this cat O(window), not
+        # O(stream) per decode. Slices below translate by the pruned offset.
+        while (
+            state.code_chunks
+            and state.pruned_frames + int(state.code_chunks[0].shape[0])
+            <= window_start
+        ):
+            state.pruned_frames += int(state.code_chunks.pop(0).shape[0])
         codes = torch.cat(state.code_chunks, dim=0)
-        decoder_input = codes[window_start:window_end].transpose(0, 1).unsqueeze(0)
+        decoder_input = (
+            codes[window_start - state.pruned_frames : window_end - state.pruned_frames]
+            .transpose(0, 1)
+            .unsqueeze(0)
+        )
         return _Qwen3TTSDecodePlan(
             decoder_input=decoder_input,
             absolute_emitted_frames=absolute_emitted,
