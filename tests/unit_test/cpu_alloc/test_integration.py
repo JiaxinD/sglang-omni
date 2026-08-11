@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from sglang_omni.config.schema import PlacementConfig
-from sglang_omni.cpu_alloc.__main__ import plan_replica_blocks
+from sglang_omni.cpu_alloc.__main__ import format_blocks, plan_replica_blocks
 from sglang_omni.cpu_alloc.allocator import CpuAllocationPlan, ProcessCpuAssignment
 from sglang_omni.cpu_alloc.topology import discover_topology
 from sglang_omni.pipeline.mp_runner import _attach_cpu_plan
@@ -196,3 +196,10 @@ class TestPlanReplicaBlocks:
             plan_replica_blocks(
                 topology, replicas=1, gpu_numa_node=0, server_share=bad_share
             )
+
+    def test_format_blocks_is_shell_ready(self, topology):
+        # autodp.sh consumes this value verbatim as CORE_BLOCKS.
+        result = plan_replica_blocks(
+            topology, replicas=3, gpu_numa_node=1, server_share=0.75
+        )
+        assert format_blocks(result) == "4,12 5,13 6,14"

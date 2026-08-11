@@ -106,9 +106,7 @@ core_blocks_for() {
   local planned
   # NUMA/SMT-aware planner; whole physical cores per replica, anchored to the
   # GPU's node. Falls back to the plain 3/4 split when it cannot run.
-  planned=$(PYTHONPATH="$HERE/../..${PYTHONPATH:+:$PYTHONPATH}" \r
-    python3 -m sglang_omni.cpu_alloc plan --replicas "$1" --gpu-id "$GPU_ID" \r
-    2>/dev/null | sed -n 's/^CORE_BLOCKS="\(.*\)"$//p') || planned=""
+  planned=$(PYTHONPATH="$HERE/../..${PYTHONPATH:+:$PYTHONPATH}" python3 -m sglang_omni.cpu_alloc plan --replicas "$1" --gpu-id "$GPU_ID" --format blocks 2>/dev/null) || planned=""
   if [ -n "$planned" ]; then
     echo "$planned"
     return 0

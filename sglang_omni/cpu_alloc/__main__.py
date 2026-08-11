@@ -71,6 +71,13 @@ def plan_replica_blocks(
     }
 
 
+def format_blocks(result: dict) -> str:
+    """Bare space-separated CORE_BLOCKS value for shell consumers."""
+    return " ".join(
+        ",".join(str(cpu) for cpu in block) for block in result["server_blocks"]
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sglang_omni.cpu_alloc")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -80,6 +87,12 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--gpu-id", type=int, default=None)
     plan_parser.add_argument("--server-share", type=float, default=0.75)
     plan_parser.add_argument("--json", action="store_true", dest="as_json")
+    plan_parser.add_argument(
+        "--format",
+        choices=["shell", "blocks"],
+        default="shell",
+        help="shell prints CORE_BLOCKS/CLIENT_CPUS lines; blocks prints the bare CORE_BLOCKS value.",
+    )
 
     sub.add_parser("topology", help="Dump the discovered CPU topology as JSON.")
 
@@ -108,10 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.as_json:
         print(json.dumps(result, indent=2))
         return 0
-    blocks_text = " ".join(
-        ",".join(str(cpu) for cpu in block) for block in result["server_blocks"]
-    )
-    print(f'CORE_BLOCKS="{blocks_text}"')
+    if args.format == "blocks":
+        print(format_blocks(result))
+        return 0
+    print(f'CORE_BLOCKS="{format_blocks(result)}"')
     print(f'CLIENT_CPUS="{format_cpulist(result["client_cpus"])}"')
     return 0
 

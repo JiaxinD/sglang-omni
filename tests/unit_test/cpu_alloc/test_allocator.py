@@ -40,10 +40,18 @@ class TestAllocate:
         assert plan.assignments["a"].numa_node == 0
         assert plan.assignments["b"].numa_node == 1
 
-    def test_unknown_numa_falls_back_with_event(self, topology):
+    def test_unknown_numa_stays_shared_with_event(self, topology):
+        # A guessed anchor could pin a GPU process to the wrong socket, so an
+        # unresolvable node keeps today's shared behavior instead.
         plan = allocate(topology, [demand("a", node=7, serial=1)])
-        assert plan.assignments["a"].exclusive
+        assert not plan.assignments["a"].exclusive
         assert any("node 7" in event for event in plan.events)
+
+    def test_unanchored_exclusive_demand_stays_shared(self, topology):
+        plan = allocate(topology, [demand("a", node=None, serial=1)])
+        assert not plan.assignments["a"].exclusive
+        assert plan.assignments["a"].cpu_ids == tuple(range(16))
+        assert any("no resolvable NUMA anchor" in event for event in plan.events)
 
     def test_pool_width_shrinks_before_serial(self, topology):
         # Node 0 has 4 physical cores; 1 stays shared, budget = 3.

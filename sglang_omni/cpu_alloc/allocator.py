@@ -80,16 +80,26 @@ def _anchor_node(
     demand: ProcessCpuDemand,
     node_states: dict[int, _NodeState],
     events: list[str],
-) -> int:
+) -> int | None:
+    """Node to grant exclusive cores on, or None to stay in the shared pool.
+
+    An exclusive grant on a guessed node can pin a GPU process to the wrong
+    socket, which is worse than not pinning; without a resolvable anchor the
+    demand keeps today's behavior instead.
+    """
     if demand.numa_node is not None and demand.numa_node in node_states:
         return demand.numa_node
-    fallback = max(node_states, key=lambda n: len(node_states[n].free_cores))
-    if demand.numa_node is not None:
+    if demand.numa_node is None:
         events.append(
-            f"process {demand.process_name}: NUMA node {demand.numa_node} has no "
-            f"usable cores in the universe; anchored to node {fallback}"
+            f"process {demand.process_name}: no resolvable NUMA anchor; "
+            f"keeping it in the shared pool"
         )
-    return fallback
+    else:
+        events.append(
+            f"process {demand.process_name}: NUMA node {demand.numa_node} has "
+            f"no usable cores in the universe; keeping it in the shared pool"
+        )
+    return None
 
 
 def allocate(
@@ -118,9 +128,12 @@ def allocate(
         (d for d in demands if d.serial_cores or d.pool_cores),
         key=lambda d: d.process_name,
     )
-    anchored: dict[str, int] = {
-        d.process_name: _anchor_node(d, node_states, events) for d in exclusive_demands
-    }
+    anchored: dict[str, int] = {}
+    for demand in exclusive_demands:
+        node = _anchor_node(demand, node_states, events)
+        if node is not None:
+            anchored[demand.process_name] = node
+    exclusive_demands = [d for d in exclusive_demands if d.process_name in anchored]
 
     serial_grant: dict[str, int] = {
         d.process_name: d.serial_cores for d in exclusive_demands
