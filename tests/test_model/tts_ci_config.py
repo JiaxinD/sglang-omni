@@ -111,6 +111,27 @@ MOSS_VC_STREAM_THRESHOLDS = apply_slack(
     _MOSS_VC_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
 )
 
+# Qwen3-TTS 1.7B. This is the variant the community deploys, and it is gated as
+# a single instance: on one H100 the tuned single instance beats the same-card
+# MPS-DP2 pool on peak throughput and holds a several-fold better first-audio
+# latency, so colocation is no longer the recommended topology for it.
+#
+# Note: (Jiaxin Deng) the model enters CI observing rather than gating. Numeric
+# thresholds only mean something once they come from a calibration run on the CI
+# runner itself, and a preset carrying invented numbers would either wave every
+# regression through or fail every run. `gate_thresholds=False` still exercises
+# the whole path (bring-up, streaming, consistency, WER reporting), so a crash or
+# a broken stream fails the stage; the numbers get filled from the calibration
+# stage and gating flips on in the follow-up.
+QWEN3_TTS_VC_WER_CORPUS_THRESHOLD = apply_wer_slack(0.0112)
+QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(0.0112)
+QWEN3_TTS_VC_SIMILARITY_MEAN_MIN = 0.0
+QWEN3_TTS_VC_UTMOS_MEAN_MIN = 0.0
+
+# Placeholders: replaced by the calibration run before gating is enabled.
+QWEN3_TTS_VC_NON_STREAM_THRESHOLDS: dict[int, dict[str, float]] = {}
+QWEN3_TTS_VC_STREAM_THRESHOLDS: dict[int, dict[str, float]] = {}
+
 
 TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
     "higgs": TtsCiPreset(
@@ -128,6 +149,31 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
             stream_wer_corpus=HIGGS_VC_STREAM_WER_CORPUS_THRESHOLD,
             similarity_mean_min=HIGGS_VC_SIMILARITY_MEAN_MIN,
             utmos_mean_min=HIGGS_VC_UTMOS_MEAN_MIN,
+        ),
+    ),
+    "qwen3tts": TtsCiPreset(
+        model=TtsCiModelPreset(
+            model_path="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            ref_format="references",
+            # The shipped defaults cap the AR engine at 16 running requests and
+            # colocate every stage in one process; both are what kept this
+            # variant behind, so CI measures the tuned operating point.
+            worker_extra_args=(
+                "--max-running-requests 64 "
+                "--cuda-graph-max-bs 64 "
+                "--talker-torch-compile-max-bs 64 "
+                "--isolate-stage vocoder"
+            ),
+            startup_timeout=300,
+            gate_thresholds=False,
+        ),
+        thresholds=TtsCiThresholdPreset(
+            non_stream_speed=QWEN3_TTS_VC_NON_STREAM_THRESHOLDS,
+            stream_speed=QWEN3_TTS_VC_STREAM_THRESHOLDS,
+            wer_corpus=QWEN3_TTS_VC_WER_CORPUS_THRESHOLD,
+            stream_wer_corpus=QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD,
+            similarity_mean_min=QWEN3_TTS_VC_SIMILARITY_MEAN_MIN,
+            utmos_mean_min=QWEN3_TTS_VC_UTMOS_MEAN_MIN,
         ),
     ),
     "moss": TtsCiPreset(
