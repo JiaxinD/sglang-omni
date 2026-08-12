@@ -86,8 +86,8 @@ class TestVisibility:
         "raw,expected",
         [
             (MEM_FRACTION, PathVisibility.PUBLIC),
-            ("stages.thinker.factory_args", PathVisibility.INTERNAL),
-            ("stages.thinker.factory_args.lookahead", PathVisibility.INTERNAL),
+            ("stages.thinker.factory_args", PathVisibility.DEPRECATED),
+            ("stages.thinker.factory_args.lookahead", PathVisibility.DEPRECATED),
             ("stages.thinker.runtime_arg_map.max_seq_len", PathVisibility.INTERNAL),
             ("stages.thinker.name", PathVisibility.IDENTITY),
             ("config_cls", PathVisibility.DERIVED),
@@ -97,20 +97,35 @@ class TestVisibility:
     def test_classification(self, raw, expected):
         assert ConfigPath.parse(raw).visibility is expected
 
-    def test_require_public_explains_why(self):
-        path = ConfigPath.parse("stages.thinker.factory_args.lookahead")
-        assert not path.is_public()
-        with pytest.raises(ConfigPathError, match="owned by the model config"):
-            path.require_public()
+    def test_require_writable_explains_why(self):
+        path = ConfigPath.parse("stages.thinker.runtime_arg_map.max_seq_len")
+        assert not path.is_writable()
+        with pytest.raises(ConfigPathError, match="owned by the model config author"):
+            path.require_writable()
 
     def test_public_paths_pass(self):
-        ConfigPath.parse(MEM_FRACTION).require_public()
+        ConfigPath.parse(MEM_FRACTION).require_writable()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "stages.thinker.factory_args.lookahead",
+            "runtime_overrides.thinker",
+        ],
+    )
+    def test_deprecated_paths_are_writable_but_not_public(self, raw):
+        """Deprecation warns; it does not break configurations that work today."""
+        path = ConfigPath.parse(raw)
+        assert path.is_writable()
+        assert not path.is_public()
+        path.require_writable()
+        assert path.visibility_reason
 
     def test_rules_are_model_agnostic(self):
         """A differently-named stage hits the same rule."""
         assert (
             ConfigPath.parse("stages.code2wav.factory_args.foo").visibility
-            is PathVisibility.INTERNAL
+            is PathVisibility.DEPRECATED
         )
 
 

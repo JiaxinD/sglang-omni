@@ -152,13 +152,14 @@ class TestShadowFailures:
             )
 
     def test_invalid_patch_does_not_escape(self, pipeline_config, caplog):
-        """factory_args is INTERNAL, so patch creation refuses it."""
+        """runtime_arg_map is INTERNAL, so patch creation refuses it."""
         with caplog.at_level(logging.WARNING):
             compare_with_resolver(
                 baseline=pipeline_config,
                 expected=pipeline_config,
                 build_patches=lambda: patches_from_dotted_cli(
-                    {"stages.thinker.factory_args.lookahead": "8"}, pipeline_config
+                    {"stages.thinker.runtime_arg_map.max_seq_len": "x"},
+                    pipeline_config,
                 ),
                 context="a test",
             )
@@ -187,6 +188,26 @@ class TestWiredIntoV1:
         with caplog.at_level(logging.WARNING):
             overridden = _apply_stage_overrides(pipeline_config, overrides)
         assert overridden.stages[1].runtime.max_seq_len == 4096
+        assert caplog.records == []
+
+    def test_factory_args_via_dotted_cli_is_clean_under_strict(
+        self, pipeline_config, monkeypatch, caplog
+    ):
+        """The MOSS-TTS shape: shipped models expose knobs under factory_args.
+
+        Covers overwriting an existing key and creating a new one, since the
+        value type is ``Any`` and the resolver has no schema to lean on.
+        """
+        monkeypatch.setenv(SHADOW_STRICT_ENV, "1")
+        with caplog.at_level(logging.WARNING):
+            merged = ConfigManager(pipeline_config).merge_config(
+                {
+                    "stages.thinker.factory_args.lookahead": "8",
+                    "stages.thinker.factory_args.ref_audio_cache": "false",
+                }
+            )
+        assert merged.stages[1].factory_args["lookahead"] == 8
+        assert merged.stages[1].factory_args["ref_audio_cache"] is False
         assert caplog.records == []
 
     def test_v1_result_survives_a_broken_shadow(

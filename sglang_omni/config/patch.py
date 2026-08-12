@@ -167,19 +167,22 @@ class ConfigPatch:
         """Build a patch, compiling ``path`` and coercing ``value`` to its type.
 
         Raises :class:`~sglang_omni.config.path.ConfigPathError` when the path
-        is unknown or is not part of the public surface.
+        is unknown or is not writable by a user-facing source. A path that is
+        merely deprecated is accepted, and carries its reason forward as a
+        deprecation notice alongside any the caller supplied.
         """
         compiled = (
             path if isinstance(path, ConfigPath) else ConfigPath.parse(path, root)
         )
-        compiled.require_public()
+        compiled.require_writable()
+        notices = [note for note in (deprecated, compiled.visibility_reason) if note]
         return cls(
             path=compiled,
             value=compiled.coerce(value) if coerce else value,
             source=source,
             layer=source.layer if layer is None else layer,
             specificity=specificity,
-            deprecated=deprecated,
+            deprecated="; ".join(notices),
         )
 
     @property

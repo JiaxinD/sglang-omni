@@ -49,7 +49,23 @@ class TestConstruction:
 
     def test_internal_path_is_refused(self):
         with pytest.raises(ConfigPathError, match="internal"):
-            patch("stages.thinker.factory_args.lookahead", 8, CLI_SET)
+            patch("stages.thinker.runtime_arg_map.max_seq_len", "x", CLI_SET)
+
+    def test_deprecated_path_is_accepted_and_carries_its_notice(self):
+        """Shipped models expose knobs under factory_args; warn, do not refuse."""
+        created = patch("stages.thinker.factory_args.lookahead", 8, CLI_SET)
+        assert created.value == 8
+        assert "prefer the typed runtime fields" in created.deprecated
+
+    def test_path_and_caller_deprecations_are_both_kept(self):
+        created = patch(
+            "stages.thinker.factory_args.lookahead",
+            8,
+            CLI_SET,
+            deprecated="positional stage indices are deprecated",
+        )
+        assert "positional stage indices" in created.deprecated
+        assert "prefer the typed runtime fields" in created.deprecated
 
     def test_explicit_layer_override_wins_over_the_source_default(self):
         assert patch(MEM_FRACTION, 0.8, YAML, layer=Layer.CLI).layer is Layer.CLI

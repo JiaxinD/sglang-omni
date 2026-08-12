@@ -92,8 +92,9 @@ _VISIBILITY_RULES: tuple[tuple[str, PathVisibility, str], ...] = (
     ),
     (
         "stages.*.factory_args.**",
-        PathVisibility.INTERNAL,
-        "factory kwargs are owned by the model config; use the typed runtime fields",
+        PathVisibility.DEPRECATED,
+        "factory kwargs are owned by the model config; prefer the typed runtime "
+        "fields. Still writable because shipped models expose knobs here",
     ),
     (
         "stages.*.runtime_arg_map.**",
@@ -241,12 +242,25 @@ class ConfigPath:
         return PathVisibility.PUBLIC, ""
 
     def is_public(self) -> bool:
-        """True when a user-facing source is allowed to write this path."""
+        """True when this path is part of the recommended surface.
+
+        Stricter than :meth:`is_writable`: a deprecated path is still writable
+        but should not be advertised, e.g. by completion or ``config explain``.
+        """
         return self.visibility is PathVisibility.PUBLIC
 
-    def require_public(self) -> None:
+    def is_writable(self) -> bool:
+        """True when a user-facing source is allowed to write this path.
+
+        Deprecated paths are writable. Refusing them would break configurations
+        that work today, which is what a deprecation period exists to avoid;
+        they carry :attr:`visibility_reason` as a warning instead.
+        """
+        return self.visibility in (PathVisibility.PUBLIC, PathVisibility.DEPRECATED)
+
+    def require_writable(self) -> None:
         """Raise unless this path may be written by a user-facing source."""
-        if self.is_public():
+        if self.is_writable():
             return
         raise ConfigPathError(
             f"Config path {self.raw!r} is {self.visibility.value} and cannot be "
