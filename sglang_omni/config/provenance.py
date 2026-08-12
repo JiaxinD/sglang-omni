@@ -1,0 +1,161 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Where every configuration value came from.
+
+The resolver records one :class:`ProvenanceEntry` per contributing patch, plus
+the baseline the patches were applied on top of. That is what makes
+``sgl-omni config explain <path>`` answerable::
+
+    stages.thinker.runtime.sglang_server_args.mem_fraction_static = 0.8
+      0.87  <- model default (Qwen3OmniConfig)
+      0.70  <- yaml file (configs/omni.yaml)            [superseded]
+      0.80  <- cli flag (--thinker-mem-fraction-static) [winner]
+
+Nothing here decides anything; precedence lives in
+:mod:`sglang_omni.config.patch` and is executed by
+:mod:`sglang_omni.config.resolver`.
+"""
+
+from __future__ import annotations
+
+import difflib
+from dataclasses import dataclass, field
+from typing import Any
+
+from sglang_omni.config.patch import (
+    ConfigPatch,
+    ConfigPatchSet,
+    ConfigSource,
+    Layer,
+    SourceKind,
+    Specificity,
+)
+
+__all__ = ["ProvenanceEntry", "ProvenanceMap", "BASELINE_SOURCE"]
+
+BASELINE_SOURCE = ConfigSource(
+    SourceKind.MODEL_DEFAULT,
+    detail="value before any patch was applied",
+)
+
+
+@dataclass(frozen=True)
+class ProvenanceEntry:
+    """One source's contribution to one path."""
+
+    path: str
+    value: Any
+    source: ConfigSource
+    layer: Layer
+    specificity: Specificity
+    winning: bool
+    deprecated: str = ""
+
+    @classmethod
+    def from_patch(cls, patch: ConfigPatch, *, winning: bool) -> "ProvenanceEntry":
+        return cls(
+            path=patch.path.raw,
+            value=patch.value,
+            source=patch.source,
+            layer=patch.layer,
+            specificity=patch.specificity,
+            winning=winning,
+            deprecated=patch.deprecated,
+        )
+
+    def render(self) -> str:
+        marker = "[winner]" if self.winning else "[superseded]"
+        line = f"{self.value!r}  <- {self.source.describe()}  {marker}"
+        if self.deprecated:
+            line += f"\n      deprecated: {self.deprecated}"
+        return line
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "value": self.value,
+            "source": self.source.kind.value,
+            "origin": self.source.origin,
+            "layer": int(self.layer),
+            "layer_name": self.layer.name,
+            "specificity": self.specificity.name,
+            "winning": self.winning,
+            "deprecated": self.deprecated or None,
+        }
+
+
+@dataclass
+class ProvenanceMap:
+    """Contribution history per canonical path."""
+
+    entries: dict[str, list[ProvenanceEntry]] = field(default_factory=dict)
+    baseline: dict[str, Any] = field(default_factory=dict)
+    """Pre-patch value per path, recorded only for paths a patch touched."""
+
+    # ------------------------------------------------------------------
+    # building
+    # ------------------------------------------------------------------
+
+    def record(self, patch: ConfigPatch, *, winning: bool) -> None:
+        self.entries.setdefault(patch.path.raw, []).append(
+            ProvenanceEntry.from_patch(patch, winning=winning)
+        )
+
+    def record_baseline(self, path: str, value: Any) -> None:
+        self.baseline.setdefault(path, value)
+
+    @classmethod
+    def from_patchset(cls, patchset: ConfigPatchSet) -> "ProvenanceMap":
+        out = cls()
+        winners = patchset.winners()
+        for patch in patchset.ordered():
+            out.record(patch, winning=winners[patch.key] is patch)
+        return out
+
+    # ------------------------------------------------------------------
+    # querying
+    # ------------------------------------------------------------------
+
+    def paths(self) -> list[str]:
+        return sorted(self.entries)
+
+    def history(self, path: str) -> list[ProvenanceEntry]:
+        """Every contribution to ``path``, weakest first."""
+        if path not in self.entries:
+            raise KeyError(self._unknown_message(path))
+        return list(self.entries[path])
+
+    def winner(self, path: str) -> ProvenanceEntry | None:
+        for entry in reversed(self.entries.get(path, [])):
+            if entry.winning:
+                return entry
+        return None
+
+    def touched(self, path: str) -> bool:
+        return path in self.entries
+
+    def explain(self, path: str) -> str:
+        """Human-readable answer to 'why is this value what it is'."""
+        history = self.history(path)
+        winner = self.winner(path)
+        lines = [f"{path} = {winner.value!r}" if winner else path]
+        if path in self.baseline:
+            lines.append(f"  {self.baseline[path]!r}  <- {BASELINE_SOURCE.describe()}")
+        lines.extend(f"  {entry.render()}" for entry in history)
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            path: {
+                "baseline": self.baseline.get(path),
+                "history": [entry.to_dict() for entry in entries],
+            }
+            for path, entries in sorted(self.entries.items())
+        }
+
+    def _unknown_message(self, path: str) -> str:
+        known = self.paths()
+        close = difflib.get_close_matches(path, known, n=3, cutoff=0.4)
+        message = f"No configuration source touched {path!r}"
+        if close:
+            message += "; paths that were touched include: " + ", ".join(close)
+        return message
