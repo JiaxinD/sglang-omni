@@ -155,3 +155,23 @@ def test_repetition_penalty_resets_after_empty_retract():
 
     expected = _scalar_reference(logits_orig, requests, penalty)
     assert torch.equal(logits_output.next_token_logits, expected)
+
+
+def test_suppress_cache_holds_one_entry_across_requests():
+    """Fresh list objects with identical content must share one device tensor."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vocab = 64
+    runner = types.SimpleNamespace()
+    shared = [5, 20, 90]
+
+    for step in range(5):
+        # the request builder hands out a new list object per request
+        requests = _make_suppress_requests([list(shared), list(shared)])
+        logits = torch.randn(2, vocab, device=device)
+        logits_output = types.SimpleNamespace(next_token_logits=logits.clone())
+        ModelRunner._apply_codec_suppress_tokens(runner, logits_output, requests)
+        assert torch.equal(
+            logits_output.next_token_logits, _suppress_reference(logits, requests)
+        ), step
+
+    assert len(runner._suppress_tensor_cache) == 1

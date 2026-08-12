@@ -958,14 +958,15 @@ class ModelRunner:
             return
         vocab = logits.shape[1]
         device = logits.device
-        # Note: (Jiaxin Deng) suppress lists are static per request; caching the
-        # filtered device tensor by list identity makes every decode step after
-        # a request's first a cache hit instead of a rebuild.
+        # Note: (Jiaxin Deng) the suppress set comes from model config, so keying
+        # by content collapses the whole fleet onto one device tensor; the key
+        # itself is derived once per request because the builder hands out a
+        # fresh list object each time.
         cache = getattr(self, "_suppress_tensor_cache", None)
         if cache is None:
             cache = {}
             self._suppress_tensor_cache = cache
-        row_groups: dict[int, tuple[torch.Tensor, list[int]]] = {}
+        row_groups: dict[Any, tuple[torch.Tensor, list[int]]] = {}
         for row_idx, sched_req in enumerate(requests):
             data = sched_req.data
             suppress_tokens = data.suppress_tokens
@@ -977,25 +978,25 @@ class ModelRunner:
                     suppress_tokens = None
             if not suppress_tokens:
                 continue
-            key = (id(suppress_tokens), vocab, str(device))
-            hit = cache.get(key)
-            if hit is not None and hit[0] is suppress_tokens:
-                toks_t = hit[1]
-            else:
-                toks = [int(t) for t in suppress_tokens if 0 <= int(t) < vocab]
+            content = getattr(data, "_suppress_content", None)
+            if content is None:
+                content = tuple(int(t) for t in suppress_tokens)
+                data._suppress_content = content
+            key = (content, vocab, str(device))
+            toks_t = cache.get(key)
+            if key not in cache:
+                toks = [t for t in content if 0 <= t < vocab]
                 toks_t = (
                     torch.tensor(toks, dtype=torch.long, device=device)
                     if toks
                     else None
                 )
-                if len(cache) >= 64:
-                    cache.clear()
-                cache[key] = (suppress_tokens, toks_t)
+                cache[key] = toks_t
             if toks_t is None:
                 continue
-            group = row_groups.get(id(suppress_tokens))
+            group = row_groups.get(key)
             if group is None:
-                row_groups[id(suppress_tokens)] = (toks_t, [row_idx])
+                row_groups[key] = (toks_t, [row_idx])
             else:
                 group[1].append(row_idx)
         for toks_t, rows in row_groups.values():
