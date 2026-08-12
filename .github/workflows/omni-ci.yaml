@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       tts_ci_model:
-        description: "Optional TTS CI model preset to run (higgs or moss). Leave empty for random."
+        description: "Optional TTS CI model preset to run (higgs, moss or qwen3tts). Leave empty for random."
         required: false
         type: string
         default: ""
@@ -53,6 +53,7 @@ env:
         || format('/data/omni-ci/run-{0}', github.run_id) }}
   TTS_MODEL_PATH: bosonai/higgs-tts-3-4b
   MOSS_TTS_MODEL_PATH: OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5
+  QWEN3_TTS_MODEL_PATH: Qwen/Qwen3-TTS-12Hz-1.7B-Base
   QWEN3_ASR_MODEL_PATH: Qwen/Qwen3-ASR-1.7B
   MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH: OpenMOSS-Team/MOSS-Transcribe-Diarize
   FUN_ASR_MODEL_PATH: FunAudioLLM/Fun-ASR-Nano-2512-hf
@@ -298,6 +299,7 @@ jobs:
             "${MOSS_TRANSCRIBE_DIARIZE_MODEL_PATH}" \
             "${TTS_MODEL_PATH}" \
             "${MOSS_TTS_MODEL_PATH}" \
+            "${QWEN3_TTS_MODEL_PATH}" \
             "${FUN_ASR_MODEL_PATH}"
 
       - name: Mark PR environment complete

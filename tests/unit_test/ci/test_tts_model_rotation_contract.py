@@ -36,7 +36,16 @@ def test_rotation_offers_every_registered_preset() -> None:
         f"{sorted(TTS_CI_PRESETS)}"
     )
     for model in rotation:
-        assert f"run-{model}" in script, f"missing opt-in label for {model}"
+        # A bare substring check is not enough: the label name also appears in
+        # the conflict error text, so deleting the selection branch entirely
+        # would still pass.
+        assert f"RUN_{model.upper()}_LABEL" in script, f"no label env for {model}"
+        assert f'selection_reason="run-{model}_label"' in script, (
+            f"no selection branch for {model}"
+        )
+        assert model in script.partition("case ")[2].partition(")")[0], (
+            f"dispatch override does not accept {model}"
+        )
 
 
 def test_single_instance_models_skip_the_mps_stage() -> None:
@@ -45,9 +54,12 @@ def test_single_instance_models_skip_the_mps_stage() -> None:
     assert 'resolved_config=""' in script, "no single-instance branch in preflight"
 
     mps = _workflow(TTS_WORKFLOW)["jobs"]["stage-5-mps"]
+    condition = mps["if"]
     assert (
-        "inputs.tts_mps_config != ''" in mps["if"]
+        "inputs.tts_mps_config != ''" in condition
     ), "stage 5 must be conditional on an MPS config being resolved"
+    # A trailing `|| true` keeps the substring while making the guard inert.
+    assert "||" not in condition, f"stage 5 condition is bypassable: {condition}"
 
 
 def test_qwen3tts_enters_observing_not_gating() -> None:
@@ -55,8 +67,11 @@ def test_qwen3tts_enters_observing_not_gating() -> None:
     _, preset = select_tts_ci_preset("qwen3tts")
     assert preset.model.model_path == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     assert preset.model.gate_thresholds is False
-    assert not preset.thresholds.non_stream_speed
-    assert not preset.thresholds.stream_speed
+    assert preset.thresholds.calibrated is False
+    # The tables carry seeds in the calibratable symbol shape, not empties: an
+    # empty table is invisible to the threshold calibration.
+    assert preset.thresholds.non_stream_speed
+    assert preset.thresholds.stream_speed
     # The tuned operating point, not the shipped defaults, is what CI measures.
     assert "--max-running-requests 64" in preset.model.worker_extra_args
     assert "--isolate-stage vocoder" in preset.model.worker_extra_args
@@ -101,3 +116,38 @@ def test_every_registered_model_is_reachable_from_every_entry_point() -> None:
         f"calibration presets {sorted(presets)} do not match CI presets "
         f"{sorted(TTS_CI_PRESETS)}"
     )
+
+
+def test_seed_thresholds_are_never_used_as_gates() -> None:
+    """Uncalibrated numbers must not be able to fail somebody else's build."""
+    for name, preset in TTS_CI_PRESETS.items():
+        if preset.model.gate_thresholds:
+            assert preset.thresholds.calibrated, (
+                f"{name} gates on thresholds that are still seeds; calibrate "
+                "before enabling gate_thresholds"
+            )
+
+
+def test_calibration_filters_can_claim_the_presets_constants() -> None:
+    """A filter matching nothing leaves a model silently uncalibratable."""
+    import re
+
+    import yaml as _yaml
+
+    config = _yaml.safe_load(
+        (
+            REPO_ROOT / ".claude/skills/tune-ci-thresholds/models/tts/config.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    source = (REPO_ROOT / "tests/test_model/tts_ci_config.py").read_text(
+        encoding="utf-8"
+    )
+    constants = set(
+        re.findall(r"^_?([A-Z][A-Z0-9_]+)\s*[:=]", source, re.MULTILINE)
+    )
+    presets = config["metric_sources"]["test_tts_ci.py"]["calibration_presets"]
+    for name, preset in presets.items():
+        pattern = re.compile(preset["constant_filter"])
+        assert [c for c in constants if pattern.match(c)], (
+            f"calibration filter for {name} claims no constant in tts_ci_config"
+        )

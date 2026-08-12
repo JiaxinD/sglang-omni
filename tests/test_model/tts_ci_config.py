@@ -29,6 +29,11 @@ class TtsCiThresholdPreset:
     stream_wer_corpus: float
     similarity_mean_min: float
     utmos_mean_min: float
+    # False while the values are seeds rather than worst-of-N observations from
+    # the CI runner. A seed can be an order of magnitude off for a topology it
+    # was not measured on, so gating on one fails builds for no reason or waves
+    # regressions through; the contract test refuses that combination.
+    calibrated: bool = True
 
 
 @dataclass(frozen=True)
@@ -116,21 +121,46 @@ MOSS_VC_STREAM_THRESHOLDS = apply_slack(
 # MPS-DP2 pool on peak throughput and holds a several-fold better first-audio
 # latency, so colocation is no longer the recommended topology for it.
 #
-# Note: (Jiaxin Deng) the model enters CI observing rather than gating. Numeric
-# thresholds only mean something once they come from a calibration run on the CI
-# runner itself, and a preset carrying invented numbers would either wave every
-# regression through or fail every run. `gate_thresholds=False` still exercises
-# the whole path (bring-up, streaming, consistency, WER reporting), so a crash or
-# a broken stream fails the stage; the numbers get filled from the calibration
-# stage and gating flips on in the follow-up.
-QWEN3_TTS_VC_WER_CORPUS_THRESHOLD = apply_wer_slack(0.0112)
-QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(0.0112)
-QWEN3_TTS_VC_SIMILARITY_MEAN_MIN = 0.0
-QWEN3_TTS_VC_UTMOS_MEAN_MIN = 0.0
+# Note: (Jiaxin Deng) the model enters CI observing rather than gating: these
+# seeds come from a single-instance H100 benchmark, not from a calibration run
+# on the CI runner, so they are not fit to fail a build yet. They are written in
+# the same symbol shape the other presets use because that shape is what the
+# threshold calibration discovers and rewrites; an empty table or an inlined
+# literal is invisible to it, which would leave the model permanently
+# uncalibratable. Gating flips on with the calibrated values.
+QWEN3_TTS_VC_WER_MAX_CORPUS = 0.0112
+QWEN3_TTS_VC_WER_CORPUS_THRESHOLD = apply_wer_slack(QWEN3_TTS_VC_WER_MAX_CORPUS)
+QWEN3_TTS_VC_STREAM_WER_MAX_CORPUS = 0.0112
+QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(
+    QWEN3_TTS_VC_STREAM_WER_MAX_CORPUS
+)
+QWEN3_TTS_VC_SIMILARITY_MEAN_MIN = 60.0
+QWEN3_TTS_VC_UTMOS_MEAN_REFERENCE = 3.9
+QWEN3_TTS_VC_UTMOS_MEAN_MIN = apply_mos_slack(QWEN3_TTS_VC_UTMOS_MEAN_REFERENCE)
 
-# Placeholders: replaced by the calibration run before gating is enabled.
-QWEN3_TTS_VC_NON_STREAM_THRESHOLDS: dict[int, dict[str, float]] = {}
-QWEN3_TTS_VC_STREAM_THRESHOLDS: dict[int, dict[str, float]] = {}
+_QWEN3_TTS_VC_NON_STREAM_P95 = {
+    16: {
+        "throughput_qps": 11.309,
+        "output_tok_per_req_s": 0.0,
+        "latency_mean_s": 2.021,
+        "rtf_mean": 0.3905,
+    }
+}
+
+_QWEN3_TTS_VC_STREAM_P95 = {
+    16: {
+        "throughput_qps": 11.309,
+        "latency_mean_s": 2.021,
+        "rtf_mean": 0.3905,
+    }
+}
+
+QWEN3_TTS_VC_NON_STREAM_THRESHOLDS = apply_slack(
+    _QWEN3_TTS_VC_NON_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
+)
+QWEN3_TTS_VC_STREAM_THRESHOLDS = apply_slack(
+    _QWEN3_TTS_VC_STREAM_P95, THRESHOLD_SLACK_HIGHER, THRESHOLD_SLACK_LOWER
+)
 
 
 TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
@@ -174,6 +204,7 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
             stream_wer_corpus=QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD,
             similarity_mean_min=QWEN3_TTS_VC_SIMILARITY_MEAN_MIN,
             utmos_mean_min=QWEN3_TTS_VC_UTMOS_MEAN_MIN,
+            calibrated=False,
         ),
     ),
     "moss": TtsCiPreset(
