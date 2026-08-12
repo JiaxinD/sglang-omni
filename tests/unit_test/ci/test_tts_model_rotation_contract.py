@@ -40,12 +40,12 @@ def test_rotation_offers_every_registered_preset() -> None:
         # the conflict error text, so deleting the selection branch entirely
         # would still pass.
         assert f"RUN_{model.upper()}_LABEL" in script, f"no label env for {model}"
-        assert f'selection_reason="run-{model}_label"' in script, (
-            f"no selection branch for {model}"
-        )
-        assert model in script.partition("case ")[2].partition(")")[0], (
-            f"dispatch override does not accept {model}"
-        )
+        assert (
+            f'selection_reason="run-{model}_label"' in script
+        ), f"no selection branch for {model}"
+        assert (
+            model in script.partition("case ")[2].partition(")")[0]
+        ), f"dispatch override does not accept {model}"
 
 
 def test_single_instance_models_skip_the_mps_stage() -> None:
@@ -142,12 +142,10 @@ def test_calibration_filters_can_claim_the_presets_constants() -> None:
     source = (REPO_ROOT / "tests/test_model/tts_ci_config.py").read_text(
         encoding="utf-8"
     )
-    constants = set(
-        re.findall(r"^_?([A-Z][A-Z0-9_]+)\s*[:=]", source, re.MULTILINE)
-    )
+    constants = set(re.findall(r"^_?([A-Z][A-Z0-9_]+)\s*[:=]", source, re.MULTILINE))
     presets = config["metric_sources"]["test_tts_ci.py"]["calibration_presets"]
     for name, preset in presets.items():
         pattern = re.compile(preset["constant_filter"])
-        assert [c for c in constants if pattern.match(c)], (
-            f"calibration filter for {name} claims no constant in tts_ci_config"
-        )
+        assert [
+            c for c in constants if pattern.match(c)
+        ], f"calibration filter for {name} claims no constant in tts_ci_config"
