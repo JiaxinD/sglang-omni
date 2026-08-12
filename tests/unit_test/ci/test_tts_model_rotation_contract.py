@@ -60,3 +60,44 @@ def test_qwen3tts_enters_observing_not_gating() -> None:
     # The tuned operating point, not the shipped defaults, is what CI measures.
     assert "--max-running-requests 64" in preset.model.worker_extra_args
     assert "--isolate-stage vocoder" in preset.model.worker_extra_args
+
+
+def test_every_registered_model_is_reachable_from_every_entry_point() -> None:
+    """Registration is only complete when all three entry points agree.
+
+    A model registered in the presets but missing from the slash-command map or
+    the calibration config is selectable by CI yet impossible to request or
+    calibrate, which is exactly how a model ends up with stale thresholds.
+    """
+    import ast
+
+    import yaml as _yaml
+
+    # Parsed rather than imported: the handler pulls in the GitHub SDK, which
+    # only exists on the CI runner.
+    handler = ast.parse(
+        (REPO_ROOT / "scripts/ci/utils/slash_command_handler.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    labels = next(
+        ast.literal_eval(node.value)
+        for node in handler.body
+        if isinstance(node, ast.Assign)
+        and getattr(node.targets[0], "id", "") == "TTS_MODEL_LABELS"
+    )
+    assert set(labels) == set(TTS_CI_PRESETS), (
+        f"slash-command targets {sorted(labels)} do not match presets "
+        f"{sorted(TTS_CI_PRESETS)}"
+    )
+
+    calibration = _yaml.safe_load(
+        (
+            REPO_ROOT / ".claude/skills/tune-ci-thresholds/models/tts/config.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    presets = calibration["metric_sources"]["test_tts_ci.py"]["calibration_presets"]
+    assert set(presets) == set(TTS_CI_PRESETS), (
+        f"calibration presets {sorted(presets)} do not match CI presets "
+        f"{sorted(TTS_CI_PRESETS)}"
+    )
