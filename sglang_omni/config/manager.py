@@ -4,7 +4,12 @@ from typing import Any
 import yaml
 from transformers import AutoConfig
 
+from sglang_omni.config.compat import (
+    patches_from_dotted_cli,
+    patches_from_stage_overrides,
+)
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.shadow import compare_with_resolver
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.utils import (
     architecture_from_hf_config,
@@ -79,6 +84,7 @@ class ConfigManager:
         """
         Merge the configuration and the extra arguments.
         """
+        raw_extra_args = dict(extra_args)
         extra_args = self._convert_types(extra_args)
         config_data = self.config.model_dump()
         config_cls = type(self.config)
@@ -101,6 +107,15 @@ class ConfigManager:
 
         # validate the configuration
         merged_config = config_cls(**cfg_copy)
+
+        # The resolver runs on the same inputs and its result is only compared,
+        # never used. See sglang_omni/config/shadow.py.
+        compare_with_resolver(
+            baseline=self.config,
+            expected=merged_config,
+            build_patches=lambda: patches_from_dotted_cli(raw_extra_args, self.config),
+            context="dotted CLI arguments",
+        )
         return merged_config
 
     @staticmethod
@@ -183,7 +198,15 @@ def _apply_stage_overrides(
             runtime_override,
         )
 
-    return type(config)(**config_data)
+    overridden = type(config)(**config_data)
+
+    compare_with_resolver(
+        baseline=config,
+        expected=overridden,
+        build_patches=lambda: patches_from_stage_overrides(stage_overrides, config),
+        context="the stage_overrides block",
+    )
+    return overridden
 
 
 def _deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
