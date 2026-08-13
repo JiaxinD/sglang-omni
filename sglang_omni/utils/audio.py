@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import io
 import functools
+import io
 import math
 import os
 from collections.abc import Mapping
