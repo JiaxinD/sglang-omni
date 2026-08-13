@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+import functools
+
 import numpy as np
 import torch
 from sglang.srt.multimodal.customized_mm_processor_utils import (
@@ -90,8 +92,6 @@ class FunAsrNanoFeatureExtractor(SequenceFeatureExtractor):
         (hamming window, energy_floor=0, dither=0, snip_edges=True).
         Returns ``(fbank, T_mel)`` where ``fbank`` is ``[T_mel, n_mels]``.
         """
-        import torchaudio.compliance.kaldi as kaldi
-
         wav = np.asarray(waveform, dtype=np.float32)
         if wav.ndim != 1:
             wav = wav.reshape(-1)
@@ -101,16 +101,13 @@ class FunAsrNanoFeatureExtractor(SequenceFeatureExtractor):
         wav_t = torch.from_numpy(wav).unsqueeze(0) * (1 << 15)
         # Cap frame_length for very short audio (funasr WavFrontend does this).
         frame_length = min(self.frame_length, wav.shape[0] / self.sampling_rate * 1000)
-        mat = kaldi.fbank(
+        mat = _fbank_with_cached_banks(
             wav_t,
             num_mel_bins=self.n_mels,
             frame_length=frame_length,
             frame_shift=self.frame_shift,
-            dither=0.0,
-            energy_floor=0.0,
             window_type=self.window,
             sample_frequency=self.sampling_rate,
-            snip_edges=True,
         )  # [T_mel, n_mels]
         return mat, mat.shape[0]
 
@@ -215,6 +212,83 @@ class FunAsrNanoFeatureExtractor(SequenceFeatureExtractor):
 # ---------------------------------------------------------------------------
 # Processor — feature extractor + tokenizer + placeholder expansion.
 # ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=16)
+def _cached_mel_banks(
+    num_mel_bins: int,
+    padded_window_size: int,
+    sample_frequency: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Mel filterbank padded to the rfft bin count, cached across requests.
+
+    Note (Jiaxin Deng): torchaudio rebuilds this table inside every
+    ``kaldi.fbank`` call; under load it is about a fifth of this process's CPU.
+    """
+    import torchaudio.compliance.kaldi as kaldi
+
+    banks, _ = kaldi.get_mel_banks(
+        num_mel_bins,
+        padded_window_size,
+        sample_frequency,
+        20.0,
+        0.0,
+        100.0,
+        -500.0,
+        1.0,
+    )
+    banks = banks.to(device=device, dtype=dtype)
+    return torch.nn.functional.pad(banks, (0, 1), mode="constant", value=0)
+
+
+def _fbank_with_cached_banks(
+    waveform: torch.Tensor,
+    *,
+    num_mel_bins: int,
+    frame_length: float,
+    frame_shift: float,
+    window_type: str,
+    sample_frequency: float,
+) -> torch.Tensor:
+    """``kaldi.fbank`` for Fun-ASR's fixed options, with the mel table cached.
+
+    Note (Jiaxin Deng): bit-identity with ``kaldi.fbank`` under these options
+    is asserted in tests; options Fun-ASR never varies are inlined so the
+    cached table can be keyed by the few that do.
+    """
+    import torchaudio.compliance.kaldi as kaldi
+
+    device, dtype = waveform.device, waveform.dtype
+    (
+        wav,
+        window_shift,
+        window_size,
+        padded_window_size,
+    ) = kaldi._get_waveform_and_window_properties(
+        waveform, 0, sample_frequency, frame_shift, frame_length, True, 0.97
+    )
+    strided_input, _ = kaldi._get_window(
+        wav,
+        padded_window_size,
+        window_size,
+        window_shift,
+        window_type,
+        0.42,
+        True,
+        True,
+        0.0,
+        0.0,
+        True,
+        0.97,
+    )
+    spectrum = torch.fft.rfft(strided_input).abs().pow(2.0)
+    banks = _cached_mel_banks(
+        num_mel_bins, padded_window_size, sample_frequency, device, dtype
+    )
+    mel_energies = torch.mm(spectrum, banks.T)
+    return torch.max(mel_energies, kaldi._get_epsilon(device, dtype)).log()
 
 
 class FunAsrNanoProcessor:
