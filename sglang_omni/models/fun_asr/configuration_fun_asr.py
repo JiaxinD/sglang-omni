@@ -254,9 +254,8 @@ def _fbank_with_cached_banks(
 ) -> torch.Tensor:
     """``kaldi.fbank`` for Fun-ASR's fixed options, with the mel table cached.
 
-    Note (Jiaxin Deng): bit-identity with ``kaldi.fbank`` under these options
-    is asserted in tests; options Fun-ASR never varies are inlined so the
-    cached table can be keyed by the few that do.
+    Note (Jiaxin Deng): the options Fun-ASR never varies are inlined so the
+    table can be keyed by the few that do; bit-identity is asserted in tests.
     """
     import torchaudio.compliance.kaldi as kaldi
 

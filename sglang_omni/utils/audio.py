@@ -134,9 +134,8 @@ def _resample_kernel(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, int]:
-    # Note (Jiaxin Deng): the sinc kernel depends only on the rate pair, the
-    # options and the tensor type; torchaudio rebuilds it per call, which
-    # shows as ~15% of the ASR serving process under load.
+    # Note (Jiaxin Deng): torchaudio rebuilds this per call even though it
+    # depends only on the rate pair, the options and the tensor type.
     return torchaudio.functional.functional._get_sinc_resample_kernel(
         orig_freq,
         new_freq,
