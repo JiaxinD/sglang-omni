@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
+
 from sglang_omni.config.patch import (
     ConfigPatch,
     ConfigPatchSet,
@@ -25,6 +27,7 @@ __all__ = [
     "canonicalize_dotted_key",
     "patches_from_dotted_cli",
     "patches_from_stage_overrides",
+    "sources_from_config_file",
 ]
 
 _INDEX_DEPRECATION = "positional stage indices are deprecated; address stages by name"
@@ -119,6 +122,36 @@ def patches_from_stage_overrides(
             )
 
     return patchset
+
+
+def sources_from_config_file(
+    file_path: str,
+) -> tuple[PipelineConfig, ConfigPatchSet]:
+    """Split a V1 config file into the config it declares and its overrides.
+
+    ``ConfigManager.from_file`` folds ``stage_overrides`` into the config it
+    returns, which is what launching needs and the opposite of what explaining
+    needs: by the time the caller holds the config, the block that set a value
+    has already been absorbed into it. Keeping the two apart is what lets
+    ``sgl-omni config explain`` name the file as a source.
+    """
+    # Local import: the registry pulls in model packages, several of which
+    # import this module's callers.
+    from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+
+    with open(file_path, "r") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file {file_path!r} must contain a mapping")
+
+    data = dict(data)
+    stage_overrides = data.pop("stage_overrides", {})
+    config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(data["config_cls"])
+    config = config_cls(**data)
+    patches = patches_from_stage_overrides(
+        stage_overrides, config, origin=str(file_path)
+    )
+    return config, patches
 
 
 def _flatten(
