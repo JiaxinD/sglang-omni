@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-import os
-from contextlib import contextmanager
 from enum import Enum
-from typing import Annotated, Any, Iterator, NamedTuple
+from typing import Annotated, Any, NamedTuple, Optional
 
 import typer
 import yaml
@@ -19,7 +17,6 @@ from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, ResolvedConfig, diff_configs
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.shadow import SHADOW_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -95,34 +92,13 @@ class ResolveOutput(str, Enum):
     provenance = "provenance"
 
 
-@contextmanager
-def _shadow_disabled() -> Iterator[None]:
-    """Silence the in-process shadow comparison for the duration of a call.
-
-    These commands run the V1 chain themselves and report the comparison as
-    output. Letting ``ConfigManager`` log it as well would say the same thing
-    twice, in a less useful form.
-    """
-    previous = os.environ.get(SHADOW_ENV)
-    os.environ[SHADOW_ENV] = "0"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(SHADOW_ENV, None)
-        else:
-            os.environ[SHADOW_ENV] = previous
-
-
 class Resolution(NamedTuple):
-    """Everything these commands need to both answer and check themselves."""
+    """Everything these commands need to answer a question about a launch."""
 
     baseline: PipelineConfig
     """The config before any source was applied, for `--show diff`."""
 
     resolved: ResolvedConfig
-    v1_config: PipelineConfig
-    """What the still-authoritative V1 merge chain produced from the same input."""
 
 
 def _resolve_sources(
@@ -132,60 +108,50 @@ def _resolve_sources(
     text_only: bool,
     argv: list[str],
 ) -> Resolution:
-    """Build the configuration ``sgl-omni serve`` would build, twice.
+    """Build the configuration ``sgl-omni serve`` would build from this input.
 
-    Once through the resolver, which carries provenance, and once through the
-    V1 merge chain, which is still what a launch actually uses. Returning both
-    is what lets these commands state whether the answer they print is the
-    answer the server would compute, rather than asking the reader to trust it.
+    Not a re-implementation of the launch path: ``ConfigManager.merge_config``
+    resolves the very same patch set through the very same resolver. The only
+    difference is that a launch throws the provenance away and this keeps it,
+    which is what lets these commands answer *which source set this value*.
     """
     if config_file is None and model_path is None:
         raise typer.BadParameter("--model-path is required unless --config is set")
 
-    # Every V1 call is made with the in-process shadow comparison off: this
-    # command performs that comparison itself and prints the result.
-    with _shadow_disabled():
-        if config_file:
-            baseline, patches = sources_from_config_file(config_file)
-            manager = ConfigManager.from_file(config_file)
-        else:
-            manager = ConfigManager.from_model_path(
-                str(model_path), variant="text" if text_only else None
-            )
-            baseline, patches = manager.config, ConfigPatchSet()
-        extra_args = manager.parse_extra_args(list(argv))
-        v1_config = manager.merge_config(extra_args)
+    if config_file:
+        baseline, patches = sources_from_config_file(config_file)
+    else:
+        manager = ConfigManager.from_model_path(
+            str(model_path), variant="text" if text_only else None
+        )
+        baseline, patches = manager.config, ConfigPatchSet()
 
+    extra_args = ConfigManager(baseline).parse_extra_args(list(argv))
     patches = patches.merge(
         patches_from_dotted_cli(extra_args, baseline, origin="command line")
     )
-    return Resolution(baseline, ConfigResolver(baseline).resolve(patches), v1_config)
+    return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
 
 
 def _report_sources(resolution: Resolution) -> None:
-    """Write deprecation notices and the V1 comparison to stderr.
+    """Write the deprecation notices to stderr.
 
     stderr, so that ``config resolve > pipeline.yaml`` yields a usable file.
+    Deduplicated on path and text: a broadcast alias produces one patch per
+    stage, and printing the same sentence once per stage teaches people to skim
+    past it.
     """
+    seen: set[tuple[str, str]] = set()
     for patch in resolution.resolved.patches.deprecations():
+        notice = (patch.key, patch.deprecated)
+        if notice in seen:
+            continue
+        seen.add(notice)
         typer.secho(
             f"deprecated: {patch.key} <- {patch.source.describe()}: {patch.deprecated}",
             err=True,
             fg=typer.colors.YELLOW,
         )
-
-    differences = diff_configs(resolution.v1_config, resolution.resolved.config)
-    if not differences:
-        return
-    typer.secho(
-        f"warning: the resolver and the V1 merge chain disagree on "
-        f"{len(differences)} field(s). The V1 result is what a launch would "
-        f"use; this is a bug in the resolver, please report it.",
-        err=True,
-        fg=typer.colors.RED,
-    )
-    for difference in differences:
-        typer.secho(f"  {difference.render()}", err=True, fg=typer.colors.RED)
 
 
 @config_app.command(
@@ -251,16 +217,24 @@ def resolve(
 )
 def explain(
     ctx: typer.Context,
-    path: Annotated[
-        str | None,
-        typer.Argument(
-            help=(
-                "Canonical config path, e.g. stages.thinker.runtime.max_seq_len. "
-                "Omit to list every path a source touched. Pass it before any "
-                "dotted override so it is not mistaken for one."
-            )
+    # Declared in the pre-``Annotated`` style, and spelled ``Optional[str]``
+    # rather than ``str | None``, on purpose. This file is compiled with
+    # ``from __future__ import annotations``, and typer 0.9 -- the floor this
+    # project supports -- resolves those string annotations without
+    # ``include_extras``, so an ``Annotated[..., typer.Argument()]`` marker is
+    # dropped and the parameter silently becomes ``--path``; the positional then
+    # falls through to ``ctx.args`` and is parsed as half a dotted override.
+    # The options below survive that only because a default of ``None`` makes
+    # ``get_type_hints`` rewrite them into ``Optional[str]`` anyway, which this
+    # parameter -- defaulting to an ``ArgumentInfo`` -- does not get.
+    path: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "Canonical config path, e.g. stages.thinker.runtime.max_seq_len. "
+            "Omit to list every path a source touched. Pass it before any "
+            "dotted override so it is not mistaken for one."
         ),
-    ] = None,
+    ),
     model_path: Annotated[str | None, typer.Option(help=_MODEL_PATH_HELP)] = None,
     config: Annotated[str | None, typer.Option(help=_CONFIG_HELP)] = None,
     text_only: Annotated[

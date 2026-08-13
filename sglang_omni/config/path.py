@@ -77,18 +77,30 @@ class PathVisibility(str, Enum):
     DEPRECATED = "deprecated"
 
 
+_NONE_SENTINEL = "none"
+"""Textual spelling that clears a field, inherited from the V1 dotted CLI."""
+
+
 # Ordered specific -> general; the first matching pattern wins. ``*`` matches
 # exactly one segment, ``**`` matches zero or more trailing segments.
+#
+# Nothing here is refused outright. Every path the V1 chain let a user write
+# stays writable (see :meth:`ConfigPath.is_writable`); paths we want to stop
+# advertising are marked DEPRECATED, which keeps them out of ``is_public()``,
+# out of path suggestions and out of ``iter_schema_paths`` while still carrying
+# a reason that surfaces as a warning.
 _VISIBILITY_RULES: tuple[tuple[str, PathVisibility, str], ...] = (
     (
         "config_cls",
-        PathVisibility.DERIVED,
-        "derived from the config class name in PipelineConfig.model_post_init",
+        PathVisibility.DEPRECATED,
+        "derived from the config class name in PipelineConfig.model_post_init; "
+        "setting it by hand has no effect on which class is used",
     ),
     (
         "stages.*.name",
-        PathVisibility.IDENTITY,
-        "a stage name is its address; rename the stage in the document instead",
+        PathVisibility.DEPRECATED,
+        "a stage name is its address: renaming it from the command line leaves "
+        "every other patch pointing at the old name. Rename it in the document",
     ),
     (
         "stages.*.factory_args.**",
@@ -98,7 +110,7 @@ _VISIBILITY_RULES: tuple[tuple[str, PathVisibility, str], ...] = (
     ),
     (
         "stages.*.runtime_arg_map.**",
-        PathVisibility.INTERNAL,
+        PathVisibility.DEPRECATED,
         "runtime_arg_map is wiring owned by the model config author",
     ),
     (
@@ -275,10 +287,20 @@ class ConfigPath:
     def coerce(self, value: Any) -> Any:
         """Convert a raw (usually textual) value into this path's declared type."""
         annotation = self.value_type
-        if annotation is Any or annotation is None:
-            return coerce_scalar_text(value)
         if not isinstance(value, str):
             return value
+        # ``none`` is a sentinel, not a string, and has been one since the first
+        # dotted-CLI implementation (``ConfigManager._convert_scalar``). It has
+        # to be honoured before the type adapter runs: pydantic's smart union
+        # mode is happy to satisfy ``str | None`` with the *string* ``"none"``,
+        # which would silently store the word where the user meant to clear the
+        # field. Applied whatever the declared type is, exactly as V1 did -- on
+        # a field that cannot be None the assignment then fails validation,
+        # which is also what V1 produced.
+        if value.lower() == _NONE_SENTINEL:
+            return None
+        if annotation is Any or annotation is None:
+            return coerce_scalar_text(value)
         try:
             return TypeAdapter(annotation).validate_python(value)
         except Exception:
@@ -410,7 +432,15 @@ def _unwrap_optional(annotation: Any) -> Any:
 
 
 def _is_model(annotation: Any) -> bool:
-    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    # ``get_origin`` guards the ``issubclass`` call: on Python 3.10 a subscripted
+    # generic such as ``list[StageConfig]`` *is* an instance of ``type``, so
+    # ``issubclass`` receives a non-class and raises ``TypeError``. 3.11 changed
+    # that, which is why the omission is invisible on a newer interpreter.
+    return (
+        isinstance(annotation, type)
+        and get_origin(annotation) is None
+        and issubclass(annotation, BaseModel)
+    )
 
 
 def _named_collection_item(annotation: Any) -> type[BaseModel] | None:
@@ -449,7 +479,9 @@ def _is_traversable(annotation: Any) -> bool:
 
 
 def _type_name(annotation: Any) -> str:
-    if isinstance(annotation, type):
+    # Same 3.10 caveat as _is_model: ``list[int]`` passes ``isinstance(_, type)``
+    # there and would render as a bare ``list``, losing its parameter.
+    if isinstance(annotation, type) and get_origin(annotation) is None:
         return annotation.__name__
     return str(annotation).replace("typing.", "")
 
@@ -564,7 +596,7 @@ def coerce_scalar_text(value: Any) -> Any:
         return True
     if lowered == "false":
         return False
-    if lowered == "none":
+    if lowered == _NONE_SENTINEL:
         return None
 
     try:

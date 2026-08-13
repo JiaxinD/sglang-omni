@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from sglang_omni.config.path import (
+    _VISIBILITY_RULES,
     ConfigPath,
     ConfigPathError,
     PathVisibility,
@@ -88,16 +89,46 @@ class TestVisibility:
             (MEM_FRACTION, PathVisibility.PUBLIC),
             ("stages.thinker.factory_args", PathVisibility.DEPRECATED),
             ("stages.thinker.factory_args.lookahead", PathVisibility.DEPRECATED),
-            ("stages.thinker.runtime_arg_map.max_seq_len", PathVisibility.INTERNAL),
-            ("stages.thinker.name", PathVisibility.IDENTITY),
-            ("config_cls", PathVisibility.DERIVED),
+            ("stages.thinker.runtime_arg_map.max_seq_len", PathVisibility.DEPRECATED),
+            ("stages.thinker.name", PathVisibility.DEPRECATED),
+            ("config_cls", PathVisibility.DEPRECATED),
             ("runtime_overrides.thinker", PathVisibility.DEPRECATED),
         ],
     )
     def test_classification(self, raw, expected):
         assert ConfigPath.parse(raw).visibility is expected
 
-    def test_require_writable_explains_why(self):
+    def test_nothing_the_v1_chain_allowed_is_refused(self):
+        """The rule table warns; it does not take away a working spelling.
+
+        Every path the table names was writable through the V1 dotted CLI.
+        Classifying one as INTERNAL/DERIVED/IDENTITY would refuse a
+        configuration that launches today, which a deprecation period exists to
+        avoid — so a new rule of that kind needs a version boundary, not just
+        an entry here.
+        """
+        refused = [
+            (pattern, visibility.value)
+            for pattern, visibility, _ in _VISIBILITY_RULES
+            if visibility not in (PathVisibility.PUBLIC, PathVisibility.DEPRECATED)
+        ]
+        assert not refused, f"these paths would stop working: {refused}"
+
+    def test_require_writable_explains_why(self, monkeypatch):
+        """The refusal path still works, for classifications we do apply later.
+
+        No shipped rule is INTERNAL today — the ones that were became
+        deprecations instead — so the mechanism is exercised against an
+        injected rule rather than by finding a path that happens to be refused.
+        """
+        rules = (
+            (
+                "stages.*.runtime_arg_map.**",
+                PathVisibility.INTERNAL,
+                "runtime_arg_map is wiring owned by the model config author",
+            ),
+        )
+        monkeypatch.setattr("sglang_omni.config.path._VISIBILITY_RULES", rules)
         path = ConfigPath.parse("stages.thinker.runtime_arg_map.max_seq_len")
         assert not path.is_writable()
         with pytest.raises(ConfigPathError, match="owned by the model config author"):
@@ -110,6 +141,9 @@ class TestVisibility:
         "raw",
         [
             "stages.thinker.factory_args.lookahead",
+            "stages.thinker.runtime_arg_map.max_seq_len",
+            "stages.thinker.name",
+            "config_cls",
             "runtime_overrides.thinker",
         ],
     )

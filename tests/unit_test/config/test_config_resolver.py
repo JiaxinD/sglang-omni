@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the resolver, including V1/V2 parity.
 
-The parity tests are the load-bearing ones: while the resolver runs in shadow
-mode it must produce byte-identical configurations to the V1 merge chain for
-every syntax the V1 chain supports.
+The parity tests are the load-bearing ones: the resolver is now what a launch
+runs, so for every syntax the V1 merge chain supported it must produce the
+configuration that chain produced. The exhaustive, generated version of that
+argument lives in ``test_v1_parity.py``; the cases here are the hand-written
+ones worth reading.
 """
 
 from __future__ import annotations

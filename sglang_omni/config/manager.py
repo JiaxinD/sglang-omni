@@ -1,4 +1,3 @@
-from copy import deepcopy
 from typing import Any
 
 import yaml
@@ -8,8 +7,9 @@ from sglang_omni.config.compat import (
     patches_from_dotted_cli,
     patches_from_stage_overrides,
 )
+from sglang_omni.config.deprecation import warn_deprecations
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.shadow import compare_with_resolver
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.utils import (
     architecture_from_hf_config,
@@ -74,49 +74,20 @@ class ConfigManager:
             raise ValueError(f"Missing value for argument: {cur_key}")
         return extra_args
 
-    def _convert_types(self, extra_args: dict[str, Any]) -> dict[str, Any]:
-        """
-        Convert the configuration to the inferred data types.
-        """
-        return {key: _convert_scalar(value) for key, value in extra_args.items()}
-
     def merge_config(self, extra_args: dict[str, Any]) -> PipelineConfig:
         """
         Merge the configuration and the extra arguments.
+
+        The dotted keys are translated into canonical patches and applied by
+        :class:`~sglang_omni.config.resolver.ConfigResolver`, which is the only
+        code that writes into a configuration. Legacy spellings -- positional
+        stage indices, paths the schema would rather people stopped using --
+        are accepted and reported, never silently dropped.
         """
-        raw_extra_args = dict(extra_args)
-        extra_args = self._convert_types(extra_args)
-        config_data = self.config.model_dump()
-        config_cls = type(self.config)
-
-        cfg_copy = deepcopy(config_data)
-        for key, value in extra_args.items():
-            current = cfg_copy
-            keys = key.split(".")
-            for k in keys[:-1]:
-                current = _resolve_child(current, k)
-
-            # update the value
-            last_key = keys[-1]
-            if isinstance(current, list):
-                current[_resolve_list_index(current, last_key)] = value
-            else:
-                current[last_key] = value
-
-        _sync_stage_parallelism_aliases(cfg_copy, set(extra_args))
-
-        # validate the configuration
-        merged_config = config_cls(**cfg_copy)
-
-        # The resolver runs on the same inputs and its result is only compared,
-        # never used. See sglang_omni/config/shadow.py.
-        compare_with_resolver(
-            baseline=self.config,
-            expected=merged_config,
-            build_patches=lambda: patches_from_dotted_cli(raw_extra_args, self.config),
-            context="dotted CLI arguments",
-        )
-        return merged_config
+        patches = patches_from_dotted_cli(extra_args, self.config)
+        resolved = ConfigResolver(self.config).resolve(patches)
+        warn_deprecations(patches, context="command line")
+        return resolved.config
 
     @staticmethod
     def from_model_path(model_path: str, variant: str | None = None) -> "ConfigManager":
@@ -163,140 +134,14 @@ def _apply_stage_overrides(
     config: PipelineConfig,
     stage_overrides: dict[str, Any],
 ) -> PipelineConfig:
-    """Apply compact file-level runtime overrides by stage name."""
+    """Apply compact file-level runtime overrides by stage name.
 
-    if not isinstance(stage_overrides, dict):
-        raise ValueError(
-            "stage_overrides must be a mapping from stage name to overrides"
-        )
-
-    config_data = config.model_dump()
-    stages = config_data["stages"]
-    stage_by_name = {stage["name"]: stage for stage in stages}
-
-    for stage_name, override in stage_overrides.items():
-        if stage_name not in stage_by_name:
-            raise ValueError(f"stage_overrides references unknown stage {stage_name!r}")
-        if not isinstance(override, dict):
-            raise ValueError(f"stage_overrides.{stage_name} must be a mapping")
-
-        unsupported = sorted(set(override) - {"runtime"})
-        if unsupported:
-            raise ValueError(
-                f"stage_overrides.{stage_name} supports only runtime overrides; "
-                f"got unsupported keys {unsupported}"
-            )
-
-        if "runtime" not in override:
-            continue
-        runtime_override = override["runtime"]
-        if not isinstance(runtime_override, dict):
-            raise ValueError(f"stage_overrides.{stage_name}.runtime must be a mapping")
-        stage = stage_by_name[stage_name]
-        stage["runtime"] = _deep_merge_dict(
-            stage.get("runtime", {}),
-            runtime_override,
-        )
-
-    overridden = type(config)(**config_data)
-
-    compare_with_resolver(
-        baseline=config,
-        expected=overridden,
-        build_patches=lambda: patches_from_stage_overrides(stage_overrides, config),
-        context="the stage_overrides block",
-    )
-    return overridden
-
-
-def _deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    merged = deepcopy(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dict(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-
-def _sync_stage_parallelism_aliases(
-    config_data: dict[str, Any],
-    override_keys: set[str],
-) -> None:
-    """Keep StageConfig.tp_size and parallelism.tp coherent for dotted CLI args."""
-    stages = config_data.get("stages")
-    if not isinstance(stages, list):
-        return
-
-    for index, stage in enumerate(stages):
-        if not isinstance(stage, dict):
-            continue
-        stage_keys = (str(index), stage["name"])
-        has_tp_size_override = any(
-            f"stages.{key}.tp_size" in override_keys for key in stage_keys
-        )
-        has_parallelism_override = any(
-            f"stages.{key}.parallelism.tp" in override_keys for key in stage_keys
-        )
-        if has_tp_size_override == has_parallelism_override:
-            continue
-
-        if has_tp_size_override:
-            parallelism = dict(stage.get("parallelism") or {})
-            parallelism["tp"] = stage["tp_size"]
-            stage["parallelism"] = parallelism
-        else:
-            stage["tp_size"] = stage["parallelism"]["tp"]
-
-
-def _resolve_list_index(items: list[Any], key: str) -> int:
-    """Resolve a dotted-path segment to a list index.
-
-    Supports numeric indices (e.g. ``stages.4.tp_size``) as well as stage names
-    (e.g. ``stages.thinker.runtime``) when the list contains mappings with a
-    ``name`` field.
+    ``from_file`` folds the block into the configuration it returns, so callers
+    that already hold a ``ConfigManager`` see one settled config rather than a
+    config plus a pile of pending overrides. The validation messages are part
+    of that block's documented contract and live in ``compat.py``.
     """
-    if key.isdigit():
-        return int(key)
-
-    for index, item in enumerate(items):
-        if isinstance(item, dict) and item.get("name") == key:
-            return index
-
-    available = [
-        item["name"] for item in items if isinstance(item, dict) and "name" in item
-    ]
-    raise KeyError(
-        f"Could not resolve list element {key!r}; expected an integer index "
-        f"or one of the named entries {available}"
-    )
-
-
-def _resolve_child(current: Any, key: str) -> Any:
-    """Traverse one segment of a dotted config path."""
-    if isinstance(current, list):
-        return current[_resolve_list_index(current, key)]
-    return current[key]
-
-
-def _convert_scalar(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-
-    lowered = value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if lowered == "none":
-        return None
-
-    try:
-        return int(value)
-    except ValueError:
-        pass
-
-    try:
-        return float(value)
-    except ValueError:
-        return value
+    patches = patches_from_stage_overrides(stage_overrides, config)
+    resolved = ConfigResolver(config).resolve(patches)
+    warn_deprecations(patches, context="the stage_overrides block")
+    return resolved.config

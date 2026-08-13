@@ -47,9 +47,15 @@ class TestConstruction:
         with pytest.raises(ConfigPathError):
             patch("stages.thinker.runtime.nope", 1, CLI_SET)
 
-    def test_internal_path_is_refused(self):
-        with pytest.raises(ConfigPathError, match="internal"):
-            patch("stages.thinker.runtime_arg_map.max_seq_len", "x", CLI_SET)
+    def test_wiring_path_is_accepted_with_a_notice(self):
+        """``runtime_arg_map`` is the model author's wiring, but V1 let it through.
+
+        It is deprecated rather than refused: a config that sets it launches
+        today, and taking that away is a breaking change, not a cleanup.
+        """
+        created = patch("stages.thinker.runtime_arg_map.max_seq_len", "x", CLI_SET)
+        assert created.value == "x"
+        assert "owned by the model config author" in created.deprecated
 
     def test_deprecated_path_is_accepted_and_carries_its_notice(self):
         """Shipped models expose knobs under factory_args; warn, do not refuse."""

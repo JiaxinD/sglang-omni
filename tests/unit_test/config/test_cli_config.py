@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for ``sgl-omni config resolve`` and ``sgl-omni config explain``.
 
-These commands exist to answer two questions the V1 chain cannot: *what
+These commands exist to answer two questions a launch cannot: *what
 configuration would this launch actually use*, and *which source set this
 value*. Both answers are only worth printing if they match what the server
-would compute, so the tests here check the printed result against the V1 merge
-chain rather than against another run of the new core.
+would compute, so the tests check the printed result against
+``ConfigManager`` -- the same entry point ``sgl-omni serve`` calls -- rather
+than against the command's own internals.
 
 The fixtures drive the commands through ``--config`` rather than
 ``--model-path``: resolving a model path reads the model's own config from
@@ -43,7 +44,16 @@ def output_of(result) -> str:
 
 @pytest.fixture
 def runner() -> CliRunner:
-    return CliRunner()
+    """A runner whose ``result.stdout`` is stdout alone.
+
+    click < 8.2 folds stderr into stdout unless asked not to, which would make
+    the redirect test pass a document with a deprecation notice in the middle
+    of it. click >= 8.2 always separates the two and dropped the argument.
+    """
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:  # pragma: no cover - version dependent
+        return CliRunner()
 
 
 @pytest.fixture
@@ -79,7 +89,7 @@ def plain_config_file(tmp_path, base_config):
 
 
 class TestResolve:
-    def test_prints_the_config_the_v1_chain_would_use(self, runner, config_file):
+    def test_prints_the_config_a_launch_would_use(self, runner, config_file):
         """The whole point: this is what `serve` with these arguments builds."""
         result = runner.invoke(config_app, ["resolve", "--config", str(config_file)])
 

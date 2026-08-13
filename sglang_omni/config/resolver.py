@@ -159,7 +159,7 @@ def _sync_aliases(data: dict[str, Any], written: set[str]) -> None:
 
 
 # ----------------------------------------------------------------------
-# shadow-mode comparison
+# config comparison
 # ----------------------------------------------------------------------
 
 
@@ -179,8 +179,10 @@ def diff_configs(
 ) -> list[ConfigDifference]:
     """Compare two configs field by field, addressing stages by name.
 
-    Used while the resolver runs in shadow mode: the V1 chain stays
-    authoritative and any divergence is reported instead of taking effect.
+    Two readers: ``sgl-omni config resolve --show diff``, which reports what
+    the sources changed about the model's own defaults, and the V1 parity gate
+    in ``tests/unit_test/config/test_v1_parity.py``, which requires this to
+    come back empty for every probe the frozen V1 oracle also accepted.
     """
     return _diff(_as_dump(expected), _as_dump(actual), "")
 
