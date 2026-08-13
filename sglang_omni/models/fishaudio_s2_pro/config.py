@@ -42,7 +42,7 @@ class S2ProPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) AR loop and vocoder are serial dispatch loops.
+        # Note (Jiaxin Deng): AR loop and vocoder are serial dispatch loops.
         # Applied only under --cpu-allocator.
         return {
             "tts_engine": {"host_class": "serial-loop", "exclusive_cores": 1},

@@ -412,7 +412,7 @@ def _register_health(app: FastAPI) -> None:
 def _register_host_contention(app: FastAPI) -> None:
     from sglang_omni.cpu_alloc.host_metrics import HostCpuContentionMonitor
 
-    # Note: (Jiaxin Deng) daemon thread for the process lifetime; this
+    # Note (Jiaxin Deng): daemon thread for the process lifetime; this
     # FastAPI build has no shutdown hooks, stop() is for tests and embedders.
     monitor = HostCpuContentionMonitor()
     app.state.host_contention_monitor = monitor

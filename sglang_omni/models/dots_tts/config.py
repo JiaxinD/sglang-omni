@@ -25,7 +25,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) latent engine and vocoder are serial dispatch
+        # Note (Jiaxin Deng): latent engine and vocoder are serial dispatch
         # loops. Applied only under --cpu-allocator.
         return {
             "latent_engine": {"host_class": "serial-loop", "exclusive_cores": 1},

@@ -27,7 +27,7 @@ class FunASRPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) ~4.2 cores of host orchestration at saturation
+        # Note (Jiaxin Deng): ~4.2 cores of host orchestration at saturation
         # (pre-LM encoder service + scheduler). Applied only under --cpu-allocator.
         return {"asr": {"host_class": "serial-loop", "exclusive_cores": 5}}
 

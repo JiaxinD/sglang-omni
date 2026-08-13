@@ -37,7 +37,7 @@ class WhisperASRPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) host-orchestration-bound like the other ASR
+        # Note (Jiaxin Deng): host-orchestration-bound like the other ASR
         # pipelines. Applied only under --cpu-allocator.
         return {"asr": {"host_class": "serial-loop", "exclusive_cores": 4}}
 

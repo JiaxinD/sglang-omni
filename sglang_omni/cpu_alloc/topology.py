@@ -173,7 +173,7 @@ def _nvidia_smi_pci_query() -> dict[int, str]:
 
 
 def _sysfs_pci_address(bus_id: str) -> str:
-    # Note: (Jiaxin Deng) nvidia-smi reports "00000000:0F:00.0"; sysfs wants "0000:0f:00.0".
+    # Note (Jiaxin Deng): nvidia-smi reports "00000000:0F:00.0"; sysfs wants "0000:0f:00.0".
     text = bus_id.strip().lower()
     if len(text.split(":")[0]) == 8:
         text = text[4:]

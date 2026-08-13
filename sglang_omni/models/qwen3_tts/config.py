@@ -57,7 +57,7 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) the code-predictor chain keeps the engine loop
+        # Note (Jiaxin Deng): the code-predictor chain keeps the engine loop
         # host-heavier than other TTS AR loops. Applied only under --cpu-allocator.
         return {
             "tts_engine": {"host_class": "serial-loop", "exclusive_cores": 2},

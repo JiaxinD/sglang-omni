@@ -31,7 +31,7 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
 
     @classmethod
     def stage_cpu_costs(cls) -> dict[str, dict]:
-        # Note: (Jiaxin Deng) host orchestration measures ~3.4 cores at c32
+        # Note (Jiaxin Deng): host orchestration measures ~3.4 cores at c32
         # saturation. Applied only under --cpu-allocator.
         return {"asr": {"host_class": "serial-loop", "exclusive_cores": 4}}
 
