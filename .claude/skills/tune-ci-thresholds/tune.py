@@ -2707,6 +2707,11 @@ def _load_yaml(path, top_is_dict=False):
             if ind(ln) < need: return r
             key, _, rest = ln.strip().partition(":")
             key, rest = key.strip(), rest.strip()
+            # Note: (Jiaxin Deng) quoted keys such as "0,1" in
+            # gpu_group_cpusets must lose their quotes like values do, or
+            # lane resolution parses '"0' as an int and dies.
+            if len(key) >= 2 and key[0] == '"' and key[-1] == '"':
+                key = key[1:-1]
             idx[0] += 1
             if rest: r[key] = sc(rest); continue
             if idx[0] < len(lines) and lines[idx[0]].lstrip().startswith("- "):
