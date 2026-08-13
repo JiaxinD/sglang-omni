@@ -1,15 +1,13 @@
+from collections.abc import Sequence
 from typing import Any
 
-import yaml
 from transformers import AutoConfig
 
-from sglang_omni.config.compat import (
-    patches_from_dotted_cli,
-    patches_from_stage_overrides,
-)
+from sglang_omni.config.compat import patches_from_dotted_cli, sources_from_config_file
 from sglang_omni.config.deprecation import warn_deprecations
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.sources import patches_from_set_cli
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.utils import (
     architecture_from_hf_config,
@@ -74,17 +72,27 @@ class ConfigManager:
             raise ValueError(f"Missing value for argument: {cur_key}")
         return extra_args
 
-    def merge_config(self, extra_args: dict[str, Any]) -> PipelineConfig:
-        """
-        Merge the configuration and the extra arguments.
+    def merge_config(
+        self,
+        extra_args: dict[str, Any],
+        *,
+        set_values: Sequence[str] = (),
+    ) -> PipelineConfig:
+        """Merge the configuration and the extra arguments.
 
-        The dotted keys are translated into canonical patches and applied by
+        The dotted keys and any ``--set PATH=VALUE`` arguments are translated
+        into canonical patches and applied by
         :class:`~sglang_omni.config.resolver.ConfigResolver`, which is the only
         code that writes into a configuration. Legacy spellings -- positional
         stage indices, paths the schema would rather people stopped using --
         are accepted and reported, never silently dropped.
+
+        The two spellings are resolved together, in one patch set, so that
+        writing the same path with both is refused rather than settled by the
+        order these translations happen to run in.
         """
         patches = patches_from_dotted_cli(extra_args, self.config)
+        patches = patches.merge(patches_from_set_cli(set_values, self.config))
         resolved = ConfigResolver(self.config).resolve(patches)
         warn_deprecations(patches, context="command line")
         return resolved.config
@@ -113,35 +121,16 @@ class ConfigManager:
     def from_file(file_path: str) -> "ConfigManager":
         """
         Load the configuration from the file path.
+
+        The file's override blocks -- ``stage_overrides`` and ``set:`` -- are
+        folded into the configuration that comes back, so callers holding a
+        ``ConfigManager`` see one settled config rather than a config plus a
+        pile of pending overrides. ``sgl-omni config explain`` wants the
+        opposite and calls ``sources_from_config_file`` directly.
         """
-        with open(file_path, "r") as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            raise ValueError(f"Config file {file_path!r} must contain a mapping")
-
-        data = dict(data)
-        has_stage_overrides = "stage_overrides" in data
-        stage_overrides = data.pop("stage_overrides", {})
-        config_cls_str = data["config_cls"]
-        config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(config_cls_str)
-        config = config_cls(**data)
-        if has_stage_overrides:
-            config = _apply_stage_overrides(config, stage_overrides)
-        return ConfigManager(config)
-
-
-def _apply_stage_overrides(
-    config: PipelineConfig,
-    stage_overrides: dict[str, Any],
-) -> PipelineConfig:
-    """Apply compact file-level runtime overrides by stage name.
-
-    ``from_file`` folds the block into the configuration it returns, so callers
-    that already hold a ``ConfigManager`` see one settled config rather than a
-    config plus a pile of pending overrides. The validation messages are part
-    of that block's documented contract and live in ``compat.py``.
-    """
-    patches = patches_from_stage_overrides(stage_overrides, config)
-    resolved = ConfigResolver(config).resolve(patches)
-    warn_deprecations(patches, context="the stage_overrides block")
-    return resolved.config
+        config, patches = sources_from_config_file(file_path)
+        if not patches:
+            return ConfigManager(config)
+        resolved = ConfigResolver(config).resolve(patches)
+        warn_deprecations(patches, context=str(file_path))
+        return ConfigManager(resolved.config)

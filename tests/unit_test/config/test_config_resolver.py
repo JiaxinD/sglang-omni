@@ -17,7 +17,7 @@ from sglang_omni.config.compat import (
     patches_from_dotted_cli,
     patches_from_stage_overrides,
 )
-from sglang_omni.config.manager import ConfigManager, _apply_stage_overrides
+from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.patch import (
     ConfigPatch,
     ConfigPatchSet,
@@ -26,6 +26,7 @@ from sglang_omni.config.patch import (
 )
 from sglang_omni.config.resolver import ConfigResolver, diff_configs
 from sglang_omni.config.schema import PipelineConfig
+from tests.unit_test.config.v1_oracle import v1_apply_stage_overrides
 
 MEM_FRACTION = "stages.thinker.runtime.sglang_server_args.mem_fraction_static"
 
@@ -250,7 +251,7 @@ class TestParityWithV1:
             },
             "preprocessing": {"runtime": {"video_fps": 2.0}},
         }
-        v1 = _apply_stage_overrides(pipeline_config, overrides)
+        v1 = v1_apply_stage_overrides(pipeline_config, overrides)
         v2 = (
             ConfigResolver(pipeline_config)
             .resolve(patches_from_stage_overrides(overrides, pipeline_config))

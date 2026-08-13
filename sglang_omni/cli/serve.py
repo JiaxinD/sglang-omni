@@ -12,6 +12,7 @@ from sglang_omni.config import (
     apply_stage_process_overrides,
 )
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.path import ConfigPathError
 from sglang_omni.preprocessing.resource_connector import (
     resolve_allowed_local_media_path,
 )
@@ -1039,6 +1040,18 @@ def serve(
     config: Annotated[
         str | None, typer.Option(help="Path to a pipeline config file.")
     ] = None,
+    set_values: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            metavar="PATH=VALUE",
+            help=(
+                "Set one configuration path, e.g. "
+                "--set stages.thinker.runtime.max_seq_len=8192. Repeat the flag "
+                "to set several. Stages are addressed by name."
+            ),
+        ),
+    ] = None,
     text_only: Annotated[
         bool,
         typer.Option(
@@ -1466,7 +1479,15 @@ def serve(
     # we use ctx to capture the arguments that are used to modify the configuration on the fly
     # we do expect the extra arguments to be pairs of names and values
     extra_args = config_manager.parse_extra_args(ctx.args)
-    merged_config = config_manager.merge_config(extra_args)
+    try:
+        merged_config = config_manager.merge_config(
+            extra_args, set_values=set_values or []
+        )
+    except ConfigPathError as exc:
+        # Unknown path, unwritable path, or two sources disagreeing at one
+        # precedence. Every one of these carries a message written to be read;
+        # a traceback would bury it under the merge internals.
+        raise typer.BadParameter(str(exc)) from exc
     if model_path is not None:
         merged_config = merged_config.model_copy(update={"model_path": model_path})
     if colocate:

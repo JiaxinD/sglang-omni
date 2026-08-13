@@ -17,6 +17,7 @@ from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, ResolvedConfig, diff_configs
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.sources import patches_from_set_cli
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,10 @@ config_app = typer.Typer(help="Inspect, resolve and export the pipeline configur
 _MODEL_PATH_HELP = "The Hugging Face model ID or the path to the model directory."
 _CONFIG_HELP = "Path to a pipeline config file, as accepted by `sgl-omni serve`."
 _TEXT_ONLY_HELP = "Use the thinker-only pipeline, as `sgl-omni serve --text-only` does."
+_SET_HELP = (
+    "Set one configuration path, e.g. "
+    "--set stages.thinker.runtime.max_seq_len=8192. Repeat to set several."
+)
 
 
 def _dump_yaml(data: Any) -> str:
@@ -107,6 +112,7 @@ def _resolve_sources(
     config_file: str | None,
     text_only: bool,
     argv: list[str],
+    set_values: list[str] | None = None,
 ) -> Resolution:
     """Build the configuration ``sgl-omni serve`` would build from this input.
 
@@ -127,10 +133,18 @@ def _resolve_sources(
         baseline, patches = manager.config, ConfigPatchSet()
 
     extra_args = ConfigManager(baseline).parse_extra_args(list(argv))
-    patches = patches.merge(
-        patches_from_dotted_cli(extra_args, baseline, origin="command line")
-    )
-    return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
+    try:
+        patches = patches.merge(
+            patches_from_dotted_cli(extra_args, baseline, origin="command line")
+        )
+        patches = patches.merge(patches_from_set_cli(set_values or [], baseline))
+        return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
+    except (ConfigPathError, ValueError) as exc:
+        # An unknown path, a path the schema will not let a user write, two
+        # sources disagreeing at one precedence, a malformed ``--set``: all of
+        # these are things the user typed, and all of them carry a message
+        # written to be read. A traceback would bury it.
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _report_sources(resolution: Resolution) -> None:
@@ -164,6 +178,10 @@ def resolve(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
+    set_values: Annotated[
+        Optional[list[str]],
+        typer.Option("--set", metavar="PATH=VALUE", help=_SET_HELP),
+    ] = None,
     show: Annotated[
         ResolveOutput,
         typer.Option(
@@ -187,6 +205,7 @@ def resolve(
         config_file=config,
         text_only=text_only,
         argv=ctx.args,
+        set_values=set_values,
     )
     _report_sources(resolution)
     provenance = resolution.resolved.provenance
@@ -240,6 +259,10 @@ def explain(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
+    set_values: Annotated[
+        Optional[list[str]],
+        typer.Option("--set", metavar="PATH=VALUE", help=_SET_HELP),
+    ] = None,
 ) -> None:
     """Say where one configuration value came from, and what it overrode.
 
@@ -251,6 +274,7 @@ def explain(
         config_file=config,
         text_only=text_only,
         argv=ctx.args,
+        set_values=set_values,
     )
     _report_sources(resolution)
     provenance = resolution.resolved.provenance

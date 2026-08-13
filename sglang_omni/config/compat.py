@@ -22,6 +22,7 @@ from sglang_omni.config.patch import (
 )
 from sglang_omni.config.path import ConfigPath
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.sources import SET_BLOCK_KEY, patches_from_set_block
 
 __all__ = [
     "canonicalize_dotted_key",
@@ -127,13 +128,18 @@ def patches_from_stage_overrides(
 def sources_from_config_file(
     file_path: str,
 ) -> tuple[PipelineConfig, ConfigPatchSet]:
-    """Split a V1 config file into the config it declares and its overrides.
+    """Split a config file into the config it declares and its overrides.
 
-    ``ConfigManager.from_file`` folds ``stage_overrides`` into the config it
+    ``ConfigManager.from_file`` folds the override blocks into the config it
     returns, which is what launching needs and the opposite of what explaining
     needs: by the time the caller holds the config, the block that set a value
     has already been absorbed into it. Keeping the two apart is what lets
     ``sgl-omni config explain`` name the file as a source.
+
+    Both blocks come back in one patch set rather than one per block, so that
+    ``set:`` and ``stage_overrides`` writing the same path is caught as the
+    conflict it is instead of being settled by whichever block is applied
+    second.
     """
     # Local import: the registry pulls in model packages, several of which
     # import this module's callers.
@@ -146,11 +152,16 @@ def sources_from_config_file(
 
     data = dict(data)
     stage_overrides = data.pop("stage_overrides", {})
+    set_block = data.pop(SET_BLOCK_KEY, None)
     config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(data["config_cls"])
     config = config_cls(**data)
     patches = patches_from_stage_overrides(
         stage_overrides, config, origin=str(file_path)
     )
+    if set_block is not None:
+        patches = patches.merge(
+            patches_from_set_block(set_block, config, origin=str(file_path))
+        )
     return config, patches
 
 

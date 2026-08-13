@@ -261,3 +261,80 @@ class TestExplain:
             f"stages.{stage}.{FRACTION} = 0.55  <- yaml stage overrides"
             in result.stdout
         )
+
+
+class TestSet:
+    """``--set`` on these commands, so a launch can be rehearsed as written."""
+
+    def test_it_is_applied_and_named_as_the_source(
+        self, runner, plain_config_file, stage
+    ):
+        result = runner.invoke(
+            config_app,
+            [
+                "explain",
+                f"stages.{stage}.{FRACTION}",
+                "--config",
+                str(plain_config_file),
+                "--set",
+                f"stages.{stage}.{FRACTION}=0.35",
+            ],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        assert "0.35" in result.stdout
+        assert "cli set" in result.stdout
+
+    def test_it_resolves_to_what_serve_would_build(
+        self, runner, plain_config_file, stage
+    ):
+        argument = f"stages.{stage}.{FRACTION}=0.35"
+        result = runner.invoke(
+            config_app,
+            ["resolve", "--config", str(plain_config_file), "--set", argument],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        manager = ConfigManager.from_file(str(plain_config_file))
+        expected = manager.merge_config({}, set_values=[argument])
+        assert yaml.safe_load(result.stdout) == expected.model_dump(mode="json")
+
+    def test_a_path_written_twice_is_refused_without_a_traceback(
+        self, runner, plain_config_file, stage
+    ):
+        """The refusal is only useful if the user can read it."""
+        result = runner.invoke(
+            config_app,
+            [
+                "resolve",
+                "--config",
+                str(plain_config_file),
+                "--set",
+                f"stages.{stage}.tp_size=8",
+                f"--stages.{stage}.tp_size",
+                "4",
+            ],
+        )
+
+        assert result.exit_code != 0
+        output = output_of(result)
+        assert "is set twice at the same precedence" in output
+        assert "Pick one." in output
+        assert "Traceback" not in output
+
+    def test_a_malformed_assignment_says_what_the_shape_is(
+        self, runner, plain_config_file, stage
+    ):
+        result = runner.invoke(
+            config_app,
+            [
+                "resolve",
+                "--config",
+                str(plain_config_file),
+                "--set",
+                f"stages.{stage}.tp_size",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "PATH=VALUE" in output_of(result)

@@ -282,19 +282,27 @@ class ConfigPatchSet:
         return out
 
     def require_no_conflicts(self) -> None:
+        """Refuse a path two equally-ranked sources disagree about.
+
+        Deliberately an error rather than a rule. Nothing about
+        ``--stages.thinker.tp_size 4 --set stages.thinker.tp_size=8`` says which
+        one the user meant, and any tie-break this code invented -- argument
+        order, flag length, alphabetical -- would be a rule people had to learn
+        in order to predict what their own command line does.
+        """
         conflicts = self.conflicts()
         if not conflicts:
             return
-        lines = [
-            f"  {first.path.raw}: {first.value!r} from {first.source.describe()} "
-            f"vs {second.value!r} from {second.source.describe()}"
+        blocks = [
+            f"{first.path.raw} is set twice at the same precedence "
+            f"({first.layer.name.lower()} layer, "
+            f"{first.specificity.name.lower()}):\n"
+            f"  {first.value!r}  <- {first.source.describe()}\n"
+            f"  {second.value!r}  <- {second.source.describe()}\n"
+            f"Pick one."
             for first, second in conflicts
         ]
-        raise DuplicatePatchError(
-            "Conflicting configuration values at the same precedence:\n"
-            + "\n".join(lines),
-            raw=conflicts[0][0].path.raw,
-        )
+        raise DuplicatePatchError("\n\n".join(blocks), raw=conflicts[0][0].path.raw)
 
     def deprecations(self) -> list[ConfigPatch]:
         return [patch for patch in self.patches if patch.deprecated]
