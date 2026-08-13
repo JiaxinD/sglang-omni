@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -45,7 +46,9 @@ class _DummyManager:
     def parse_extra_args(self, _args) -> dict[str, object]:
         return {}
 
-    def merge_config(self, _extra_args: dict[str, object]) -> PipelineConfig:
+    def merge_config(
+        self, _extra_args: dict[str, object], *, set_values: Sequence[str] = ()
+    ) -> PipelineConfig:
         return self.config
 
 
