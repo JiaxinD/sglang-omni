@@ -137,10 +137,8 @@ class TestBuildPipelineCpuPlan:
     def test_replicated_process_stays_in_shared_pool(
         self, dual_node_sysfs, as_property
     ):
-        # Merge-order guard for whole-process replicas: an exclusive grant
-        # computed once would be inherited by every replica, so replicated
-        # groups keep today's shared-pool behavior until per-replica
-        # planning lands.
+        # One grant per logical group would be inherited by every replica and
+        # stop being exclusive, so replicated groups keep today's behavior.
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
         config = make_config(
             ["tts_engine", "vocoder"],
