@@ -1081,10 +1081,10 @@ def serve(
         typer.Option(
             "--cpu-allocator",
             help=(
-                "CPU affinity planning for stage processes: 'off' (default), "
-                "'static' (pin once at startup from the NUMA/SMT-aware plan), "
-                "or 'dynamic' (static plus lending idle exclusive cores to "
-                "the shared pool). No-op for models without stage_cpu_costs()."
+                "CPU affinity planning for stage processes: 'off' (default) "
+                "or 'static', which pins every stage process once at startup "
+                "from the topology-aware plan. No-op for models without "
+                "stage_cpu_costs()."
             ),
         ),
     ] = None,
@@ -1502,10 +1502,9 @@ def serve(
         stage_processes=stage_process,
     )
     if cpu_allocator is not None:
-        if cpu_allocator not in ("off", "static", "dynamic"):
+        if cpu_allocator not in ("off", "static"):
             raise typer.BadParameter(
-                f"--cpu-allocator must be off, static, or dynamic, "
-                f"got {cpu_allocator!r}"
+                f"--cpu-allocator must be off or static, got {cpu_allocator!r}"
             )
         merged_config.placement.cpu_allocator = cpu_allocator
     merged_config = apply_cuda_graph_cli_overrides(

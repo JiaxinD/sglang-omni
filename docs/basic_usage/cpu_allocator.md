@@ -17,8 +17,7 @@ Modes:
 | mode | behavior |
 | --- | --- |
 | `off` (default) | No affinity change; identical to today. |
-| `static` | Plan once at startup from the NUMA/SMT topology and pin every stage process. |
-| `dynamic` | `static`, plus idle exclusive cores are lent to the shared pool and reclaimed with hysteresis. |
+| `static` | Plan once at startup from the CPU topology and pin every stage process. |
 
 At startup the allocator discovers the CPU/NUMA/SMT topology, grants whole
 physical cores (both SMT siblings together) exclusively to declared serial

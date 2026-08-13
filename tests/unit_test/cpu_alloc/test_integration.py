@@ -26,13 +26,14 @@ class TestPlacementConfigField:
     def test_default_off(self):
         assert PlacementConfig().cpu_allocator == "off"
 
-    @pytest.mark.parametrize("mode", ["off", "static", "dynamic"])
+    @pytest.mark.parametrize("mode", ["off", "static"])
     def test_valid_modes(self, mode):
         assert PlacementConfig(cpu_allocator=mode).cpu_allocator == mode
 
-    def test_invalid_mode_rejected(self):
+    @pytest.mark.parametrize("mode", ["auto", "dynamic"])
+    def test_invalid_mode_rejected(self, mode):
         with pytest.raises(ValidationError):
-            PlacementConfig(cpu_allocator="auto")
+            PlacementConfig(cpu_allocator=mode)
 
 
 def make_group(process_name):
