@@ -123,9 +123,9 @@ metric_sources:
           - "Qwen/Qwen3-ASR-1.7B"
       # Gated as a single instance: the tuned single instance beats the
       # same-card MPS-DP2 pool on this variant, so it has no stage 5 preset.
-      qwen3tts:
+      qwen3-tts:
         extra_env:
-          TTS_CI_MODEL: "qwen3tts"
+          TTS_CI_MODEL: "qwen3-tts"
         gpus: 2
         # discover: only QWEN3_TTS_VC_* constants
         constant_filter: "^QWEN3_TTS_VC_"

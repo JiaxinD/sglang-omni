@@ -10,7 +10,7 @@ PERMISSIONS_FILE_PATH = ".github/CI_PERMISSIONS.json"
 TTS_MODEL_LABELS = {
     "higgs": "run-higgs",
     "moss": "run-moss",
-    "qwen3tts": "run-qwen3tts",
+    "qwen3-tts": "run-qwen3-tts",
 }
 ASR_MODEL_LABELS = {
     "fun-asr": "run-fun-asr",

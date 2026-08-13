@@ -181,7 +181,7 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
             utmos_mean_min=HIGGS_VC_UTMOS_MEAN_MIN,
         ),
     ),
-    "qwen3tts": TtsCiPreset(
+    "qwen3-tts": TtsCiPreset(
         model=TtsCiModelPreset(
             model_path="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
             ref_format="references",

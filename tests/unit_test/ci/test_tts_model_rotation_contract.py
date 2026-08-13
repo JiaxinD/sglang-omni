@@ -39,7 +39,8 @@ def test_rotation_offers_every_registered_preset() -> None:
         # A bare substring check is not enough: the label name also appears in
         # the conflict error text, so deleting the selection branch entirely
         # would still pass.
-        assert f"RUN_{model.upper()}_LABEL" in script, f"no label env for {model}"
+        env_name = f"RUN_{model.upper().replace('-', '_')}_LABEL"
+        assert env_name in script, f"no label env for {model}"
         assert (
             f'selection_reason="run-{model}_label"' in script
         ), f"no selection branch for {model}"
@@ -62,9 +63,9 @@ def test_single_instance_models_skip_the_mps_stage() -> None:
     assert "||" not in condition, f"stage 5 condition is bypassable: {condition}"
 
 
-def test_qwen3tts_enters_observing_not_gating() -> None:
+def test_qwen3_tts_enters_observing_not_gating() -> None:
     """Thresholds are only meaningful once calibrated on the CI runner."""
-    _, preset = select_tts_ci_preset("qwen3tts")
+    _, preset = select_tts_ci_preset("qwen3-tts")
     assert preset.model.model_path == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     assert preset.model.gate_thresholds is False
     assert preset.thresholds.calibrated is False
