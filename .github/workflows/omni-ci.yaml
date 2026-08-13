@@ -166,8 +166,8 @@ jobs:
             selection_reason="stable_github_run_id_digest"
           fi
 
-          # Qwen3-TTS is gated as a single instance, so it resolves no MPS
-          # config and the MPS stage is skipped for it.
+          # Note: (Jiaxin Deng) Qwen3-TTS is gated as a single instance, so
+          # it resolves no MPS config and the MPS stage is skipped for it.
           if [[ "${selected_model}" == "higgs" ]]; then
             resolved_config="examples/mps_dp/configs/higgs_h100_dp3.yaml"
             expected_config_cls="HiggsTtsPipelineConfig"

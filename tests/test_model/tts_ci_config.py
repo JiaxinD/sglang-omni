@@ -29,10 +29,10 @@ class TtsCiThresholdPreset:
     stream_wer_corpus: float
     similarity_mean_min: float
     utmos_mean_min: float
-    # False while the values are seeds rather than worst-of-N observations from
-    # the CI runner. A seed can be an order of magnitude off for a topology it
-    # was not measured on, so gating on one fails builds for no reason or waves
-    # regressions through; the contract test refuses that combination.
+    # Note: (Jiaxin Deng) False while the values are seeds rather than
+    # worst-of-N observations from the CI runner. A seed can be far off for a
+    # topology it was not measured on, so gating on one fails builds for no
+    # reason or waves regressions through; a contract test refuses that pair.
     calibrated: bool = True
 
 
@@ -185,9 +185,9 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
         model=TtsCiModelPreset(
             model_path="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
             ref_format="references",
-            # The shipped defaults cap the AR engine at 16 running requests and
-            # colocate every stage in one process; both are what kept this
-            # variant behind, so CI measures the tuned operating point.
+            # Note: (Jiaxin Deng) the shipped defaults cap the AR engine at 16
+            # running requests and colocate every stage in one process; both are
+            # what kept this variant behind, so CI measures the tuned point.
             worker_extra_args=(
                 "--max-running-requests 64 "
                 "--cuda-graph-max-bs 64 "
