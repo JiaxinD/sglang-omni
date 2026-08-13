@@ -89,7 +89,7 @@ def test_cpu_selection_is_rerun_stable_and_conflicts_fail_before_h100() -> None:
     assert 'printf "%s" "${GITHUB_RUN_ID}" | sha256sum' in run
     assert "RUN_HIGGS_LABEL" in selection["env"]
     assert "RUN_MOSS_LABEL" in selection["env"]
-    assert "RUN_QWEN3TTS_LABEL" in selection["env"]
+    assert "RUN_QWEN3_TTS_LABEL" in selection["env"]
     assert "mutually exclusive" in run
     assert "GITHUB_RUN_ATTEMPT" not in run.partition("selection_digest=")[0]
     assert "tts_stage1_topology" not in omni["on"]["workflow_dispatch"]["inputs"]
