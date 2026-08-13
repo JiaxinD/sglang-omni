@@ -121,37 +121,34 @@ MOSS_VC_STREAM_THRESHOLDS = apply_slack(
 # MPS-DP2 pool on peak throughput and holds a several-fold better first-audio
 # latency, so colocation is no longer the recommended topology for it.
 #
-# Note: (Jiaxin Deng) the model enters CI observing rather than gating: these
-# seeds come from a single-instance H100 benchmark, not from a calibration run
-# on the CI runner, so they are not fit to fail a build yet. They are written in
-# the same symbol shape the other presets use because that shape is what the
-# threshold calibration discovers and rewrites; an empty table or an inlined
-# literal is invisible to it, which would leave the model permanently
-# uncalibratable. Gating flips on with the calibrated values.
-QWEN3_TTS_VC_WER_MAX_CORPUS = 0.0112
+# Note: (Jiaxin Deng) calibrated on the CI host, lane 0,1 pinned cpuset
+# (2-15,66-79), worst-of-5 clean rounds with destructive rejection
+# (run .tune-runs/20260813T021112Z_tts_qwen3tts_r5). Raw pre-slack references
+# only; the CI slack calculation is unchanged.
+QWEN3_TTS_VC_WER_MAX_CORPUS = 0.011
 QWEN3_TTS_VC_WER_CORPUS_THRESHOLD = apply_wer_slack(QWEN3_TTS_VC_WER_MAX_CORPUS)
-QWEN3_TTS_VC_STREAM_WER_MAX_CORPUS = 0.0112
+QWEN3_TTS_VC_STREAM_WER_MAX_CORPUS = 0.0116
 QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(
     QWEN3_TTS_VC_STREAM_WER_MAX_CORPUS
 )
-QWEN3_TTS_VC_SIMILARITY_MEAN_MIN = 60.0
-QWEN3_TTS_VC_UTMOS_MEAN_REFERENCE = 3.9
+QWEN3_TTS_VC_SIMILARITY_MEAN_MIN = 69.4295639038086
+QWEN3_TTS_VC_UTMOS_MEAN_REFERENCE = 4.195
 QWEN3_TTS_VC_UTMOS_MEAN_MIN = apply_mos_slack(QWEN3_TTS_VC_UTMOS_MEAN_REFERENCE)
 
 _QWEN3_TTS_VC_NON_STREAM_P95 = {
     16: {
-        "throughput_qps": 11.309,
-        "output_tok_per_req_s": 0.0,
-        "latency_mean_s": 2.021,
-        "rtf_mean": 0.3905,
+        "throughput_qps": 17.66,
+        "output_tok_per_req_s": 71.1,
+        "latency_mean_s": 0.901,
+        "rtf_mean": 0.2236,
     }
 }
 
 _QWEN3_TTS_VC_STREAM_P95 = {
     16: {
-        "throughput_qps": 11.309,
-        "latency_mean_s": 2.021,
-        "rtf_mean": 0.3905,
+        "throughput_qps": 15.324,
+        "latency_mean_s": 1.039,
+        "rtf_mean": 0.257,
     }
 }
 
@@ -195,7 +192,7 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
                 "--isolate-stage vocoder"
             ),
             startup_timeout=300,
-            gate_thresholds=False,
+            gate_thresholds=True,
         ),
         thresholds=TtsCiThresholdPreset(
             non_stream_speed=QWEN3_TTS_VC_NON_STREAM_THRESHOLDS,
@@ -204,7 +201,6 @@ TTS_CI_PRESETS: dict[str, TtsCiPreset] = {
             stream_wer_corpus=QWEN3_TTS_VC_STREAM_WER_CORPUS_THRESHOLD,
             similarity_mean_min=QWEN3_TTS_VC_SIMILARITY_MEAN_MIN,
             utmos_mean_min=QWEN3_TTS_VC_UTMOS_MEAN_MIN,
-            calibrated=False,
         ),
     ),
     "moss": TtsCiPreset(

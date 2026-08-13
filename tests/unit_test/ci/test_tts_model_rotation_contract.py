@@ -63,16 +63,16 @@ def test_single_instance_models_skip_the_mps_stage() -> None:
     assert "||" not in condition, f"stage 5 condition is bypassable: {condition}"
 
 
-def test_qwen3_tts_enters_observing_not_gating() -> None:
-    """Thresholds are only meaningful once calibrated on the CI runner."""
+def test_qwen3_tts_gates_on_calibrated_thresholds() -> None:
+    """Gating is only valid because the values came from a calibration run."""
     _, preset = select_tts_ci_preset("qwen3-tts")
     assert preset.model.model_path == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-    assert preset.model.gate_thresholds is False
-    assert preset.thresholds.calibrated is False
-    # The tables carry seeds in the calibratable symbol shape, not empties: an
-    # empty table is invisible to the threshold calibration.
-    assert preset.thresholds.non_stream_speed
-    assert preset.thresholds.stream_speed
+    assert preset.model.gate_thresholds is True
+    assert preset.thresholds.calibrated is True
+    # Calibrated worst-of-N floors (17.66 and 15.324 pre-slack), not the
+    # pre-calibration seed of 11.309.
+    assert preset.thresholds.non_stream_speed[16]["throughput_qps_min"] > 11.309
+    assert preset.thresholds.stream_speed[16]["throughput_qps_min"] > 11.309
     # The tuned operating point, not the shipped defaults, is what CI measures.
     assert "--max-running-requests 64" in preset.model.worker_extra_args
     assert "--isolate-stage vocoder" in preset.model.worker_extra_args
