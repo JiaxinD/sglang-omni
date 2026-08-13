@@ -3739,10 +3739,16 @@ def _wait_pytest_with_watchdog(
     poll_s = _PYTEST_POLL_S
     if cpuset:
         ContentionSampler = _import_contention_sampler()
+        # Note: (Jiaxin Deng) root the own-work tree at the container init,
+        # not the pytest pid: stage supervisors double-fork at launch and
+        # reparent to init, so a pytest-rooted tree counts the run's own
+        # vocoder/preprocessing CPU as foreign and aborts on itself.
+        # /proc/stat core counters are host-global, so genuinely external
+        # intruders on the lane are still caught.
         sampler = ContentionSampler(
             parse_cpuset_spec(cpuset),
             interval_s=_CPUSET_MONITOR_INTERVAL_S,
-            root_pid=pytest_proc.pid,
+            root_pid=1,
         )
         sampler.start()
         poll_s = min(_PYTEST_POLL_S, _CPUSET_MONITOR_INTERVAL_S)
