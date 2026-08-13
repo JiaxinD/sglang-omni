@@ -115,10 +115,14 @@ def allocate(
         raise ValueError("min_shared_physical_cores must be >= 1")
 
     events: list[str] = []
+    # Note (Jiaxin Deng): cores held back for a pool nobody joins are cores
+    # taken from the only process there is, measured as -11% on a
+    # single-process DP replica, so reserve only when a tenant exists.
+    has_shared_tenant = any(not d.exclusive_cores for d in demands)
     node_states = {
         node: _NodeState(
             free_cores=list(topology.cores_on_node(node)),
-            reserved_shared=min_shared_physical_cores,
+            reserved_shared=min_shared_physical_cores if has_shared_tenant else 0,
         )
         for node in topology.numa_nodes
     }
@@ -155,6 +159,20 @@ def allocate(
                 f"{demand.exclusive_cores} core(s) but only {max(budget, 0)} "
                 f"remain; moved to the shared pool"
             )
+
+    # Note (Jiaxin Deng): with no shared tenant the leftover would idle, so
+    # the exclusive holders take the whole node between them.
+    if not has_shared_tenant:
+        for node, state in node_states.items():
+            local = [
+                d
+                for d in exclusive_demands
+                if anchored[d.process_name] == node and granted[d.process_name]
+            ]
+            spare = len(state.free_cores) - sum(granted[d.process_name] for d in local)
+            for i, demand in enumerate(local):
+                extra = spare // len(local) + (1 if i < spare % len(local) else 0)
+                granted[demand.process_name] += extra
 
     assignments: dict[str, ProcessCpuAssignment] = {}
     for demand in exclusive_demands:

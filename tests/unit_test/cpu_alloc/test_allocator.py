@@ -31,7 +31,8 @@ class TestAllocate:
 
     def test_numa_anchoring(self, topology):
         plan = allocate(
-            topology, [demand("a", node=0, serial=1), demand("b", node=1, serial=1)]
+            topology,
+            [demand("a", node=0, serial=1), demand("b", node=1, serial=1), demand("s")],
         )
         assert plan.assignments["a"].cpu_ids == (0, 8)
         assert plan.assignments["b"].cpu_ids == (4, 12)
@@ -65,14 +66,14 @@ class TestAllocate:
         assert any("moved to the shared pool" in e for e in plan.events)
 
     def test_overflow_degrades_and_is_logged(self, topology):
-        # Node 0 fits 3 single-core demands; the rest go to the shared pool.
+        # One core is held for the shared tenant, so 3 of the 5 fit.
         plan = allocate(
             topology,
-            [demand(f"s{i}", serial=1) for i in range(5)],
+            [demand(f"s{i}", serial=1) for i in range(5)] + [demand("shared")],
         )
         exclusive = [n for n, a in plan.assignments.items() if a.exclusive]
         shared = [n for n, a in plan.assignments.items() if not a.exclusive]
-        assert len(exclusive) == 3 and len(shared) == 2
+        assert len(exclusive) == 3 and len(shared) == 3
         assert any("moved to the shared pool" in e for e in plan.events)
 
     def test_exclusive_grants_are_disjoint(self, topology):
@@ -86,9 +87,14 @@ class TestAllocate:
                 assert not (seen & set(assignment.cpu_ids))
                 seen.update(assignment.cpu_ids)
 
-    def test_shared_pool_never_empty(self, topology):
-        plan = allocate(topology, [demand(f"s{i}", serial=1) for i in range(8)])
-        assert plan.shared_pools[0]  # min_shared_physical_cores reserved
+    def test_pool_is_reserved_only_when_a_tenant_exists(self, topology):
+        with_tenant = allocate(topology, [demand("ar", serial=1), demand("frontend")])
+        assert with_tenant.shared_pools[0]
+
+        # Nobody would use the leftover, so the holder takes the whole node.
+        alone = allocate(topology, [demand("ar", serial=1)])
+        assert alone.shared_pools[0] == ()
+        assert len(alone.assignments["ar"].cpu_ids) == 8
 
     def test_deterministic(self, topology):
         demands = [demand("b", serial=1), demand("a", serial=1), demand("z")]
@@ -109,7 +115,7 @@ class TestAllocate:
         assert plan.assignments["cpuonly"].cpu_ids == tuple(range(16))
 
     def test_to_dict_shape(self, topology):
-        plan = allocate(topology, [demand("ar", serial=1)])
+        plan = allocate(topology, [demand("ar", serial=1), demand("frontend")])
         data = plan.to_dict()
         assert data["assignments"]["ar"] == {"cpus": "0,8", "exclusive": True}
         assert "0" in data["shared_pools"] and "None" in data["shared_pools"]
