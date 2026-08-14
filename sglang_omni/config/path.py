@@ -44,7 +44,6 @@ __all__ = [
     "SegmentKind",
     "coerce_scalar_text",
     "iter_schema_paths",
-    "suggest_nearby",
 ]
 
 # Guard against a pathological schema; the real tree is only a few levels deep.
@@ -219,16 +218,6 @@ class ConfigPath:
                 if self.segments[index - 1].raw == "stages":
                     return segment.raw
         return None
-
-    @property
-    def parent(self) -> "ConfigPath | None":
-        if len(self.segments) == 1:
-            return None
-        return ConfigPath(
-            raw=".".join(self.parts[:-1]),
-            root=self.root,
-            segments=self.segments[:-1],
-        )
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.raw
@@ -658,41 +647,3 @@ def iter_schema_paths(
 
     walk(root, (), 0)
     return out
-
-
-def suggest_nearby(
-    raw: str,
-    root: type[BaseModel] = PipelineConfig,
-    *,
-    limit: int = 5,
-) -> tuple[str, ...]:
-    """Return legal paths close to ``raw``, for error messages and CLI hints.
-
-    The comparison happens in generic form (document-defined keys replaced by
-    ``*``) so that ``stages.thinker.runtime.max_seq`` is matched against
-    ``stages.*.runtime.max_seq_len`` and reported back with ``thinker`` kept.
-    """
-    parts = raw.split(".")
-    names: dict[int, str] = {}
-    generic_parts = list(parts)
-    for index, part in enumerate(parts[:-1]):
-        if part == "stages":
-            names[index + 1] = parts[index + 1]
-            generic_parts[index + 1] = "*"
-
-    candidates = iter_schema_paths(root, include_non_public=False)
-    close = (
-        difflib.get_close_matches(
-            ".".join(generic_parts), candidates, n=limit, cutoff=0.4
-        )
-        or candidates[:limit]
-    )
-
-    out: list[str] = []
-    for candidate in close:
-        candidate_parts = candidate.split(".")
-        for index, name in names.items():
-            if index < len(candidate_parts) and candidate_parts[index] == "*":
-                candidate_parts[index] = name
-        out.append(".".join(candidate_parts))
-    return tuple(out)

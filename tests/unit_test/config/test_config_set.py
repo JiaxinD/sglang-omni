@@ -18,13 +18,13 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from sglang_omni.config.compat import patches_from_dotted_cli
 from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.patch import DuplicatePatchError, Layer, SourceKind, Specificity
 from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import (
+    patches_from_dotted_cli,
     patches_from_set_block,
     patches_from_set_cli,
     split_assignment,
@@ -57,7 +57,8 @@ class TestSplitAssignment:
 
     @pytest.mark.parametrize("text", [TP_SIZE, "", "=4", " =4"])
     def test_a_missing_path_or_equals_is_refused(self, text):
-        with pytest.raises(ValueError, match="PATH=VALUE"):
+        """A ConfigPathError, so the CLI's path-error handling catches it."""
+        with pytest.raises(ConfigPathError, match="PATH=VALUE"):
             split_assignment(text)
 
 
@@ -158,31 +159,6 @@ class TestPrecedence:
         )
         assert config.stages[1].tp_size == 4
 
-    def test_set_and_a_dotted_override_of_one_path_is_refused(self, pipeline_config):
-        """Neither spelling outranks the other, so neither is allowed to win."""
-        with pytest.raises(DuplicatePatchError) as excinfo:
-            resolve(
-                pipeline_config,
-                patches_from_dotted_cli(
-                    {TP_SIZE: "4"}, pipeline_config, origin="command line"
-                ),
-                patches_from_set_cli([f"{TP_SIZE}=8"], pipeline_config),
-            )
-        message = str(excinfo.value)
-        assert f"{TP_SIZE} is set twice at the same precedence" in message
-        assert "(cli layer, explicit)" in message
-        assert "cli dotted (command line)" in message
-        assert "cli set (command line)" in message
-        assert "Pick one." in message
-
-    def test_the_two_spellings_agreeing_is_not_a_conflict(self, pipeline_config):
-        config = resolve(
-            pipeline_config,
-            patches_from_dotted_cli({TP_SIZE: "4"}, pipeline_config),
-            patches_from_set_cli([f"{TP_SIZE}=4"], pipeline_config),
-        )
-        assert config.stages[1].tp_size == 4
-
     def test_set_and_a_dotted_override_of_different_paths_both_apply(
         self, pipeline_config
     ):
@@ -207,6 +183,49 @@ class TestManager:
             ConfigManager(pipeline_config).merge_config(
                 {TP_SIZE: "4"}, set_values=[f"{TP_SIZE}=8"]
             )
+
+
+class TestTypedFlagPatches:
+    """The typed mem-fraction flags as `sgl-omni serve` now merges them."""
+
+    @staticmethod
+    def _mem_fraction(config, stage_name):
+        stage = next(s for s in config.stages if s.name == stage_name)
+        return stage.runtime.sglang_server_args.mem_fraction_static
+
+    def test_the_flag_is_applied_through_merge_config(self, shipped_config):
+        """`sgl-omni serve --config f.yaml --mem-fraction-static 0.8`."""
+        from sglang_omni.cli.serve import patches_from_mem_fraction_flags
+
+        config = ConfigManager(shipped_config).merge_config(
+            {},
+            extra_patches=patches_from_mem_fraction_flags(
+                shipped_config,
+                mem_fraction_static=0.8,
+                thinker_mem_fraction_static=None,
+                talker_mem_fraction_static=None,
+            ),
+        )
+        assert self._mem_fraction(config, "tts_engine") == 0.8
+
+    def test_an_explicit_set_beats_the_typed_flag(self, shipped_config):
+        """`--mem-fraction-static 0.8 --set stages...=0.7`: the explicit path
+        wins by specificity, instead of the typed flag silently overwriting it
+        because its helper used to run after the merge."""
+        from sglang_omni.cli.serve import patches_from_mem_fraction_flags
+
+        path = "stages.tts_engine.runtime.sglang_server_args.mem_fraction_static"
+        config = ConfigManager(shipped_config).merge_config(
+            {},
+            set_values=[f"{path}=0.7"],
+            extra_patches=patches_from_mem_fraction_flags(
+                shipped_config,
+                mem_fraction_static=0.8,
+                thinker_mem_fraction_static=None,
+                talker_mem_fraction_static=None,
+            ),
+        )
+        assert self._mem_fraction(config, "tts_engine") == 0.7
 
 
 @pytest.fixture

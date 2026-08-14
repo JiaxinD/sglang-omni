@@ -194,9 +194,6 @@ class ConfigPatch:
         """Precedence key, ignoring insertion order."""
         return (int(self.layer), int(self.specificity), len(self.path.segments))
 
-    def describe(self) -> str:
-        return f"{self.path.raw} = {self.value!r}  <- {self.source.describe()}"
-
 
 class DuplicatePatchError(ConfigPathError):
     """Two equally-ranked patches disagree about the same path."""
@@ -253,13 +250,6 @@ class ConfigPatchSet:
             out[patch.key] = patch
         return out
 
-    def history(self) -> dict[str, list[ConfigPatch]]:
-        """Every patch seen per path, weakest first."""
-        out: dict[str, list[ConfigPatch]] = {}
-        for patch in self.ordered():
-            out.setdefault(patch.key, []).append(patch)
-        return out
-
     # ------------------------------------------------------------------
     # checks
     # ------------------------------------------------------------------
@@ -306,6 +296,3 @@ class ConfigPatchSet:
 
     def deprecations(self) -> list[ConfigPatch]:
         return [patch for patch in self.patches if patch.deprecated]
-
-    def describe(self) -> str:
-        return "\n".join(patch.describe() for patch in self.ordered())

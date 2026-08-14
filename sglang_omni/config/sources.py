@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The canonical way to set a configuration path: ``set:`` and ``--set``.
+"""The canonical user-facing surfaces for setting a configuration path.
 
-Everything in :mod:`sglang_omni.config.compat` exists to translate a *legacy*
-spelling into a canonical path. This module is its counterpart: the two
-surfaces that take a canonical path and nothing else.
-
-In YAML, one flat dotted path per entry::
+Three spellings, one meaning. In YAML, the ``set:`` block -- one flat dotted
+path per entry::
 
     config_cls: MossTTSPipelineConfig
     model_path: OpenMOSS-Team/MOSS-TTS
@@ -21,17 +18,22 @@ nested block would have to be flattened before it could be talked about, and
 the flattening is exactly where ``stage_overrides`` lost track of which line
 set which value.
 
-On the command line the same paths, one per ``--set``::
+On the command line the same paths appear twice over: as dotted flags and as
+``--set`` assignments::
 
     sgl-omni serve --config omni.yaml \\
-        --set stages.tts_engine.runtime.max_seq_len=8192 \\
+        --stages.tts_engine.runtime.max_seq_len 8192 \\
         --set stages.tts_engine.tp_size=2
 
-``--set`` and the older ``--stages.tts_engine.tp_size 2`` form land at the same
-layer *and* the same specificity, so writing one path with both is refused
+``--set`` is the CLI counterpart of the YAML ``set:`` block; the dotted flag is
+the pipeline's native override syntax. Both are first-class, land at the same
+layer *and* the same specificity, and so writing one path with both is refused
 rather than resolved by argument order -- see
-:meth:`ConfigPatchSet.require_no_conflicts`. That is the intended relationship:
-they are two spellings of one thing, and only one of them is the one to teach.
+:meth:`ConfigPatchSet.require_no_conflicts`.
+
+What is *not* here is any legacy spelling: positional stage indices and the
+``stage_overrides`` block live in :mod:`sglang_omni.config.compat`, whose job
+is to translate them into the canonical paths this module deals in.
 """
 
 from __future__ import annotations
@@ -45,10 +47,12 @@ from sglang_omni.config.patch import (
     ConfigSource,
     SourceKind,
 )
+from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.schema import PipelineConfig
 
 __all__ = [
     "SET_BLOCK_KEY",
+    "patches_from_dotted_cli",
     "patches_from_set_block",
     "patches_from_set_cli",
     "split_assignment",
@@ -69,8 +73,45 @@ def split_assignment(text: str) -> tuple[str, str]:
     path, separator, value = text.partition("=")
     path = path.strip()
     if not separator or not path:
-        raise ValueError(f"--set expects PATH=VALUE, got {text!r}; e.g. {_EXAMPLE}")
+        # A ConfigPathError rather than a bare ValueError, so the CLI entry
+        # points that already turn path errors into readable BadParameter
+        # messages catch a malformed assignment the same way.
+        raise ConfigPathError(
+            f"--set expects PATH=VALUE, got {text!r}; e.g. {_EXAMPLE}", raw=text
+        )
     return path, value
+
+
+def patches_from_dotted_cli(
+    extra_args: dict[str, Any],
+    config: PipelineConfig,
+    *,
+    origin: str = "extra CLI args",
+) -> ConfigPatchSet:
+    """Normalize ``--stages.thinker.tp_size 4`` style arguments.
+
+    The dotted flag is canonical syntax; the one legacy spelling it still
+    accepts is a positional stage index (``--stages.1.tp_size``), which the
+    compat layer translates into a name and flags as deprecated.
+    """
+    # Local import: the index translation is compat's job, and compat imports
+    # this module for the ``set:`` helpers, so importing it at module level
+    # would be a cycle.
+    from sglang_omni.config.compat import canonicalize_dotted_key
+
+    patchset = ConfigPatchSet()
+    for key, value in extra_args.items():
+        canonical, deprecation = canonicalize_dotted_key(key, config)
+        patchset.add(
+            ConfigPatch.create(
+                canonical,
+                value,
+                ConfigSource(SourceKind.CLI_DOTTED, origin),
+                root=type(config),
+                deprecated=deprecation,
+            )
+        )
+    return patchset
 
 
 def patches_from_set_cli(

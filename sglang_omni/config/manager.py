@@ -3,11 +3,12 @@ from typing import Any
 
 from transformers import AutoConfig
 
-from sglang_omni.config.compat import patches_from_dotted_cli, sources_from_config_file
+from sglang_omni.config.compat import sources_from_config_file
 from sglang_omni.config.deprecation import warn_deprecations
+from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.sources import patches_from_set_cli
+from sglang_omni.config.sources import patches_from_dotted_cli, patches_from_set_cli
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.utils import (
     architecture_from_hf_config,
@@ -77,6 +78,7 @@ class ConfigManager:
         extra_args: dict[str, Any],
         *,
         set_values: Sequence[str] = (),
+        extra_patches: ConfigPatchSet | None = None,
     ) -> PipelineConfig:
         """Merge the configuration and the extra arguments.
 
@@ -87,12 +89,16 @@ class ConfigManager:
         stage indices, paths the schema would rather people stopped using --
         are accepted and reported, never silently dropped.
 
-        The two spellings are resolved together, in one patch set, so that
-        writing the same path with both is refused rather than settled by the
-        order these translations happen to run in.
+        ``extra_patches`` carries patches a caller has already translated --
+        the typed CLI flags in ``sgl-omni serve``, for instance. Everything is
+        resolved together, in one patch set, so that writing the same path
+        two ways is refused (or settled by declared specificity) rather than
+        by the order the translations happen to run in.
         """
         patches = patches_from_dotted_cli(extra_args, self.config)
         patches = patches.merge(patches_from_set_cli(set_values, self.config))
+        if extra_patches is not None:
+            patches = patches.merge(extra_patches)
         resolved = ConfigResolver(self.config).resolve(patches)
         warn_deprecations(patches, context="command line")
         return resolved.config

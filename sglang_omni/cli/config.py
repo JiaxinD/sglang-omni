@@ -7,17 +7,13 @@ from typing import Annotated, Any, NamedTuple, Optional
 import typer
 import yaml
 
-from sglang_omni.config.compat import (
-    canonicalize_dotted_key,
-    patches_from_dotted_cli,
-    sources_from_config_file,
-)
+from sglang_omni.config.compat import canonicalize_dotted_key, sources_from_config_file
 from sglang_omni.config.manager import ConfigManager, resolve_config_cls_for_model_path
 from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, ResolvedConfig, diff_configs
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.sources import patches_from_set_cli
+from sglang_omni.config.sources import patches_from_dotted_cli, patches_from_set_cli
 
 logger = logging.getLogger(__name__)
 
@@ -124,16 +120,16 @@ def _resolve_sources(
     if config_file is None and model_path is None:
         raise typer.BadParameter("--model-path is required unless --config is set")
 
-    if config_file:
-        baseline, patches = sources_from_config_file(config_file)
-    else:
-        manager = ConfigManager.from_model_path(
-            str(model_path), variant="text" if text_only else None
-        )
-        baseline, patches = manager.config, ConfigPatchSet()
-
-    extra_args = ConfigManager(baseline).parse_extra_args(list(argv))
     try:
+        if config_file:
+            baseline, patches = sources_from_config_file(config_file)
+        else:
+            manager = ConfigManager.from_model_path(
+                str(model_path), variant="text" if text_only else None
+            )
+            baseline, patches = manager.config, ConfigPatchSet()
+
+        extra_args = ConfigManager(baseline).parse_extra_args(list(argv))
         patches = patches.merge(
             patches_from_dotted_cli(extra_args, baseline, origin="command line")
         )
@@ -141,9 +137,10 @@ def _resolve_sources(
         return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
     except (ConfigPathError, ValueError) as exc:
         # An unknown path, a path the schema will not let a user write, two
-        # sources disagreeing at one precedence, a malformed ``--set``: all of
-        # these are things the user typed, and all of them carry a message
-        # written to be read. A traceback would bury it.
+        # sources disagreeing at one precedence, a malformed ``--set`` or
+        # dotted argument, a config file that does not parse: all of these are
+        # things the user typed, and all of them carry a message written to be
+        # read. A traceback would bury it.
         raise typer.BadParameter(str(exc)) from exc
 
 
@@ -289,14 +286,14 @@ def explain(
             print(f"{touched} = {winner.value!r}  <- {winner.source.describe()}")
         return
 
-    canonical, deprecation = canonicalize_dotted_key(path, resolution.baseline)
-    if deprecation:
-        typer.secho(f"deprecated: {deprecation}", err=True, fg=typer.colors.YELLOW)
     try:
+        canonical, deprecation = canonicalize_dotted_key(path, resolution.baseline)
         compiled = ConfigPath.parse(canonical, type(resolution.baseline))
     except ConfigPathError as exc:
         # Carries `did you mean:` suggestions, which a traceback would bury.
         raise typer.BadParameter(str(exc)) from exc
+    if deprecation:
+        typer.secho(f"deprecated: {deprecation}", err=True, fg=typer.colors.YELLOW)
 
     if provenance.touched(compiled.raw):
         print(provenance.explain(compiled.raw))

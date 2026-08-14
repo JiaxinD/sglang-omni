@@ -17,7 +17,6 @@ Nothing here decides anything; precedence lives in
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,9 +24,7 @@ from sglang_omni.config.patch import (
     ConfigPatch,
     ConfigPatchSet,
     ConfigSource,
-    Layer,
     SourceKind,
-    Specificity,
 )
 
 __all__ = ["ProvenanceEntry", "ProvenanceMap", "BASELINE_SOURCE"]
@@ -40,27 +37,26 @@ BASELINE_SOURCE = ConfigSource(
 
 @dataclass(frozen=True)
 class ProvenanceEntry:
-    """One source's contribution to one path."""
+    """One source's contribution to one path: the patch, and whether it won."""
 
-    path: str
-    value: Any
-    source: ConfigSource
-    layer: Layer
-    specificity: Specificity
+    patch: ConfigPatch
     winning: bool
-    deprecated: str = ""
 
-    @classmethod
-    def from_patch(cls, patch: ConfigPatch, *, winning: bool) -> "ProvenanceEntry":
-        return cls(
-            path=patch.path.raw,
-            value=patch.value,
-            source=patch.source,
-            layer=patch.layer,
-            specificity=patch.specificity,
-            winning=winning,
-            deprecated=patch.deprecated,
-        )
+    @property
+    def path(self) -> str:
+        return self.patch.path.raw
+
+    @property
+    def value(self) -> Any:
+        return self.patch.value
+
+    @property
+    def source(self) -> ConfigSource:
+        return self.patch.source
+
+    @property
+    def deprecated(self) -> str:
+        return self.patch.deprecated
 
     def render(self) -> str:
         marker = "[winner]" if self.winning else "[superseded]"
@@ -68,19 +64,6 @@ class ProvenanceEntry:
         if self.deprecated:
             line += f"\n      deprecated: {self.deprecated}"
         return line
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "path": self.path,
-            "value": self.value,
-            "source": self.source.kind.value,
-            "origin": self.source.origin,
-            "layer": int(self.layer),
-            "layer_name": self.layer.name,
-            "specificity": self.specificity.name,
-            "winning": self.winning,
-            "deprecated": self.deprecated or None,
-        }
 
 
 @dataclass
@@ -97,7 +80,7 @@ class ProvenanceMap:
 
     def record(self, patch: ConfigPatch, *, winning: bool) -> None:
         self.entries.setdefault(patch.path.raw, []).append(
-            ProvenanceEntry.from_patch(patch, winning=winning)
+            ProvenanceEntry(patch, winning)
         )
 
     def record_baseline(self, path: str, value: Any) -> None:
@@ -118,12 +101,6 @@ class ProvenanceMap:
     def paths(self) -> list[str]:
         return sorted(self.entries)
 
-    def history(self, path: str) -> list[ProvenanceEntry]:
-        """Every contribution to ``path``, weakest first."""
-        if path not in self.entries:
-            raise KeyError(self._unknown_message(path))
-        return list(self.entries[path])
-
     def winner(self, path: str) -> ProvenanceEntry | None:
         for entry in reversed(self.entries.get(path, [])):
             if entry.winning:
@@ -134,28 +111,14 @@ class ProvenanceMap:
         return path in self.entries
 
     def explain(self, path: str) -> str:
-        """Human-readable answer to 'why is this value what it is'."""
-        history = self.history(path)
+        """Human-readable answer to 'why is this value what it is'.
+
+        Callers ask :meth:`touched` first; an untouched path raises ``KeyError``.
+        """
+        history = self.entries[path]
         winner = self.winner(path)
         lines = [f"{path} = {winner.value!r}" if winner else path]
         if path in self.baseline:
             lines.append(f"  {self.baseline[path]!r}  <- {BASELINE_SOURCE.describe()}")
         lines.extend(f"  {entry.render()}" for entry in history)
         return "\n".join(lines)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            path: {
-                "baseline": self.baseline.get(path),
-                "history": [entry.to_dict() for entry in entries],
-            }
-            for path, entries in sorted(self.entries.items())
-        }
-
-    def _unknown_message(self, path: str) -> str:
-        known = self.paths()
-        close = difflib.get_close_matches(path, known, n=3, cutoff=0.4)
-        message = f"No configuration source touched {path!r}"
-        if close:
-            message += "; paths that were touched include: " + ", ".join(close)
-        return message

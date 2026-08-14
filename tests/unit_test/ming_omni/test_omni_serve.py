@@ -11,13 +11,14 @@ from sglang_omni.cli.serve import (
     apply_backbone_server_args_cli_overrides,
     apply_cuda_graph_cli_overrides,
     apply_encoder_mem_reserve_cli_override,
-    apply_mem_fraction_cli_overrides,
     apply_parallelism_cli_overrides,
     apply_partial_start_cli_overrides,
     apply_torch_compile_cli_overrides,
+    patches_from_mem_fraction_flags,
 )
 from sglang_omni.config import PipelineConfig, StageConfig
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.models.ming_omni.config import (
     MingOmniPipelineConfig,
     MingOmniSpeechPipelineConfig,
@@ -363,11 +364,19 @@ def test_ming_cli_applies_tp_server_args_for_config_mutated_tp(monkeypatch) -> N
 def test_ming_cli_applies_thinker_sglang_server_args() -> None:
     config = MingOmniPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=None,
+    # The mem-fraction flags travel as patches through the resolver, the way
+    # `sgl-omni serve` now applies them.
+    config = (
+        ConfigResolver(config)
+        .resolve(
+            patches_from_mem_fraction_flags(
+                config,
+                mem_fraction_static=0.80,
+                thinker_mem_fraction_static=None,
+                talker_mem_fraction_static=None,
+            )
+        )
+        .config
     )
     apply_backbone_server_args_cli_overrides(
         config,

@@ -15,10 +15,10 @@ import logging
 
 import pytest
 
-from sglang_omni.config.compat import patches_from_dotted_cli
 from sglang_omni.config.deprecation import reset_deprecation_state, warn_deprecations
 from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.sources import patches_from_dotted_cli
 
 
 @pytest.fixture(autouse=True)

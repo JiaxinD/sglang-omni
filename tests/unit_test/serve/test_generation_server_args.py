@@ -47,7 +47,11 @@ class _DummyManager:
         return {}
 
     def merge_config(
-        self, _extra_args: dict[str, object], *, set_values: Sequence[str] = ()
+        self,
+        _extra_args: dict[str, object],
+        *,
+        set_values: Sequence[str] = (),
+        extra_patches: object | None = None,
     ) -> PipelineConfig:
         return self.config
 

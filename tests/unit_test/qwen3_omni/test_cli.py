@@ -41,7 +41,7 @@ class _DummyManager:
     def parse_extra_args(self, args):
         return {}
 
-    def merge_config(self, extra_args, *, set_values=()):
+    def merge_config(self, extra_args, *, set_values=(), extra_patches=None):
         return self.config
 
 

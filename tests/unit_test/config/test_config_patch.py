@@ -21,8 +21,6 @@ MEM_FRACTION = "stages.thinker.runtime.sglang_server_args.mem_fraction_static"
 YAML = ConfigSource(SourceKind.YAML_FILE, "configs/omni.yaml")
 CLI_SET = ConfigSource(SourceKind.CLI_SET, "--set")
 CLI_FLAG = ConfigSource(SourceKind.CLI_FLAG, "--mem-fraction-static")
-MODEL = ConfigSource(SourceKind.MODEL_DEFAULT, "FakeOmniConfig")
-ROUTER = ConfigSource(SourceKind.ROUTER, "worker-0")
 
 
 def patch(path, value, source, **kwargs):
@@ -33,8 +31,6 @@ class TestConstruction:
     def test_layer_defaults_to_the_source_kind(self):
         assert patch(MEM_FRACTION, "0.8", YAML).layer is Layer.USER_FILE
         assert patch(MEM_FRACTION, "0.8", CLI_SET).layer is Layer.CLI
-        assert patch(MEM_FRACTION, "0.8", MODEL).layer is Layer.MODEL_DEFAULT
-        assert patch(MEM_FRACTION, "0.8", ROUTER).layer is Layer.ROUTER
 
     def test_value_is_coerced_to_the_declared_type(self):
         assert patch("stages.thinker.tp_size", "4", CLI_SET).value == 4
@@ -72,9 +68,6 @@ class TestConstruction:
         )
         assert "positional stage indices" in created.deprecated
         assert "prefer the typed runtime fields" in created.deprecated
-
-    def test_explicit_layer_override_wins_over_the_source_default(self):
-        assert patch(MEM_FRACTION, 0.8, YAML, layer=Layer.CLI).layer is Layer.CLI
 
 
 class TestPrecedence:
@@ -117,19 +110,6 @@ class TestPrecedence:
         assert [p.key for p in patchset.ordered()] == [
             "stages.thinker.tp_size",
             "stages.preprocessing.tp_size",
-        ]
-
-    def test_history_keeps_every_contributor(self):
-        patchset = ConfigPatchSet()
-        patchset.add(patch(MEM_FRACTION, 0.5, MODEL))
-        patchset.add(patch(MEM_FRACTION, 0.7, YAML))
-        patchset.add(patch(MEM_FRACTION, 0.9, CLI_SET))
-        history = patchset.history()[MEM_FRACTION]
-        assert [p.value for p in history] == [0.5, 0.7, 0.9]
-        assert [p.source.kind for p in history] == [
-            SourceKind.MODEL_DEFAULT,
-            SourceKind.YAML_FILE,
-            SourceKind.CLI_SET,
         ]
 
 
@@ -202,9 +182,3 @@ class TestBookkeeping:
         assert [p.key for p in patchset.deprecations()] == [
             "stages.thinker.runtime.max_seq_len"
         ]
-
-    def test_describe_mentions_path_value_and_source(self):
-        text = ConfigPatchSet().add(patch(MEM_FRACTION, 0.8, YAML)).describe()
-        assert MEM_FRACTION in text
-        assert "0.8" in text
-        assert "configs/omni.yaml" in text

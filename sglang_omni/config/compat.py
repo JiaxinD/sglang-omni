@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Translation of V1 configuration syntax into canonical patches.
+"""Translation of V1 legacy configuration spellings into canonical patches.
 
 This is the **only** module allowed to know about legacy spellings: positional
-stage indices, the ``stage_overrides`` block, and (later) the typed CLI flags.
-Everything downstream sees canonical paths and nothing else, so the legacy
-surface can be deprecated by deleting entries here rather than by unpicking
-merge logic spread across four files.
+stage indices in dotted keys (``stages.1.tp_size``) and the YAML
+``stage_overrides`` block. Everything downstream sees canonical paths and
+nothing else, so the legacy surface can be deprecated by deleting entries here
+rather than by unpicking merge logic spread across four files.
+
+The canonical surfaces themselves -- dotted CLI flags, ``--set`` and the YAML
+``set:`` block -- live in :mod:`sglang_omni.config.sources`.
 """
 
 from __future__ import annotations
@@ -20,13 +23,12 @@ from sglang_omni.config.patch import (
     ConfigSource,
     SourceKind,
 )
-from sglang_omni.config.path import ConfigPath
+from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import SET_BLOCK_KEY, patches_from_set_block
 
 __all__ = [
     "canonicalize_dotted_key",
-    "patches_from_dotted_cli",
     "patches_from_stage_overrides",
     "sources_from_config_file",
 ]
@@ -46,35 +48,23 @@ def canonicalize_dotted_key(key: str, config: PipelineConfig) -> tuple[str, str]
             continue
         position = int(parts[index + 1])
         if position >= len(config.stages):
-            raise ValueError(
+            # A ConfigPathError rather than a bare ValueError, so the CLI
+            # entry points that already turn path errors into readable
+            # BadParameter messages catch this one too.
+            names = [stage.name for stage in config.stages]
+            raise ConfigPathError(
                 f"{key!r} refers to stage index {position}, but the pipeline has "
-                f"{len(config.stages)} stages"
+                f"only {len(config.stages)} stages, named: {', '.join(names)}",
+                raw=key,
+                resolved_prefix=".".join(parts[: index + 1]),
+                suggestions=tuple(
+                    ".".join(parts[: index + 1] + [name] + parts[index + 2 :])
+                    for name in names[:3]
+                ),
             )
         parts[index + 1] = config.stages[position].name
         return ".".join(parts), _INDEX_DEPRECATION
     return key, ""
-
-
-def patches_from_dotted_cli(
-    extra_args: dict[str, Any],
-    config: PipelineConfig,
-    *,
-    origin: str = "extra CLI args",
-) -> ConfigPatchSet:
-    """Normalize ``--stages.thinker.tp_size 4`` style arguments."""
-    patchset = ConfigPatchSet()
-    for key, value in extra_args.items():
-        canonical, deprecation = canonicalize_dotted_key(key, config)
-        patchset.add(
-            ConfigPatch.create(
-                canonical,
-                value,
-                ConfigSource(SourceKind.CLI_DOTTED, origin),
-                root=type(config),
-                deprecated=deprecation,
-            )
-        )
-    return patchset
 
 
 def patches_from_stage_overrides(

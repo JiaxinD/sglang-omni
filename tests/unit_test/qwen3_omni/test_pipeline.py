@@ -14,8 +14,8 @@ import typer
 import sglang_omni.models.qwen3_omni.stages as qwen_stages
 from sglang_omni.cli.serve import (
     apply_encoder_mem_reserve_cli_override,
-    apply_mem_fraction_cli_overrides,
     apply_parallelism_cli_overrides,
+    patches_from_mem_fraction_flags,
 )
 from sglang_omni.config import (
     PipelineConfig,
@@ -24,6 +24,7 @@ from sglang_omni.config import (
     build_stage_placement_plan,
     resolve_stage_factory_args,
 )
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.models.ming_omni.config import (
     MingOmniPipelineConfig,
     MingOmniSpeechPipelineConfig,
@@ -681,10 +682,19 @@ def test_qwen_encoder_mem_reserve_applies_only_to_valid_auto_values() -> None:
             )
 
 
+def _resolve_mem_fraction_flags(config, **flags):
+    """Apply the typed mem-fraction flags the way `sgl-omni serve` does."""
+    return (
+        ConfigResolver(config)
+        .resolve(patches_from_mem_fraction_flags(config, **flags))
+        .config
+    )
+
+
 def test_qwen_cli_global_and_specific_mem_fraction_target_only_ar_stages() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=0.70,
@@ -702,7 +712,7 @@ def test_qwen_cli_per_role_mem_fraction_overrides_global_when_all_three_passed()
 ):
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=0.70,
@@ -716,7 +726,7 @@ def test_qwen_cli_per_role_mem_fraction_overrides_global_when_all_three_passed()
 def test_qwen_cli_global_mem_fraction_applies_when_no_per_role_override() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=None,
@@ -730,7 +740,7 @@ def test_qwen_cli_global_mem_fraction_applies_when_no_per_role_override() -> Non
 def test_qwen_cli_partial_per_role_falls_back_to_global_for_unspecified_role() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=0.70,
@@ -744,7 +754,7 @@ def test_qwen_cli_partial_per_role_falls_back_to_global_for_unspecified_role() -
 def test_qwen_cli_talker_per_role_overrides_global_thinker_falls_back() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=None,
@@ -763,7 +773,7 @@ def test_qwen_cli_mem_fraction_static_survives_runtime_overrides_overlay() -> No
         },
     )
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=None,
@@ -1097,7 +1107,7 @@ def test_qwen_cli_mem_fraction_static_rejects_runtime_override_duplicate() -> No
         },
     )
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.80,
         thinker_mem_fraction_static=None,
@@ -1115,7 +1125,7 @@ def test_qwen_cli_rejects_talker_override_on_text_only_qwen_without_partial_writ
     original = config.model_dump()
 
     with pytest.raises(typer.BadParameter, match="talker"):
-        apply_mem_fraction_cli_overrides(
+        patches_from_mem_fraction_flags(
             config,
             mem_fraction_static=None,
             thinker_mem_fraction_static=None,
@@ -1130,7 +1140,7 @@ def test_qwen_cli_rejects_invalid_mem_fraction_without_partial_write() -> None:
     original = config.model_dump()
 
     with pytest.raises(typer.BadParameter, match="must be > 0 and < 1"):
-        apply_mem_fraction_cli_overrides(
+        patches_from_mem_fraction_flags(
             config,
             mem_fraction_static=1.0,
             thinker_mem_fraction_static=None,
@@ -1159,7 +1169,7 @@ def test_qwen_cli_rejects_global_mem_fraction_when_pipeline_has_no_supported_rol
     )
 
     with pytest.raises(typer.BadParameter, match="supported"):
-        apply_mem_fraction_cli_overrides(
+        patches_from_mem_fraction_flags(
             config,
             mem_fraction_static=0.80,
             thinker_mem_fraction_static=None,
@@ -1293,7 +1303,7 @@ def test_qwen_cli_thinker_tp_override_keeps_parallelism_alias_in_sync() -> None:
 def test_qwen_text_thinker_tp_builds_topology_without_memory_fractions() -> None:
     config = Qwen3OmniPipelineConfig(model_path="dummy")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.82,
         thinker_mem_fraction_static=None,

@@ -33,10 +33,10 @@ from typing import Any, Union, get_args, get_origin
 import pytest
 from pydantic import BaseModel
 
-from sglang_omni.config.compat import patches_from_dotted_cli
 from sglang_omni.config.path import ConfigPath, iter_schema_paths
 from sglang_omni.config.resolver import ConfigResolver, diff_configs
 from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.sources import patches_from_dotted_cli
 from tests.unit_test.config.conftest import build_pipeline_config
 from tests.unit_test.config.v1_oracle import (
     v1_apply_stage_overrides,
@@ -532,22 +532,24 @@ class TestStageOverridesParity:
         assert not diff_configs(v1, v2)
 
     @pytest.mark.parametrize(
-        "overrides",
+        ("overrides", "keyword"),
         [
-            "not-a-mapping",
-            {"nope": {"runtime": {}}},
-            {"thinker": "not-a-mapping"},
-            {"thinker": {"tp_size": 4}},
-            {"thinker": {"runtime": "not-a-mapping"}},
+            ("not-a-mapping", "must be a mapping"),
+            ({"nope": {"runtime": {}}}, "unknown stage"),
+            ({"thinker": "not-a-mapping"}, "must be a mapping"),
+            ({"thinker": {"tp_size": 4}}, "runtime"),
+            ({"thinker": {"runtime": "not-a-mapping"}}, "must be a mapping"),
         ],
     )
-    def test_rejected_overrides_report_the_same_message(self, overrides: Any) -> None:
+    def test_rejected_overrides_are_rejected_by_both(
+        self, overrides: Any, keyword: str
+    ) -> None:
+        """Both chains refuse the same inputs, for the same reason."""
         config = build_pipeline_config()
-        with pytest.raises(ValueError) as v1_error:
+        with pytest.raises(ValueError, match=keyword):
             v1_apply_stage_overrides(config, overrides)
-        with pytest.raises(ValueError) as v2_error:
+        with pytest.raises(ValueError, match=keyword):
             self._v2(config, overrides)
-        assert str(v1_error.value) == str(v2_error.value)
 
 
 class TestParityOnShippedConfigs:

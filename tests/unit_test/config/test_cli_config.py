@@ -190,6 +190,27 @@ class TestResolve:
         assert result.exit_code != 0
         assert "--model-path is required" in output_of(result)
 
+    def test_an_out_of_range_stage_index_is_refused_without_a_traceback(
+        self, runner, plain_config_file, stage
+    ):
+        """The refusal names the stages that do exist, readably."""
+        result = runner.invoke(
+            config_app,
+            [
+                "resolve",
+                "--config",
+                str(plain_config_file),
+                "--stages.9.tp_size",
+                "2",
+            ],
+        )
+
+        assert result.exit_code != 0
+        output = output_of(result)
+        assert "stage index 9" in output
+        assert stage in output
+        assert "Traceback" not in output
+
 
 class TestExplain:
     def test_names_the_winning_source_and_what_it_overrode(
@@ -250,6 +271,21 @@ class TestExplain:
 
         assert result.exit_code != 0
         assert "did you mean" in output_of(result).lower()
+
+    def test_an_out_of_range_stage_index_is_refused_without_a_traceback(
+        self, runner, config_file, stage
+    ):
+        """`explain stages.9.x` fails like any other bad path: readably."""
+        result = runner.invoke(
+            config_app,
+            ["explain", "stages.9.tp_size", "--config", str(config_file)],
+        )
+
+        assert result.exit_code != 0
+        output = output_of(result)
+        assert "stage index 9" in output
+        assert stage in output
+        assert "Traceback" not in output
 
     def test_without_a_path_it_lists_every_touched_path(
         self, runner, config_file, stage
@@ -338,3 +374,56 @@ class TestSet:
 
         assert result.exit_code != 0
         assert "PATH=VALUE" in output_of(result)
+
+
+class TestServeErrors:
+    """`sgl-omni serve` fails the same way the config commands do: readably.
+
+    Every case here stops in the config-merging prologue, long before
+    ``launch_server`` is reached, so no server is started.
+    """
+
+    @pytest.fixture
+    def app(self):
+        from sglang_omni.cli import app as cli_app
+
+        return cli_app
+
+    def test_an_out_of_range_stage_index_is_refused_without_a_traceback(
+        self, app, runner, plain_config_file, stage
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "--config",
+                str(plain_config_file),
+                "--stages.9.tp_size",
+                "2",
+            ],
+        )
+
+        assert result.exit_code != 0
+        output = output_of(result)
+        assert "stage index 9" in output
+        assert stage in output
+        assert "Traceback" not in output
+
+    def test_a_malformed_set_is_refused_without_a_traceback(
+        self, app, runner, plain_config_file, stage
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "--config",
+                str(plain_config_file),
+                "--set",
+                f"stages.{stage}.tp_size",
+            ],
+        )
+
+        assert result.exit_code != 0
+        output = output_of(result)
+        assert "PATH=VALUE" in output
+        assert "Traceback" not in output

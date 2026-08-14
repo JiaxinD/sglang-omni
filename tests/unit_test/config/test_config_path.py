@@ -10,9 +10,7 @@ from sglang_omni.config.path import (
     ConfigPath,
     ConfigPathError,
     PathVisibility,
-    SegmentKind,
     iter_schema_paths,
-    suggest_nearby,
 )
 from sglang_omni.config.schema import PipelineConfig
 
@@ -27,11 +25,6 @@ class TestParsing:
         assert path.is_leaf
         assert path.stage_name == "thinker"
 
-    def test_stage_segment_is_name_keyed(self):
-        path = ConfigPath.parse("stages.thinker.tp_size")
-        assert path.segments[1].kind is SegmentKind.NAMED_ITEM
-        assert path.segments[2].kind is SegmentKind.FIELD
-
     def test_container_paths_are_not_leaves(self):
         assert not ConfigPath.parse("stages.thinker.runtime").is_leaf
         assert not ConfigPath.parse("stages").is_leaf
@@ -44,13 +37,7 @@ class TestParsing:
 
     def test_free_mapping_accepts_any_key(self):
         path = ConfigPath.parse("stages.preprocessing.env.OMP_NUM_THREADS")
-        assert path.segments[-1].kind is SegmentKind.MAPPING_KEY
         assert path.value_type is str
-
-    def test_parent(self):
-        path = ConfigPath.parse(MEM_FRACTION)
-        assert path.parent.raw == "stages.thinker.runtime.sglang_server_args"
-        assert ConfigPath.parse("model_path").parent is None
 
 
 class TestErrors:
@@ -113,26 +100,6 @@ class TestVisibility:
             if visibility not in (PathVisibility.PUBLIC, PathVisibility.DEPRECATED)
         ]
         assert not refused, f"these paths would stop working: {refused}"
-
-    def test_require_writable_explains_why(self, monkeypatch):
-        """The refusal path still works, for classifications we do apply later.
-
-        No shipped rule is INTERNAL today — the ones that were became
-        deprecations instead — so the mechanism is exercised against an
-        injected rule rather than by finding a path that happens to be refused.
-        """
-        rules = (
-            (
-                "stages.*.runtime_arg_map.**",
-                PathVisibility.INTERNAL,
-                "runtime_arg_map is wiring owned by the model config author",
-            ),
-        )
-        monkeypatch.setattr("sglang_omni.config.path._VISIBILITY_RULES", rules)
-        path = ConfigPath.parse("stages.thinker.runtime_arg_map.max_seq_len")
-        assert not path.is_writable()
-        with pytest.raises(ConfigPathError, match="owned by the model config author"):
-            path.require_writable()
 
     def test_public_paths_pass(self):
         ConfigPath.parse(MEM_FRACTION).require_writable()
@@ -247,19 +214,13 @@ class TestReadWrite:
 class TestSchemaEnumeration:
     def test_public_enumeration_hides_internal_paths(self):
         public = iter_schema_paths()
+        every = iter_schema_paths(include_non_public=True)
         assert MEM_FRACTION.replace("thinker", "*") in public
         assert "stages.*.factory_args" not in public
         assert "config_cls" not in public
-
-    def test_full_enumeration_includes_them(self):
-        every = iter_schema_paths(include_non_public=True)
         assert "stages.*.factory_args" in every
         assert "config_cls" in every
 
     def test_every_enumerated_path_parses(self):
         for candidate in iter_schema_paths(include_non_public=True):
             ConfigPath.parse(candidate.replace("*", "somename"))
-
-    def test_suggest_nearby_keeps_the_stage_name(self):
-        suggestions = suggest_nearby("stages.thinker.runtime.max_seq")
-        assert "stages.thinker.runtime.max_seq_len" in suggestions

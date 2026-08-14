@@ -14,7 +14,6 @@ import pytest
 
 from sglang_omni.config.compat import (
     canonicalize_dotted_key,
-    patches_from_dotted_cli,
     patches_from_stage_overrides,
 )
 from sglang_omni.config.manager import ConfigManager
@@ -24,9 +23,10 @@ from sglang_omni.config.patch import (
     ConfigSource,
     SourceKind,
 )
+from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, diff_configs
 from sglang_omni.config.schema import PipelineConfig
-from tests.unit_test.config.v1_oracle import v1_apply_stage_overrides
+from sglang_omni.config.sources import patches_from_dotted_cli
 
 MEM_FRACTION = "stages.thinker.runtime.sglang_server_args.mem_fraction_static"
 
@@ -131,20 +131,26 @@ class TestProvenance:
         )
         assert resolved.provenance.baseline["stages.thinker.tp_size"] == 1
 
-    def test_untouched_paths_raise_with_a_hint(self, pipeline_config: PipelineConfig):
+    def test_untouched_paths_are_not_explained(self, pipeline_config: PipelineConfig):
+        """`config explain` asks touched() first and reports the default itself."""
         resolved = ConfigResolver(pipeline_config).resolve(
             patchset(make("stages.thinker.tp_size", 4))
         )
-        with pytest.raises(KeyError, match="No configuration source touched"):
-            resolved.provenance.history("stages.thinker.process")
+        assert not resolved.provenance.touched("stages.thinker.process")
+        assert resolved.provenance.winner("stages.thinker.process") is None
 
-    def test_serializable(self, pipeline_config: PipelineConfig):
-        resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make(MEM_FRACTION, 0.9))
-        )
-        payload = resolved.provenance.to_dict()
-        assert payload[MEM_FRACTION]["history"][0]["winning"] is True
-        assert payload[MEM_FRACTION]["history"][0]["layer_name"] == "CLI"
+    def test_entries_carry_the_contributing_patch(
+        self, pipeline_config: PipelineConfig
+    ):
+        """An entry is the patch plus the verdict, not a copy of its fields."""
+        patch = make(MEM_FRACTION, 0.9)
+        resolved = ConfigResolver(pipeline_config).resolve(patchset(patch))
+        winner = resolved.provenance.winner(MEM_FRACTION)
+        assert winner is not None
+        assert winner.patch is patch
+        assert winner.winning is True
+        assert winner.value == 0.9
+        assert winner.source is CLI
 
 
 class TestDiff:
@@ -181,8 +187,12 @@ class TestCompatTranslation:
         assert deprecation == ""
 
     def test_out_of_range_index_is_reported(self, pipeline_config: PipelineConfig):
-        with pytest.raises(ValueError, match="stage index 9"):
+        with pytest.raises(ConfigPathError, match="stage index 9") as excinfo:
             canonicalize_dotted_key("stages.9.tp_size", pipeline_config)
+        message = str(excinfo.value)
+        for stage in pipeline_config.stages:
+            assert stage.name in message
+        assert excinfo.value.suggestions
 
     def test_stage_overrides_reject_non_runtime_keys(
         self, pipeline_config: PipelineConfig
@@ -221,42 +231,19 @@ class TestParityWithV1:
     @pytest.mark.parametrize(
         "extra_args",
         [
-            {"stages.thinker.tp_size": "4"},
+            # Representatives only; the exhaustive scan over every writable
+            # path is the generated parity gate in test_v1_parity.py.
             {"stages.1.tp_size": "4"},
             {"stages.thinker.parallelism.tp": "2"},
-            {"stages.thinker.runtime.max_seq_len": "8192"},
-            {MEM_FRACTION: "0.75"},
-            {"stages.thinker.runtime.resources.total_gpu_memory_fraction": "0.35"},
             {
                 "stages.thinker.runtime.max_seq_len": "8192",
                 "stages.preprocessing.runtime.video_fps": "2.0",
             },
-            {"placement.max_total_gpu_memory_fraction_per_gpu": "0.9"},
-            {"entry_stage": "preprocessing"},
         ],
     )
     def test_dotted_cli_parity(self, pipeline_config: PipelineConfig, extra_args):
         v1 = self._v1(pipeline_config, extra_args)
         v2 = self._v2(pipeline_config, extra_args)
-        assert diff_configs(v1, v2) == []
-
-    def test_stage_overrides_parity(self, pipeline_config: PipelineConfig):
-        overrides = {
-            "thinker": {
-                "runtime": {
-                    "max_seq_len": 4096,
-                    "sglang_server_args": {"mem_fraction_static": 0.8},
-                    "resources": {"total_gpu_memory_fraction": 0.35},
-                }
-            },
-            "preprocessing": {"runtime": {"video_fps": 2.0}},
-        }
-        v1 = v1_apply_stage_overrides(pipeline_config, overrides)
-        v2 = (
-            ConfigResolver(pipeline_config)
-            .resolve(patches_from_stage_overrides(overrides, pipeline_config))
-            .config
-        )
         assert diff_configs(v1, v2) == []
 
 

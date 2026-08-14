@@ -12,7 +12,8 @@ import pytest
 import torch
 import typer
 
-from sglang_omni.cli.serve import apply_mem_fraction_cli_overrides
+from sglang_omni.cli.serve import patches_from_mem_fraction_flags
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.runtime import resolve_stage_static_factory_args
 from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
 from sglang_omni.models.higgs_tts import stages
@@ -2330,10 +2331,19 @@ def test_higgs_mem_fraction_role_to_stage_targets_tts_engine() -> None:
     }
 
 
+def _resolve_mem_fraction_flags(config, **flags):
+    """Apply the typed mem-fraction flags the way `sgl-omni serve` does."""
+    return (
+        ConfigResolver(config)
+        .resolve(patches_from_mem_fraction_flags(config, **flags))
+        .config
+    )
+
+
 def test_higgs_cli_mem_fraction_static_pins_tts_engine() -> None:
     config = HiggsTtsPipelineConfig(model_path="fake-model")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=0.27,
         thinker_mem_fraction_static=None,
@@ -2347,7 +2357,7 @@ def test_higgs_cli_mem_fraction_static_pins_tts_engine() -> None:
 def test_higgs_cli_talker_mem_fraction_static_pins_tts_engine() -> None:
     config = HiggsTtsPipelineConfig(model_path="fake-model")
 
-    apply_mem_fraction_cli_overrides(
+    config = _resolve_mem_fraction_flags(
         config,
         mem_fraction_static=None,
         thinker_mem_fraction_static=None,
@@ -2362,7 +2372,7 @@ def test_higgs_cli_rejects_unsupported_thinker_mem_fraction() -> None:
     config = HiggsTtsPipelineConfig(model_path="fake-model")
 
     with pytest.raises(typer.BadParameter):
-        apply_mem_fraction_cli_overrides(
+        patches_from_mem_fraction_flags(
             config,
             mem_fraction_static=None,
             thinker_mem_fraction_static=0.3,

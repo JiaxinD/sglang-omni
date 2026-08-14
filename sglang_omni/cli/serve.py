@@ -12,6 +12,13 @@ from sglang_omni.config import (
     apply_stage_process_overrides,
 )
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.patch import (
+    ConfigPatch,
+    ConfigPatchSet,
+    ConfigSource,
+    SourceKind,
+    Specificity,
+)
 from sglang_omni.config.path import ConfigPathError
 from sglang_omni.preprocessing.resource_connector import (
     resolve_allowed_local_media_path,
@@ -209,21 +216,6 @@ def _apply_stage_server_args_override(
                 runtime_server_args.update(updates)
 
 
-def _apply_stage_mem_fraction_override(
-    pipeline_config: PipelineConfig,
-    *,
-    stage_name: str,
-    value: float,
-) -> None:
-    matching_stages = _find_matching_stages(
-        pipeline_config,
-        stage_name=stage_name,
-        reason="SGLang mem_fraction_static override",
-    )
-    for stage in matching_stages:
-        stage.runtime.sglang_server_args.mem_fraction_static = value
-
-
 def _stage_has_explicit_mem_fraction_static(
     pipeline_config: PipelineConfig,
     *,
@@ -292,24 +284,28 @@ def _validate_tts_batch_max_items(value: int) -> int:
     return value
 
 
-def apply_mem_fraction_cli_overrides(
+def patches_from_mem_fraction_flags(
     pipeline_config: PipelineConfig,
     *,
     mem_fraction_static: float | None,
     thinker_mem_fraction_static: float | None,
     talker_mem_fraction_static: float | None,
-) -> PipelineConfig:
-    """Apply CLI mem_fraction_static flags to the pipeline config.
+) -> ConfigPatchSet:
+    """Translate the typed mem-fraction flags into CLI-layer patches.
 
-    Precedence (per role): a non-None per-role flag wins over the global flag.
-    `--thinker-mem-fraction-static` overrides `--mem-fraction-static` for the
-    thinker stage; `--talker-mem-fraction-static` overrides it for the talker
-    stage. The global `--mem-fraction-static` is the fallback for any role
-    whose per-role flag is omitted.
+    Successor to the post-merge ``apply_mem_fraction_cli_overrides`` mutation
+    helper. As patches the flags resolve together with dotted overrides and
+    ``--set``, which buys two things the helper could not offer:
 
-    Validation: out-of-range values raise typer.BadParameter atomically, before
-    any stage mutation, so a partially-applied config cannot leak into the
-    launch path.
+    * precedence is declared, not positional. ``--mem-fraction-static``
+      broadcasts at ``Specificity.BROADCAST``, the per-role flags land at
+      ``Specificity.ROLE``, and an explicit dotted or ``--set`` path outranks
+      both -- instead of the typed flag silently overwriting whatever the
+      merge produced because the helper happened to run afterwards;
+    * ``sgl-omni config explain`` can name the flag that set the value.
+
+    Validation (range, unsupported role) still raises ``typer.BadParameter``
+    before any patch is built, so an error cannot leave a half-written config.
     """
     mem_fraction_static = _validate_mem_fraction_static(
         "--mem-fraction-static", mem_fraction_static
@@ -342,18 +338,31 @@ def apply_mem_fraction_cli_overrides(
         "thinker": thinker_mem_fraction_static,
         "talker": talker_mem_fraction_static,
     }
+    patches = ConfigPatchSet()
     for role, stage_name in role_to_stage.items():
-        role_value = role_values.get(role)
-        # Precedence: per-role flag wins over the global flag for this role;
-        # the global flag is the fallback when no per-role flag was given.
-        final_value = role_value if role_value is not None else mem_fraction_static
-        if final_value is not None:
-            _apply_stage_mem_fraction_override(
-                pipeline_config,
-                stage_name=stage_name,
-                value=final_value,
+        path = f"stages.{stage_name}.runtime.sglang_server_args.mem_fraction_static"
+        if mem_fraction_static is not None:
+            patches.add(
+                ConfigPatch.create(
+                    path,
+                    mem_fraction_static,
+                    ConfigSource(SourceKind.CLI_FLAG, "--mem-fraction-static"),
+                    root=type(pipeline_config),
+                    specificity=Specificity.BROADCAST,
+                )
             )
-    return pipeline_config
+        role_value = role_values.get(role)
+        if role_value is not None:
+            patches.add(
+                ConfigPatch.create(
+                    path,
+                    role_value,
+                    ConfigSource(SourceKind.CLI_FLAG, f"--{role}-mem-fraction-static"),
+                    root=type(pipeline_config),
+                    specificity=Specificity.ROLE,
+                )
+            )
+    return patches
 
 
 def apply_encoder_mem_reserve_cli_override(
@@ -1466,7 +1475,13 @@ def serve(
 
     # --- Resolve config ---
     if config:
-        config_manager = ConfigManager.from_file(config)
+        try:
+            config_manager = ConfigManager.from_file(config)
+        except (ConfigPathError, ValueError) as exc:
+            # A file that does not parse, an unknown path in its ``set:``
+            # block, two blocks disagreeing about one path: all of these carry
+            # a message written to be read, not a traceback.
+            raise typer.BadParameter(str(exc)) from exc
     elif text_only:
         if model_path is None:
             raise typer.BadParameter("--model-path is required unless --config is set")
@@ -1479,9 +1494,20 @@ def serve(
     # we use ctx to capture the arguments that are used to modify the configuration on the fly
     # we do expect the extra arguments to be pairs of names and values
     extra_args = config_manager.parse_extra_args(ctx.args)
+    # Typed mem-fraction flags become patches so they resolve together with
+    # the dotted overrides and --set at declared precedence, instead of being
+    # written over the merged config afterwards.
+    mem_fraction_patches = patches_from_mem_fraction_flags(
+        config_manager.config,
+        mem_fraction_static=mem_fraction_static,
+        thinker_mem_fraction_static=thinker_mem_fraction_static,
+        talker_mem_fraction_static=talker_mem_fraction_static,
+    )
     try:
         merged_config = config_manager.merge_config(
-            extra_args, set_values=set_values or []
+            extra_args,
+            set_values=set_values or [],
+            extra_patches=mem_fraction_patches,
         )
     except ConfigPathError as exc:
         # Unknown path, unwritable path, or two sources disagreeing at one
@@ -1492,12 +1518,6 @@ def serve(
         merged_config = merged_config.model_copy(update={"model_path": model_path})
     if colocate:
         _validate_colocate_config(merged_config)
-    merged_config = apply_mem_fraction_cli_overrides(
-        merged_config,
-        mem_fraction_static=mem_fraction_static,
-        thinker_mem_fraction_static=thinker_mem_fraction_static,
-        talker_mem_fraction_static=talker_mem_fraction_static,
-    )
     merged_config = apply_encoder_mem_reserve_cli_override(
         merged_config,
         encoder_mem_reserve=encoder_mem_reserve,
