@@ -112,12 +112,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"planning over the whole universe",
                 file=sys.stderr,
             )
-    result = plan_replica_blocks(
-        topology,
-        replicas=args.replicas,
-        gpu_numa_node=numa_node,
-        server_share=args.server_share,
-    )
+    try:
+        result = plan_replica_blocks(
+            topology,
+            replicas=args.replicas,
+            gpu_numa_node=numa_node,
+            server_share=args.server_share,
+        )
+    except ValueError as exc:
+        # Note (Jiaxin Deng): callers fall back to a NUMA-blind split when the
+        # planner is missing, so a refusal needs its own code to stay a refusal.
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
     if args.as_json:
         print(json.dumps(result, indent=2))
         return 0
