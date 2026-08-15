@@ -42,9 +42,8 @@ class CpuAllocationPlan:
     assignments: dict[str, ProcessCpuAssignment]
     shared_pools: dict[int | None, tuple[int, ...]]
     events: tuple[str, ...]
-    # Note (Jiaxin Deng): physical cores, not the cpu ids of the masks; the
-    # starvation trigger compares against what a stage declared, and on an
-    # SMT2 host the two differ by 2x.
+    # Note (Jiaxin Deng): physical cores, not mask width; a declaration and
+    # its cpu ids differ by 2x on an SMT2 host.
     exclusive_physical_cores: int = 0
 
     def to_dict(self) -> dict:
@@ -133,9 +132,8 @@ def allocate(
     def _place(
         reserve: int,
     ) -> tuple[dict[str, int], dict[int, int], list[str], list[str]]:
-        # Note (Jiaxin Deng): a demand is charged to a node only once it is
-        # known to fit there, so a demand that ends up shared cannot strand
-        # capacity on the node it was tried against first.
+        # Note (Jiaxin Deng): charge a node only once the demand is known to
+        # fit, so a demand that ends up shared strands nothing.
         placed: dict[str, int] = {}
         used = dict.fromkeys(capacity, 0)
         demoted: list[str] = []
@@ -182,9 +180,8 @@ def allocate(
         if d.process_name in placed
     }
     has_shared_tenant = bool(demoted) or shared_declared
-    # Note (Jiaxin Deng): cores held back for a pool nobody joins are cores
-    # taken from the only process there is, measured as -11% on a
-    # single-process DP replica.
+    # Note (Jiaxin Deng): cores held for a pool nobody joins are taken from
+    # the only process there is, measured as -11% on a single-process replica.
     if not has_shared_tenant:
         for node in capacity:
             local = sorted(n for n, nd in placed.items() if nd == node)

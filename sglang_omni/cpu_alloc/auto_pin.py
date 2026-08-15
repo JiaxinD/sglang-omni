@@ -23,9 +23,8 @@ from sglang_omni.cpu_alloc.host_metrics import (
 
 logger = logging.getLogger(__name__)
 
-# Note (Jiaxin Deng): measured against the declaration on Fun-ASR, where the
-# tree held 93% and 86% of its declared cores while pinning was worth nothing
-# and 34% where pinning was worth 3.5x.
+# Note (Jiaxin Deng): Fun-ASR held 93% and 86% of its declared cores where
+# pinning was worth nothing, and 34% where it was worth 3.5x.
 STARVED_FRACTION = 0.6
 RELIEVED_FOREIGN_CORES = 0.5
 MIN_FOREIGN_CORES = 1.0

@@ -19,8 +19,7 @@ from sglang_omni.utils.cpu import cgroup_cpu_quota_count
 
 logger = logging.getLogger(__name__)
 
-# Note (Jiaxin Deng): the process that runs uvicorn, the Coordinator and the
-# relay is not a stage, and leaving it on the full cpuset puts it on top of
+# Note (Jiaxin Deng): not a stage, but on the full cpuset it runs on top of
 # every core the stages were promised.
 SERVING_PARENT_PROCESS = "serving-parent"
 

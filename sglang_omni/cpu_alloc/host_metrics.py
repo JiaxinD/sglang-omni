@@ -146,9 +146,8 @@ class HostCpuContentionMonitor:
             pid: _pid_cpu_jiffies(pid, self._proc_root)
             for pid in _tree_pids(self._root_pid, self._proc_root)
         }
-        # Note (Jiaxin Deng): a reaped child takes its time out of /proc, so a
-        # plain sum over live pids walks backwards and the drop is read as
-        # foreign load; carry the last reading of the ones that are gone.
+        # Note (Jiaxin Deng): a reaped child takes its time out of /proc, so
+        # a sum over live pids walks backwards and reads as foreign load.
         for pid, jiffies in self._pid_jiffies.items():
             if pid not in live:
                 self._retired_jiffies += jiffies
