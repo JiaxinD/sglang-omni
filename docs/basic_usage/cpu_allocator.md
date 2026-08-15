@@ -35,6 +35,15 @@ The universe is `sched_getaffinity`, so a container cpuset or an outer
 server; keeping *other* tenants off those cores is the job of the outer
 cpuset (cgroup, Docker `--cpuset-cpus`, or Kubernetes CPU manager).
 
+## Sizing the lane
+
+The declarations must be a minority of the cpuset the server runs on. A stage
+that declares 5 cores on a 16-core lane leaves 11 for the pool and costs
+nothing when the box is quiet; the same declaration on an 8-core lane
+measured 13% below unpinned, because the carve takes the headroom the stage
+used for its bursts. Either widen the lane or use `auto`, which only applies
+the plan once neighbours have taken that headroom anyway.
+
 ## Choosing between static and auto
 
 Pinning pays when neighbours push the pipeline below the cores it declared,
