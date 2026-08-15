@@ -42,6 +42,10 @@ class CpuAllocationPlan:
     assignments: dict[str, ProcessCpuAssignment]
     shared_pools: dict[int | None, tuple[int, ...]]
     events: tuple[str, ...]
+    # Note (Jiaxin Deng): physical cores, not the cpu ids of the masks; the
+    # starvation trigger compares against what a stage declared, and on an
+    # SMT2 host the two differ by 2x.
+    exclusive_physical_cores: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +63,7 @@ class CpuAllocationPlan:
                 )
             },
             "events": list(self.events),
+            "exclusive_physical_cores": self.exclusive_physical_cores,
         }
 
 
@@ -245,4 +250,5 @@ def allocate(
         assignments=assignments,
         shared_pools=shared_pools,
         events=tuple(events),
+        exclusive_physical_cores=sum(granted[name] for name in placed),
     )

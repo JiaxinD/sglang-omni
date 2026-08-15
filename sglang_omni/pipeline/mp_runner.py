@@ -647,9 +647,7 @@ class MultiProcessPipelineRunner:
     def _start_auto_pin(
         self, cpu_plan: CpuAllocationPlan, groups: list[StageGroup]
     ) -> None:
-        declared = sum(
-            len(a.cpu_ids) for a in cpu_plan.assignments.values() if a.exclusive
-        )
+        declared = cpu_plan.exclusive_physical_cores
         if not declared:
             logger.info("cpu_alloc: nothing asked for exclusive cores; auto is a no-op")
             return

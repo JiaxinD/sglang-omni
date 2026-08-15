@@ -176,3 +176,17 @@ class TestDemotionKeepsExclusivityHonest:
         )
         assert not plan.assignments["huge"].exclusive
         assert all(plan.assignments[f"s{i}"].exclusive for i in range(2))
+
+
+class TestDeclaredCoresAreCountedInCores:
+    def test_smt_siblings_do_not_double_the_count(self, topology):
+        # The starvation trigger compares this against a stage's declaration,
+        # so counting cpu ids would read every declaration as twice as large.
+        plan = allocate(topology, [demand("a", serial=2), demand("shared")])
+        assert len(plan.assignments["a"].cpu_ids) == 4
+        assert plan.exclusive_physical_cores == 2
+
+    def test_a_demoted_demand_is_not_counted(self, topology):
+        plan = allocate(topology, [demand("big", serial=9), demand("shared")])
+        assert not plan.assignments["big"].exclusive
+        assert plan.exclusive_physical_cores == 0
