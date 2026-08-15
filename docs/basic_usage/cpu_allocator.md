@@ -18,6 +18,7 @@ Modes:
 | --- | --- |
 | `off` (default) | No affinity change; identical to today. |
 | `static` | Plan once at startup from the CPU topology and pin every stage process. |
+| `auto` | Plan the same way, but apply it only while the pipeline is short of CPU next to foreign load, and release it when that load goes away. |
 
 At startup the allocator discovers the CPU/NUMA/SMT topology, grants whole
 physical cores (both SMT siblings together) exclusively to declared serial
@@ -33,6 +34,18 @@ The universe is `sched_getaffinity`, so a container cpuset or an outer
 `taskset` bounds the plan. Exclusivity applies to the processes of this
 server; keeping *other* tenants off those cores is the job of the outer
 cpuset (cgroup, Docker `--cpuset-cpus`, or Kubernetes CPU manager).
+
+## Choosing between static and auto
+
+Pinning pays when neighbours push the pipeline below the cores it declared,
+and costs a few percent when they do not, so `auto` watches both numbers that
+`/host_contention` reports: how much CPU the process tree is getting, and how
+much foreign work shares its CPUs. It applies the plan after three
+consecutive samples where the tree holds less than 60% of its declared cores
+while at least one foreign core is busy, and releases it after three samples
+with no foreign load. `static` is the right choice when the neighbours are
+known in advance (a fixed colocation, a CI lane); `auto` suits a shared box
+where contention comes and goes.
 
 ## Model declarations
 
