@@ -128,9 +128,8 @@ EOF
 
 core_blocks_for() {
   local planned rc err
-  # Note (Jiaxin Deng): the planner refusing for lack of capacity is a real
-  # answer, so only an unavailable planner may fall back; the naive split
-  # ignores NUMA and would quietly break launch.sh's node-local contract.
+  # Note (Jiaxin Deng): a refusal is a real answer, so only an unavailable
+  # planner may fall back; the naive split breaks the node-local contract.
   err=$(mktemp /tmp/autodp_plan.XXXXXX.err)
   planned=$(PYTHONPATH="$HERE/../..${PYTHONPATH:+:$PYTHONPATH}" python3 -m sglang_omni.cpu_alloc plan --replicas "$1" --gpu-id "$GPU_ID" --format blocks 2>"$err")
   rc=$?
