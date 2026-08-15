@@ -98,12 +98,14 @@ class TestBuildPipelineCpuPlan:
         assert not vocoder.exclusive
         assert not set(vocoder.cpu_ids) & set(pipeline.cpu_ids)
 
-    def test_the_serving_parent_is_kept_off_the_exclusive_cores(self, dual_node_sysfs):
+    def test_the_serving_parent_sits_on_the_granted_cores(self, dual_node_sysfs):
+        # It is on every request path, so the shared pool is the wrong place
+        # for it: sharing the pool with colocated load measured 32 vs 127 QPS.
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
         config = make_config(
-            ["pipeline", "vocoder"],
+            ["tts_engine", "vocoder"],
             {
-                "pipeline": {"host_class": "serial-loop", "exclusive_cores": 2},
+                "tts_engine": {"host_class": "serial-loop", "exclusive_cores": 2},
                 "vocoder": {"host_class": "gpu-bound"},
             },
         )
@@ -115,11 +117,10 @@ class TestBuildPipelineCpuPlan:
             topology=topology,
         )
         parent = plan.assignments[SERVING_PARENT_PROCESS]
-        owned = {
-            cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids
-        }
-        assert parent.cpu_ids and not parent.exclusive
-        assert not set(parent.cpu_ids) & owned, "the parent shares an exclusive grant"
+        granted = plan.assignments["pipeline"]
+        assert granted.exclusive
+        assert parent.cpu_ids == granted.cpu_ids
+        assert not set(parent.cpu_ids) & set(plan.shared_pools[None])
 
     def test_no_declarations_returns_none(self, dual_node_sysfs):
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)

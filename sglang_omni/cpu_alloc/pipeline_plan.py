@@ -10,6 +10,7 @@ from sglang_omni.config.placement import StagePlacementPlan
 from sglang_omni.config.topology import ProcessTopologyPlan
 from sglang_omni.cpu_alloc.allocator import (
     CpuAllocationPlan,
+    ProcessCpuAssignment,
     ProcessCpuDemand,
     allocate,
 )
@@ -51,6 +52,37 @@ def _iter_process_entries(process_plan: ProcessTopologyPlan):
     for stage_name, process_names in process_plan.tp_stage_to_processes.items():
         for process_name in process_names:
             yield process_name, [stage_name]
+
+
+def _seat_parent_with_the_stages(plan: CpuAllocationPlan) -> CpuAllocationPlan:
+    """Put the parent on the granted cores instead of the shared pool.
+
+    Note (Jiaxin Deng): the parent is on every request path, and sharing the
+    pool with colocated load measured 32 vs 127 QPS; the grant keeps foreign
+    work out, not this server's own front end.
+    """
+    parent = plan.assignments.get(SERVING_PARENT_PROCESS)
+    granted = tuple(
+        sorted(
+            {cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids}
+        )
+    )
+    if parent is None or not granted:
+        return plan
+    assignments = dict(plan.assignments)
+    assignments[SERVING_PARENT_PROCESS] = ProcessCpuAssignment(
+        process_name=SERVING_PARENT_PROCESS,
+        cpu_ids=granted,
+        exclusive=False,
+        numa_node=parent.numa_node,
+    )
+    return CpuAllocationPlan(
+        assignments=assignments,
+        shared_pools=plan.shared_pools,
+        events=plan.events,
+        exclusive_physical_cores=plan.exclusive_physical_cores,
+        universe_physical_cores=plan.universe_physical_cores,
+    )
 
 
 def build_pipeline_cpu_plan(
@@ -122,7 +154,7 @@ def build_pipeline_cpu_plan(
         )
     )
 
-    plan = allocate(topology, demands)
+    plan = _seat_parent_with_the_stages(allocate(topology, demands))
     if plan.exclusive_physical_cores > 0.5 * plan.universe_physical_cores:
         logger.warning(
             "cpu_alloc: %d of %d core(s) granted exclusively; the same "
