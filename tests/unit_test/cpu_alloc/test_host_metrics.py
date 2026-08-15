@@ -100,3 +100,42 @@ class TestHostCpuContentionMonitor:
     def test_invalid_interval_rejected(self):
         with pytest.raises(ValueError, match="interval_s"):
             HostCpuContentionMonitor(interval_s=0)
+
+
+class TestReapedChildren:
+    def test_a_child_exiting_is_not_read_as_foreign_load(self, fake_proc):
+        hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+        monitor = make_monitor(fake_proc, [0.0, 10.0, 20.0])
+        fake_proc.pid_jiffies[777] = 100 * hz
+        fake_proc.write()
+        monitor.sample_once()
+
+        # The child burns a core for 10s, then exits and is reaped: its time
+        # leaves /proc but none of it was foreign.
+        fake_proc.busy[0] += 10 * hz
+        fake_proc.pid_jiffies[777] += 10 * hz
+        fake_proc.write()
+        monitor.sample_once()
+        assert monitor.snapshot()["foreign_busy_cores_last"] == pytest.approx(
+            0.0, abs=0.05
+        )
+
+        fake_proc.children[os.getpid()] = []
+        del fake_proc.pid_jiffies[777]
+        fake_proc.write()
+        monitor.sample_once()
+        snap = monitor.snapshot()
+        assert snap["own_busy_cores_last"] == pytest.approx(0.0, abs=0.05)
+        assert snap["foreign_busy_cores_last"] == pytest.approx(0.0, abs=0.05)
+        assert snap["foreign_busy_cores_peak"] == pytest.approx(0.0, abs=0.05)
+
+
+class TestLifecycle:
+    def test_start_after_stop_samples_again(self, fake_proc, monkeypatch):
+        monitor = HostCpuContentionMonitor(interval_s=0.01, proc_root=fake_proc.root)
+        monitor.start()
+        monitor.stop()
+        monitor.start()
+        assert monitor._thread is not None
+        assert not monitor._stop_event.is_set()
+        monitor.stop()

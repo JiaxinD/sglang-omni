@@ -107,6 +107,8 @@ class HostCpuContentionMonitor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._prev: tuple[float, int, int] | None = None
+        self._pid_jiffies: dict[int, int] = {}
+        self._retired_jiffies = 0
 
     @property
     def available(self) -> bool:
@@ -115,6 +117,7 @@ class HostCpuContentionMonitor:
     def start(self) -> None:
         if not self.available or self._thread is not None:
             return
+        self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run, name="host-cpu-contention", daemon=True
         )
@@ -139,10 +142,18 @@ class HostCpuContentionMonitor:
         cpus = set(os.sched_getaffinity(0))
         now = self._clock()
         busy = _cpuset_busy_jiffies(cpus, self._proc_root)
-        own = sum(
-            _pid_cpu_jiffies(pid, self._proc_root)
+        live = {
+            pid: _pid_cpu_jiffies(pid, self._proc_root)
             for pid in _tree_pids(self._root_pid, self._proc_root)
-        )
+        }
+        # Note (Jiaxin Deng): a reaped child takes its time out of /proc, so a
+        # plain sum over live pids walks backwards and the drop is read as
+        # foreign load; carry the last reading of the ones that are gone.
+        for pid, jiffies in self._pid_jiffies.items():
+            if pid not in live:
+                self._retired_jiffies += jiffies
+        self._pid_jiffies = live
+        own = sum(live.values()) + self._retired_jiffies
         prev = self._prev
         self._prev = (now, busy, own)
         if prev is None:
@@ -152,7 +163,7 @@ class HostCpuContentionMonitor:
         if dt <= 0:
             return
         busy_cores = (busy - prev_busy) / self._hz / dt
-        own_cores = (own - prev_own) / self._hz / dt
+        own_cores = max(0.0, (own - prev_own) / self._hz / dt)
         foreign = max(0.0, busy_cores - own_cores)
         with self._lock:
             self._samples.append(ContentionSample(now, foreign, own_cores))
