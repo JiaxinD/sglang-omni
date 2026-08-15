@@ -45,6 +45,7 @@ class CpuAllocationPlan:
     # Note (Jiaxin Deng): physical cores, not mask width; a declaration and
     # its cpu ids differ by 2x on an SMT2 host.
     exclusive_physical_cores: int = 0
+    universe_physical_cores: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +64,7 @@ class CpuAllocationPlan:
             },
             "events": list(self.events),
             "exclusive_physical_cores": self.exclusive_physical_cores,
+            "universe_physical_cores": self.universe_physical_cores,
         }
 
 
@@ -248,4 +250,5 @@ def allocate(
         shared_pools=shared_pools,
         events=tuple(events),
         exclusive_physical_cores=sum(granted[name] for name in placed),
+        universe_physical_cores=sum(capacity.values()),
     )

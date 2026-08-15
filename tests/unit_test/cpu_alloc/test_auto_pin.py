@@ -116,3 +116,35 @@ class TestAutoPin:
     def test_rejects_zero_declaration(self):
         with pytest.raises(ValueError, match="declared_cores"):
             CpuAutoPinSupervisor(CpuAllocationPlan({}, {}, ()), {}, declared_cores=0)
+
+
+class TestGrantTooWideToIsolate:
+    def _sup(self, monkeypatch, declared, universe):
+        monkeypatch.setattr(
+            os, "sched_getaffinity", lambda pid: set(range(16)), raising=False
+        )
+        plan = CpuAllocationPlan(
+            assignments={"asr": ProcessCpuAssignment("asr", (0, 1, 8, 9), True, 0)},
+            shared_pools={0: ()},
+            events=(),
+        )
+        return CpuAutoPinSupervisor(
+            plan,
+            {"asr": 100},
+            declared_cores=declared,
+            universe_cores=universe,
+            monitor=FakeMonitor(),
+            set_affinity=lambda pid, cpus: None,
+        )
+
+    def test_a_minority_grant_still_pins(self, monkeypatch):
+        sup = self._sup(monkeypatch, declared=5, universe=16)
+        assert not sup.disabled
+
+    def test_a_majority_grant_refuses(self, monkeypatch):
+        # Measured 0.87x when the grant was 5 of 8: pinning gives up more
+        # reach than the isolation is worth.
+        sup = self._sup(monkeypatch, declared=5, universe=8)
+        assert sup.disabled
+        sup.start()
+        assert sup._thread is None

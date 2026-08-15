@@ -652,8 +652,16 @@ class MultiProcessPipelineRunner:
             logger.info("cpu_alloc: nothing asked for exclusive cores; auto is a no-op")
             return
         pids = self._plan_pids(groups)
-        self._auto_pin = CpuAutoPinSupervisor(cpu_plan, pids, declared_cores=declared)
+        self._auto_pin = CpuAutoPinSupervisor(
+            cpu_plan,
+            pids,
+            declared_cores=declared,
+            universe_cores=cpu_plan.universe_physical_cores,
+        )
         self._auto_pin.start()
+        if self._auto_pin.disabled:
+            self._auto_pin = None
+            return
         logger.info(
             "cpu_alloc: auto mode watching %d declared core(s) over %d process(es)",
             declared,
