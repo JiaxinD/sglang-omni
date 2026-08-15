@@ -1,10 +1,11 @@
 # CPU allocator: topology-aware core planning for colocated serving
 
-Host-bound speech serving degrades sharply when other work shares its CPUs:
-past a contention threshold an unprotected server can collapse to ~40% of its
-clean throughput while a protected one retains ~97% (see the measurement
-tables in the introducing PR). The CPU allocator turns the manual
-`numactl`/`taskset` recipes into one flag.
+Host-bound speech serving degrades sharply when the work sharing its CPUs is
+placed anywhere it likes: past a contention threshold throughput can collapse
+to ~40% of what the same server manages when that work is confined to a
+bounded set of cores (see the measurement tables in the introducing PR). The
+CPU allocator derives that placement for every process the server owns,
+instead of the manual `numactl`/`taskset` recipes.
 
 ## Usage
 
