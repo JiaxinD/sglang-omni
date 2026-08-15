@@ -115,64 +115,91 @@ def allocate(
         raise ValueError("min_shared_physical_cores must be >= 1")
 
     events: list[str] = []
-    # Note (Jiaxin Deng): cores held back for a pool nobody joins are cores
-    # taken from the only process there is, measured as -11% on a
-    # single-process DP replica, so reserve only when a tenant exists.
-    has_shared_tenant = any(not d.exclusive_cores for d in demands)
-    node_states = {
-        node: _NodeState(
-            free_cores=list(topology.cores_on_node(node)),
-            reserved_shared=min_shared_physical_cores if has_shared_tenant else 0,
-        )
-        for node in topology.numa_nodes
-    }
+    capacity = {node: len(topology.cores_on_node(node)) for node in topology.numa_nodes}
+    if not capacity:
+        raise ValueError("topology has no NUMA nodes")
 
     exclusive_demands = sorted(
         (d for d in demands if d.exclusive_cores),
-        key=lambda d: d.process_name,
+        key=lambda d: (-d.exclusive_cores, d.process_name),
     )
-    anchored: dict[str, int] = {}
-    projected = dict.fromkeys(node_states, 0)
-    for demand in exclusive_demands:
-        node = _anchor_node(demand, node_states, projected, events)
-        if node is not None:
-            anchored[demand.process_name] = node
-            projected[node] += demand.exclusive_cores
-    exclusive_demands = [d for d in exclusive_demands if d.process_name in anchored]
+    shared_declared = any(not d.exclusive_cores for d in demands)
 
-    granted: dict[str, int] = {
-        d.process_name: d.exclusive_cores for d in exclusive_demands
-    }
-    for node, state in node_states.items():
-        local = sorted(
-            (d for d in exclusive_demands if anchored[d.process_name] == node),
-            key=lambda d: (d.exclusive_cores, d.process_name),
-        )
-        budget = len(state.free_cores) - state.reserved_shared
-        for demand in local:
-            if demand.exclusive_cores <= budget:
-                budget -= demand.exclusive_cores
+    def _place(
+        reserve: int,
+    ) -> tuple[dict[str, int], dict[int, int], list[str], list[str]]:
+        # Note (Jiaxin Deng): a demand is charged to a node only once it is
+        # known to fit there, so a demand that ends up shared cannot strand
+        # capacity on the node it was tried against first.
+        placed: dict[str, int] = {}
+        used = dict.fromkeys(capacity, 0)
+        demoted: list[str] = []
+        notes: list[str] = []
+        room = lambda n: capacity[n] - used[n] - reserve  # noqa: E731
+        for demand in exclusive_demands:
+            want = demand.exclusive_cores
+            node = demand.numa_node
+            if node is not None and node not in capacity:
+                notes.append(
+                    f"process {demand.process_name}: NUMA node {node} has no "
+                    f"usable cores in the universe; moved to the shared pool"
+                )
+                demoted.append(demand.process_name)
                 continue
-            granted[demand.process_name] = 0
-            events.append(
-                f"node {node}: {demand.process_name} wants "
-                f"{demand.exclusive_cores} core(s) but only {max(budget, 0)} "
-                f"remain; moved to the shared pool"
-            )
+            if node is None:
+                fits = [n for n in sorted(capacity) if room(n) >= want]
+                node = max(fits, key=lambda n: (room(n), -n), default=None)
+            elif room(node) < want:
+                node = None
+            if node is None:
+                notes.append(
+                    f"process {demand.process_name}: wants {want} core(s) but "
+                    f"no node has room; moved to the shared pool"
+                )
+                demoted.append(demand.process_name)
+                continue
+            placed[demand.process_name] = node
+            used[node] += want
+        return placed, used, demoted, notes
 
-    # Note (Jiaxin Deng): with no shared tenant the leftover would idle, so
-    # the exclusive holders take the whole node between them.
+    reserve = min_shared_physical_cores if shared_declared else 0
+    placed, used, demoted, notes = _place(reserve)
+    if demoted and reserve == 0:
+        # Somebody will live in the shared pool after all, so redo the layout
+        # with the pool reserved instead of evicting a holder that already fit.
+        reserve = min_shared_physical_cores
+        placed, used, demoted, notes = _place(reserve)
+    events.extend(notes)
+
+    granted = {
+        d.process_name: d.exclusive_cores
+        for d in exclusive_demands
+        if d.process_name in placed
+    }
+    has_shared_tenant = bool(demoted) or shared_declared
+    # Note (Jiaxin Deng): cores held back for a pool nobody joins are cores
+    # taken from the only process there is, measured as -11% on a
+    # single-process DP replica.
     if not has_shared_tenant:
-        for node, state in node_states.items():
-            local = [
-                d
-                for d in exclusive_demands
-                if anchored[d.process_name] == node and granted[d.process_name]
-            ]
-            spare = len(state.free_cores) - sum(granted[d.process_name] for d in local)
-            for i, demand in enumerate(local):
-                extra = spare // len(local) + (1 if i < spare % len(local) else 0)
-                granted[demand.process_name] += extra
+        for node in capacity:
+            local = sorted(n for n, nd in placed.items() if nd == node)
+            if not local:
+                continue
+            spare = capacity[node] - used[node]
+            for i, name in enumerate(local):
+                granted[name] += spare // len(local) + (
+                    1 if i < spare % len(local) else 0
+                )
+
+    node_states = {
+        node: _NodeState(
+            free_cores=list(topology.cores_on_node(node)),
+            reserved_shared=reserve,
+        )
+        for node in capacity
+    }
+    anchored = placed
+    exclusive_demands = [d for d in exclusive_demands if d.process_name in placed]
 
     assignments: dict[str, ProcessCpuAssignment] = {}
     for demand in exclusive_demands:

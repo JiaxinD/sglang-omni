@@ -28,8 +28,9 @@ class FakeMonitor:
 
 @pytest.fixture
 def rig(monkeypatch):
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(16)),
-                        raising=False)
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda pid: set(range(16)), raising=False
+    )
     plan = CpuAllocationPlan(
         assignments={"asr": ProcessCpuAssignment("asr", (0, 1, 8, 9), True, 0)},
         shared_pools={0: ()},
@@ -114,6 +115,4 @@ class TestAutoPin:
 
     def test_rejects_zero_declaration(self):
         with pytest.raises(ValueError, match="declared_cores"):
-            CpuAutoPinSupervisor(
-                CpuAllocationPlan({}, {}, ()), {}, declared_cores=0
-            )
+            CpuAutoPinSupervisor(CpuAllocationPlan({}, {}, ()), {}, declared_cores=0)

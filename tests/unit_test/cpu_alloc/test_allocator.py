@@ -119,3 +119,60 @@ class TestAllocate:
         data = plan.to_dict()
         assert data["assignments"]["ar"] == {"cpus": "0,8", "exclusive": True}
         assert "0" in data["shared_pools"] and "None" in data["shared_pools"]
+
+
+class TestDemotionKeepsExclusivityHonest:
+    def test_demoted_process_gets_a_real_mask(self, topology):
+        # It must not fall through with an empty mask: the caller skips empty
+        # masks, so the process would keep the whole cpuset and land on the
+        # cores the survivors were promised.
+        plan = allocate(topology, [demand("big", serial=4), demand("small", serial=1)])
+        big = plan.assignments["big"]
+        small = plan.assignments["small"]
+        assert big.cpu_ids
+        assert not set(big.cpu_ids) & set(small.cpu_ids)
+
+    def test_demoted_process_gets_a_mask_when_every_node_is_taken(self, topology):
+        # Both nodes are fully claimed, so the demoted process has nowhere to
+        # fall back to unless the pool is reserved for it.
+        plan = allocate(
+            topology,
+            [
+                demand("a", node=0, serial=4),
+                demand("b", node=1, serial=4),
+                demand("c", node=0, serial=1),
+            ],
+        )
+        owned = {
+            cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids
+        }
+        shared = [a for a in plan.assignments.values() if not a.exclusive]
+        assert shared, "the case is only interesting when somebody is demoted"
+        for a in shared:
+            assert a.cpu_ids, f"{a.process_name} got an empty mask"
+            assert not set(a.cpu_ids) & owned
+
+    def test_every_demoted_process_stays_off_exclusive_cores(self, topology):
+        plan = allocate(
+            topology,
+            [demand(f"s{i}", serial=1) for i in range(5)] + [demand("shared")],
+        )
+        owned = {
+            cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids
+        }
+        for name, a in plan.assignments.items():
+            if a.exclusive:
+                continue
+            assert a.cpu_ids, f"{name} got an empty mask"
+            assert not set(a.cpu_ids) & owned, f"{name} overlaps an exclusive grant"
+
+    def test_a_demotion_frees_the_capacity_it_asked_for(self, topology):
+        # "huge" cannot fit anywhere; the cores it was tried against must stay
+        # available to the demands behind it.
+        plan = allocate(
+            topology,
+            [demand("huge", node=None, serial=9)]
+            + [demand(f"s{i}", node=None, serial=3) for i in range(2)],
+        )
+        assert not plan.assignments["huge"].exclusive
+        assert all(plan.assignments[f"s{i}"].exclusive for i in range(2))
