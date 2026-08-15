@@ -139,3 +139,12 @@ class TestLifecycle:
         assert monitor._thread is not None
         assert not monitor._stop_event.is_set()
         monitor.stop()
+
+
+class TestProcessMonitorIsShared:
+    def test_the_endpoint_and_the_supervisor_get_the_same_sampler(self, monkeypatch):
+        import sglang_omni.cpu_alloc.host_metrics as hm
+
+        monkeypatch.setattr(hm, "_PROCESS_MONITOR", None)
+        first = hm.get_process_monitor(interval_s=1.0)
+        assert hm.get_process_monitor() is first

@@ -193,6 +193,21 @@ class HostCpuContentionMonitor:
         }
 
 
+_PROCESS_MONITOR: HostCpuContentionMonitor | None = None
+
+
+def get_process_monitor(**kwargs) -> HostCpuContentionMonitor:
+    """The one sampler for this process.
+
+    Note (Jiaxin Deng): both the endpoint and the auto supervisor want the
+    same reading, and a second sampler is a second thread walking /proc.
+    """
+    global _PROCESS_MONITOR
+    if _PROCESS_MONITOR is None:
+        _PROCESS_MONITOR = HostCpuContentionMonitor(**kwargs)
+    return _PROCESS_MONITOR
+
+
 def _format_cpulist(cpus: list[int]) -> str:
     from sglang_omni.cpu_alloc.topology import format_cpulist
 

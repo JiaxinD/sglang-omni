@@ -16,7 +16,10 @@ import threading
 from dataclasses import dataclass
 
 from sglang_omni.cpu_alloc.allocator import CpuAllocationPlan
-from sglang_omni.cpu_alloc.host_metrics import HostCpuContentionMonitor
+from sglang_omni.cpu_alloc.host_metrics import (
+    HostCpuContentionMonitor,
+    get_process_monitor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +81,7 @@ class CpuAutoPinSupervisor:
         self._plan = plan
         self._pids = dict(pids)
         self._declared = declared_cores
-        self._monitor = monitor or HostCpuContentionMonitor(interval_s=interval_s)
+        self._monitor = monitor or get_process_monitor(interval_s=interval_s)
         self._interval = interval_s
         self._ticks_to_pin = ticks_to_pin
         self._ticks_to_release = ticks_to_release
