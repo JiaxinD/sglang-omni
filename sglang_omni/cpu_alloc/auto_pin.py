@@ -28,7 +28,7 @@ RELIEVED_FOREIGN_CORES = 0.5
 MIN_FOREIGN_CORES = 1.0
 
 
-def _set_process_affinity(pid: int, cpu_ids: set[int]) -> None:
+def set_process_affinity(pid: int, cpu_ids: set[int]) -> None:
     """Apply the mask to every task of *pid*, not just its main thread.
 
     Note (Jiaxin Deng): affinity is per thread; the task list is re-read until
@@ -71,7 +71,7 @@ class CpuAutoPinSupervisor:
         interval_s: float = 10.0,
         ticks_to_pin: int = 3,
         ticks_to_release: int = 3,
-        set_affinity=_set_process_affinity,
+        set_affinity=set_process_affinity,
     ):
         if declared_cores < 1:
             raise ValueError("declared_cores must be >= 1")

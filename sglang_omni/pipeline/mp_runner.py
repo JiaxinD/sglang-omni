@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import multiprocessing
+import os
 import socket
 from typing import Any
 
@@ -25,8 +26,11 @@ from sglang_omni.config.runtime import (
 from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.config.topology import ProcessTopologyPlan
 from sglang_omni.cpu_alloc.allocator import CpuAllocationPlan
-from sglang_omni.cpu_alloc.auto_pin import CpuAutoPinSupervisor
-from sglang_omni.cpu_alloc.pipeline_plan import build_pipeline_cpu_plan
+from sglang_omni.cpu_alloc.auto_pin import CpuAutoPinSupervisor, set_process_affinity
+from sglang_omni.cpu_alloc.pipeline_plan import (
+    SERVING_PARENT_PROCESS,
+    build_pipeline_cpu_plan,
+)
 from sglang_omni.pipeline import Coordinator
 from sglang_omni.pipeline.runtime_config import (
     IpcRuntimeDir,
@@ -514,8 +518,11 @@ class MultiProcessPipelineRunner:
                 for stage_name, endpoint in group.stage_control_endpoints.items():
                     self._coordinator.register_stage(stage_name, endpoint)
 
-            if cpu_plan is not None and self._config.placement.cpu_allocator == "auto":
-                self._start_auto_pin(cpu_plan, groups)
+            if cpu_plan is not None:
+                if self._config.placement.cpu_allocator == "auto":
+                    self._start_auto_pin(cpu_plan, groups)
+                else:
+                    self._confine_serving_parent(cpu_plan)
 
             self._started = True
             self._monitor_task = asyncio.create_task(self._monitor_children())
@@ -609,6 +616,51 @@ class MultiProcessPipelineRunner:
         self._coordinator = None
 
         self._close_runtime_dir()
+
+    def _plan_pids(self, groups: list[StageGroup]) -> dict[str, int]:
+        pids = {SERVING_PARENT_PROCESS: os.getpid()}
+        for group in groups:
+            for spec, proc in zip(group.process_specs, group.processes):
+                if proc.pid is not None:
+                    pids[spec.process_name] = proc.pid
+        return pids
+
+    def _confine_serving_parent(self, cpu_plan: CpuAllocationPlan) -> None:
+        """Keep the parent off the cores its children were promised.
+
+        Note (Jiaxin Deng): applied after the children are up so they inherit
+        their own mask at spawn rather than the parent's shared pool.
+        """
+        assignment = cpu_plan.assignments.get(SERVING_PARENT_PROCESS)
+        if assignment is None or not assignment.cpu_ids:
+            return
+        try:
+            set_process_affinity(os.getpid(), set(assignment.cpu_ids))
+        except OSError as exc:
+            logger.warning("cpu_alloc: could not confine the serving parent: %s", exc)
+            return
+        logger.info(
+            "cpu_alloc: serving parent confined to the shared pool (%d cpu(s))",
+            len(assignment.cpu_ids),
+        )
+
+    def _start_auto_pin(
+        self, cpu_plan: CpuAllocationPlan, groups: list[StageGroup]
+    ) -> None:
+        declared = sum(
+            len(a.cpu_ids) for a in cpu_plan.assignments.values() if a.exclusive
+        )
+        if not declared:
+            logger.info("cpu_alloc: nothing asked for exclusive cores; auto is a no-op")
+            return
+        pids = self._plan_pids(groups)
+        self._auto_pin = CpuAutoPinSupervisor(cpu_plan, pids, declared_cores=declared)
+        self._auto_pin.start()
+        logger.info(
+            "cpu_alloc: auto mode watching %d declared core(s) over %d process(es)",
+            declared,
+            len(pids),
+        )
 
     def _stop_auto_pin(self) -> None:
         if self._auto_pin is not None:

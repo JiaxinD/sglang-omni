@@ -19,6 +19,11 @@ from sglang_omni.utils.cpu import cgroup_cpu_quota_count
 
 logger = logging.getLogger(__name__)
 
+# Note (Jiaxin Deng): the process that runs uvicorn, the Coordinator and the
+# relay is not a stage, and leaving it on the full cpuset puts it on top of
+# every core the stages were promised.
+SERVING_PARENT_PROCESS = "serving-parent"
+
 
 def _replicated_process_names(process_plan) -> set[str]:
     """Names of process groups that expand into multiple replicas.
@@ -109,6 +114,14 @@ def build_pipeline_cpu_plan(
                 exclusive_cores=exclusive,
             )
         )
+
+    demands.append(
+        ProcessCpuDemand(
+            process_name=SERVING_PARENT_PROCESS,
+            numa_node=None,
+            exclusive_cores=0,
+        )
+    )
 
     plan = allocate(topology, demands)
     logger.info("cpu_alloc plan: %s", json.dumps(plan.to_dict(), sort_keys=True))

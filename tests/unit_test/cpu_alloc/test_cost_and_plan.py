@@ -6,7 +6,10 @@ import pytest
 from sglang_omni.config.placement import StagePlacement, StagePlacementPlan
 from sglang_omni.config.topology import ProcessGroupPlacement, ProcessTopologyPlan
 from sglang_omni.cpu_alloc.cost import StageCpuCost, resolve_stage_cpu_costs
-from sglang_omni.cpu_alloc.pipeline_plan import build_pipeline_cpu_plan
+from sglang_omni.cpu_alloc.pipeline_plan import (
+    SERVING_PARENT_PROCESS,
+    build_pipeline_cpu_plan,
+)
 from sglang_omni.cpu_alloc.topology import discover_topology
 
 
@@ -94,6 +97,29 @@ class TestBuildPipelineCpuPlan:
         vocoder = plan.assignments["vocoder"]
         assert not vocoder.exclusive
         assert not set(vocoder.cpu_ids) & set(pipeline.cpu_ids)
+
+    def test_the_serving_parent_is_kept_off_the_exclusive_cores(self, dual_node_sysfs):
+        topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
+        config = make_config(
+            ["pipeline", "vocoder"],
+            {
+                "pipeline": {"host_class": "serial-loop", "exclusive_cores": 2},
+                "vocoder": {"host_class": "gpu-bound"},
+            },
+        )
+        placement_plan, process_plan = self._plans()
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=process_plan,
+            topology=topology,
+        )
+        parent = plan.assignments[SERVING_PARENT_PROCESS]
+        owned = {
+            cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids
+        }
+        assert parent.cpu_ids and not parent.exclusive
+        assert not set(parent.cpu_ids) & owned, "the parent shares an exclusive grant"
 
     def test_no_declarations_returns_none(self, dual_node_sysfs):
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
