@@ -123,5 +123,13 @@ def build_pipeline_cpu_plan(
     )
 
     plan = allocate(topology, demands)
+    if plan.exclusive_physical_cores > 0.5 * plan.universe_physical_cores:
+        logger.warning(
+            "cpu_alloc: %d of %d core(s) granted exclusively; the same "
+            "declaration measured 1.3x on a lane three times its size and "
+            "0.87x on a lane less than twice it, so widen the cpuset",
+            plan.exclusive_physical_cores,
+            plan.universe_physical_cores,
+        )
     logger.info("cpu_alloc plan: %s", json.dumps(plan.to_dict(), sort_keys=True))
     return plan
