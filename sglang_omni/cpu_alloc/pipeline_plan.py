@@ -55,26 +55,27 @@ def _iter_process_entries(process_plan: ProcessTopologyPlan):
 
 
 def _seat_parent_with_the_stages(plan: CpuAllocationPlan) -> CpuAllocationPlan:
-    """Put the parent on the granted cores instead of the shared pool.
+    """Give the parent the granted cores, or the pool when nothing is granted.
 
     Note (Jiaxin Deng): the parent is on every request path, and sharing the
     pool with colocated load measured 32 vs 127 QPS; the grant keeps foreign
-    work out, not this server's own front end.
+    work out, not this server's own front end. Seated here rather than
+    declared, so it never reserves a pool it will not use.
     """
-    parent = plan.assignments.get(SERVING_PARENT_PROCESS)
     granted = tuple(
         sorted(
             {cpu for a in plan.assignments.values() if a.exclusive for cpu in a.cpu_ids}
         )
     )
-    if parent is None or not granted:
+    cpu_ids = granted or plan.shared_pools.get(None, ())
+    if not cpu_ids:
         return plan
     assignments = dict(plan.assignments)
     assignments[SERVING_PARENT_PROCESS] = ProcessCpuAssignment(
         process_name=SERVING_PARENT_PROCESS,
-        cpu_ids=granted,
+        cpu_ids=cpu_ids,
         exclusive=False,
-        numa_node=parent.numa_node,
+        numa_node=None,
     )
     return CpuAllocationPlan(
         assignments=assignments,
@@ -145,14 +146,6 @@ def build_pipeline_cpu_plan(
                 exclusive_cores=exclusive,
             )
         )
-
-    demands.append(
-        ProcessCpuDemand(
-            process_name=SERVING_PARENT_PROCESS,
-            numa_node=None,
-            exclusive_cores=0,
-        )
-    )
 
     plan = _seat_parent_with_the_stages(allocate(topology, demands))
     if plan.exclusive_physical_cores > 0.5 * plan.universe_physical_cores:

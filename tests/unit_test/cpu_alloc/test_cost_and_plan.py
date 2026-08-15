@@ -122,6 +122,30 @@ class TestBuildPipelineCpuPlan:
         assert parent.cpu_ids == granted.cpu_ids
         assert not set(parent.cpu_ids) & set(plan.shared_pools[None])
 
+    def test_a_lone_serial_stage_keeps_the_whole_node(self, dual_node_sysfs):
+        # Nobody lives in the pool here, so holding cores back for it would
+        # take them from the only two processes there are.
+        topology = discover_topology(range(4), sysfs_root=dual_node_sysfs)
+        config = make_config(
+            ["tts_engine"],
+            {"tts_engine": {"host_class": "serial-loop", "exclusive_cores": 2}},
+        )
+        placement_plan, process_plan = self._plans()
+        process_plan = ProcessTopologyPlan(
+            groups=(ProcessGroupPlacement("pipeline", ("tts_engine",), 0),),
+            stage_to_process={"tts_engine": "pipeline"},
+            tp_stage_to_processes={},
+        )
+        plan = build_pipeline_cpu_plan(
+            config,
+            placement_plan=placement_plan,
+            process_plan=process_plan,
+            topology=topology,
+        )
+        granted = plan.assignments["pipeline"]
+        assert set(granted.cpu_ids) == set(topology.universe)
+        assert plan.assignments[SERVING_PARENT_PROCESS].cpu_ids == granted.cpu_ids
+
     def test_no_declarations_returns_none(self, dual_node_sysfs):
         topology = discover_topology(range(16), sysfs_root=dual_node_sysfs)
         config = make_config(["tts_engine", "vocoder"], {})
