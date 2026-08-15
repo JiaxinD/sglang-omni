@@ -116,7 +116,7 @@ class PlacementConfig(BaseModel):
 
     max_total_gpu_memory_fraction_per_gpu: float = 1.0
     require_memory_fraction_for_colocation: bool = True
-    cpu_allocator: Literal["off", "static"] = "off"
+    cpu_allocator: Literal["off", "static", "auto"] = "off"
 
     def model_post_init(self, __context: Any = None) -> None:
         value = self.max_total_gpu_memory_fraction_per_gpu

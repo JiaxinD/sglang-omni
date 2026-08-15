@@ -25,6 +25,7 @@ from sglang_omni.config.runtime import (
 from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.config.topology import ProcessTopologyPlan
 from sglang_omni.cpu_alloc.allocator import CpuAllocationPlan
+from sglang_omni.cpu_alloc.auto_pin import CpuAutoPinSupervisor
 from sglang_omni.cpu_alloc.pipeline_plan import build_pipeline_cpu_plan
 from sglang_omni.pipeline import Coordinator
 from sglang_omni.pipeline.runtime_config import (
@@ -415,6 +416,7 @@ class MultiProcessPipelineRunner:
         self._fatal_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
         self._prep: PipelineRuntimePrep | None = None
+        self._auto_pin: CpuAutoPinSupervisor | None = None
         self._started = False
 
     @property
@@ -461,6 +463,9 @@ class MultiProcessPipelineRunner:
                     placement_plan=prep.placement_plan,
                     process_plan=prep.process_plan,
                 )
+            spawn_plan = (
+                cpu_plan if self._config.placement.cpu_allocator == "static" else None
+            )
             groups = _build_stage_groups(
                 self._config,
                 ctx,
@@ -469,7 +474,7 @@ class MultiProcessPipelineRunner:
                 endpoints=prep.endpoints,
                 placement_plan=prep.placement_plan,
                 process_plan=prep.process_plan,
-                cpu_plan=cpu_plan,
+                cpu_plan=spawn_plan,
             )
 
             terminal_stages_resolver = (
@@ -508,6 +513,9 @@ class MultiProcessPipelineRunner:
             for group in self._groups:
                 for stage_name, endpoint in group.stage_control_endpoints.items():
                     self._coordinator.register_stage(stage_name, endpoint)
+
+            if cpu_plan is not None and self._config.placement.cpu_allocator == "auto":
+                self._start_auto_pin(cpu_plan, groups)
 
             self._started = True
             self._monitor_task = asyncio.create_task(self._monitor_children())
@@ -574,6 +582,7 @@ class MultiProcessPipelineRunner:
         if not self._started:
             return
         self._started = False
+        self._stop_auto_pin()
 
         if self._monitor_task is not None:
             current = asyncio.current_task()
@@ -601,8 +610,14 @@ class MultiProcessPipelineRunner:
 
         self._close_runtime_dir()
 
+    def _stop_auto_pin(self) -> None:
+        if self._auto_pin is not None:
+            self._auto_pin.stop()
+            self._auto_pin = None
+
     async def _cleanup_on_failure(self) -> None:
         """Best-effort cleanup after a failed start()."""
+        self._stop_auto_pin()
         for group in self._groups:
             for p in group.processes:
                 if p.is_alive():
