@@ -35,26 +35,26 @@ The universe is `sched_getaffinity`, so a container cpuset or an outer
 server; keeping *other* tenants off those cores is the job of the outer
 cpuset (cgroup, Docker `--cpuset-cpus`, or Kubernetes CPU manager).
 
-## Sizing the lane
-
-The declarations must be a minority of the cpuset the server runs on. A stage
-that declares 5 cores on a 16-core lane leaves 11 for the pool and costs
-nothing when the box is quiet; the same declaration on an 8-core lane
-measured 13% below unpinned, because the carve takes the headroom the stage
-used for its bursts. Either widen the lane or use `auto`, which only applies
-the plan once neighbours have taken that headroom anyway.
-
 ## Choosing between static and auto
 
-Pinning pays when neighbours push the pipeline below the cores it declared,
-and costs a few percent when they do not, so `auto` watches both numbers that
-`/host_contention` reports: how much CPU the process tree is getting, and how
-much foreign work shares its CPUs. It applies the plan after three
-consecutive samples where the tree holds less than 60% of its declared cores
-while at least one foreign core is busy, and releases it after three samples
-with no foreign load. `static` is the right choice when the neighbours are
-known in advance (a fixed colocation, a CI lane); `auto` suits a shared box
-where contention comes and goes.
+`static` applies the plan for the process lifetime. `auto` applies it only
+while the tree is starved next to foreign load, after three consecutive
+samples where it holds less than 60% of its declared cores while at least one
+foreign core is busy, and releases it after three samples with no foreign
+load. On our measurements applying the plan is throughput neutral in both
+directions, so `auto` is there for operators who would rather the masks not
+exist while the box is quiet, not because pinning under contention was worth
+anything on its own.
+
+## What the plan is worth
+
+What moves throughput is that colocated work is confined to a bounded set of
+cores, not that the serial loop holds exclusive ones. With a neighbour held
+to the shared pool, Fun-ASR measured 125.5 QPS planned against 125.9
+unplanned, both about 2.7x the 46.5 the same server manages when that
+neighbour roams the whole cpuset. So the allocator earns its place by placing
+every process this server owns, correctly and automatically, rather than by
+the exclusive grant itself.
 
 ## Model declarations
 

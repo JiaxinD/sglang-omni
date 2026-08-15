@@ -28,10 +28,6 @@ logger = logging.getLogger(__name__)
 STARVED_FRACTION = 0.6
 RELIEVED_FOREIGN_CORES = 0.5
 MIN_FOREIGN_CORES = 1.0
-# Note (Jiaxin Deng): pinning gives up reach to gain isolation, which only
-# pays while the grant is a minority of the lane: 5 cores of 16 measured
-# 1.3x, the same 5 of 8 measured 0.87x.
-MAX_GRANT_FRACTION = 0.5
 
 
 def set_process_affinity(pid: int, cpu_ids: set[int]) -> None:
@@ -73,7 +69,6 @@ class CpuAutoPinSupervisor:
         pids: dict[str, int],
         declared_cores: int,
         *,
-        universe_cores: int | None = None,
         monitor: HostCpuContentionMonitor | None = None,
         interval_s: float = 10.0,
         ticks_to_pin: int = 3,
@@ -85,11 +80,6 @@ class CpuAutoPinSupervisor:
         self._plan = plan
         self._pids = dict(pids)
         self._declared = declared_cores
-        self._universe = universe_cores
-        self._too_wide = (
-            universe_cores is not None
-            and declared_cores > MAX_GRANT_FRACTION * universe_cores
-        )
         self._monitor = monitor or get_process_monitor(interval_s=interval_s)
         self._interval = interval_s
         self._ticks_to_pin = ticks_to_pin
@@ -108,22 +98,9 @@ class CpuAutoPinSupervisor:
     def pinned(self) -> bool:
         return self._state.pinned
 
-    @property
-    def disabled(self) -> bool:
-        """True when applying the plan would cost more reach than it buys."""
-        return self._too_wide
-
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("Supervisor already started")
-        if self._too_wide:
-            logger.warning(
-                "cpu_alloc: %d declared core(s) out of %d leaves too little "
-                "room to isolate into; auto will not pin",
-                self._declared,
-                self._universe,
-            )
-            return
         self._monitor.start()
         self._thread = threading.Thread(
             target=self._run, name="cpu-auto-pin", daemon=True

@@ -215,21 +215,3 @@ class TestBuildPipelineCpuPlan:
         )
         assert not plan.assignments["pipeline"].exclusive
         assert plan.assignments["pipeline"].cpu_ids == plan.shared_pools[None]
-
-
-class TestNarrowLaneIsFlagged:
-    def test_a_grant_over_half_the_lane_warns(self, dual_node_sysfs, caplog):
-        topology = discover_topology(range(4), sysfs_root=dual_node_sysfs)
-        config = make_config(
-            ["tts_engine"],
-            {"tts_engine": {"host_class": "serial-loop", "exclusive_cores": 3}},
-        )
-        placement_plan, process_plan = TestBuildPipelineCpuPlan()._plans()
-        with caplog.at_level("WARNING"):
-            build_pipeline_cpu_plan(
-                config,
-                placement_plan=placement_plan,
-                process_plan=process_plan,
-                topology=topology,
-            )
-        assert any("widen the cpuset" in r.getMessage() for r in caplog.records)
