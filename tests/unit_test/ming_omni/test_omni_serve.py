@@ -285,7 +285,6 @@ def test_ming_cli_applies_image_encoder_tp_and_gpus() -> None:
     image_encoder = _stage(config, "image_encoder")
     assert image_encoder.tp_size == 2
     assert image_encoder.gpu == [4, 5]
-    assert image_encoder.parallelism.tp == 2
 
 
 def test_ming_cli_image_encoder_tp1_collapses_to_scalar_gpu() -> None:
@@ -345,7 +344,6 @@ def test_ming_cli_applies_tp_server_args_for_config_mutated_tp(monkeypatch) -> N
     config = MingOmniPipelineConfig(model_path="dummy")
     thinker = _stage(config, "thinker")
     thinker.tp_size = 2
-    thinker.parallelism.tp = 2
     thinker.gpu = [0, 1]
 
     apply_parallelism_cli_overrides(

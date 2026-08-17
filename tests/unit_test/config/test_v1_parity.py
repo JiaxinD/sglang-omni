@@ -133,6 +133,19 @@ INTENTIONAL_DIFFERENCES: tuple[IntentionalDifference, ...] = (
             "wants a string and is still parsed where it wants a number."
         ),
     ),
+    IntentionalDifference(
+        pattern="stages.*.tp_size",
+        kind=V2_ACCEPTS,
+        reason=(
+            "StageConfig dropped the parallelism.tp mirror of tp_size. The "
+            "frozen oracle still copies a tp_size override into "
+            "stage['parallelism'], which today's schema refuses as an unknown "
+            "field, so the oracle now rejects every tp_size override it once "
+            "accepted. The observable V1 outcome -- the override lands in "
+            "tp_size, and the parallelism.tp spelling keeps working -- is "
+            "asserted directly in TestKnownV1Behaviours."
+        ),
+    ),
 )
 
 
@@ -467,16 +480,27 @@ class TestKnownV1Behaviours:
         "key",
         ["stages.thinker.tp_size", "stages.thinker.parallelism.tp"],
     )
-    def test_parallelism_alias_is_mirrored(self, key: str) -> None:
+    def test_tp_overrides_land_in_tp_size(self, key: str) -> None:
+        """Both V1 spellings still work; only the canonical field remains.
+
+        The oracle cannot run these probes any more -- its alias mirror writes
+        a ``parallelism`` key the schema no longer has -- so the V1-observable
+        outcome is asserted directly: the override lands in ``tp_size``.
+        """
         config = build_pipeline_config()
-        v1 = v1_merge_dotted_cli(config, {key: "4"})
         v2 = _v2_merge(config, {key: "4"})
-        assert (v1.stages[1].tp_size, v1.stages[1].parallelism.tp) == (4, 4)
-        assert not diff_configs(v1, v2)
+        assert v2.stages[1].tp_size == 4
+
+    def test_parallelism_spelling_is_reported_as_deprecated(self) -> None:
+        config = build_pipeline_config()
+        patches = patches_from_dotted_cli(
+            {"stages.thinker.parallelism.tp": "4"}, config
+        )
+        assert [patch.deprecated for patch in patches.deprecations()] != []
 
     def test_positional_stage_index(self) -> None:
         config = build_pipeline_config()
-        args = {"stages.1.tp_size": "2"}
+        args = {"stages.1.runtime.max_seq_len": "2048"}
         v1 = v1_merge_dotted_cli(config, dict(args))
         v2 = _v2_merge(config, dict(args))
         assert not diff_configs(v1, v2)
@@ -489,7 +513,7 @@ class TestKnownV1Behaviours:
     def test_several_keys_at_once(self) -> None:
         config = build_pipeline_config()
         args = {
-            "stages.preprocessing.tp_size": "2",
+            "stages.preprocessing.gpu": "1",
             "stages.thinker.runtime.max_seq_len": "4096",
             # A non-numeric env value on purpose: V1 retyped "8" to an int and
             # then failed the dict[str, str] check, which is the sanctioned

@@ -28,15 +28,6 @@ from sglang_omni.config.schema import PipelineConfig
 __all__ = ["ConfigResolver", "ResolvedConfig", "ConfigDifference", "diff_configs"]
 
 
-# Fields that are two spellings of one value. When a patch writes exactly one
-# side, the other has to follow or the rebuilt model rejects the pair. This
-# replaces ``ConfigManager._sync_stage_parallelism_aliases``, which recognised
-# the same pair by string-matching dotted CLI keys.
-_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
-    ("stages.*.tp_size", "stages.*.parallelism.tp"),
-)
-
-
 @dataclass(frozen=True)
 class ResolvedConfig:
     """A validated configuration together with the story of how it got there."""
@@ -72,9 +63,16 @@ class ConfigResolver:
         for patch in ordered:
             _apply(data, patch)
 
-        _sync_aliases(data, _written_paths(ordered))
-
         config = self.config_cls(**data)
+
+        # What the built config actually holds at each touched path. Not the
+        # same thing as the winning patch's value: model validation may
+        # rewrite a field after assignment, and provenance that ignored the
+        # rewrite would explain a value the launch does not use.
+        resolved_data = config.model_dump()
+        for patch in ordered:
+            provenance.record_resolved(patch.key, _safe_read(patch.path, resolved_data))
+
         return ResolvedConfig(config=config, provenance=provenance, patches=patchset)
 
 
@@ -112,50 +110,6 @@ def _safe_read(path: ConfigPath, data: dict[str, Any]) -> Any:
         return path.read(data)
     except ConfigPathError:
         return None
-
-
-def _written_paths(patches: list[ConfigPatch]) -> set[str]:
-    """Every leaf path a patch set touches, expanding container patches."""
-    out: set[str] = set()
-    for patch in patches:
-        out.add(patch.key)
-        if isinstance(patch.value, dict):
-            out.update(f"{patch.key}.{suffix}" for suffix in _dotted_keys(patch.value))
-    return out
-
-
-def _dotted_keys(value: dict[str, Any], prefix: str = "") -> list[str]:
-    out: list[str] = []
-    for key, child in value.items():
-        dotted = f"{prefix}{key}"
-        out.append(dotted)
-        if isinstance(child, dict):
-            out.extend(_dotted_keys(child, f"{dotted}."))
-    return out
-
-
-def _sync_aliases(data: dict[str, Any], written: set[str]) -> None:
-    """Mirror a value onto its alias when only one side was written."""
-    stages = data.get("stages")
-    if not isinstance(stages, list):
-        return
-
-    for stage in stages:
-        if not isinstance(stage, dict) or "name" not in stage:
-            continue
-        name = stage["name"]
-        for left, right in _ALIAS_PAIRS:
-            left_path = left.replace("*", name)
-            right_path = right.replace("*", name)
-            left_written = left_path in written
-            right_written = right_path in written
-            if left_written == right_written:
-                continue
-            source, target = (
-                (left_path, right_path) if left_written else (right_path, left_path)
-            )
-            value = ConfigPath.parse(source).read(data)
-            ConfigPath.parse(target).write(data, value)
 
 
 # ----------------------------------------------------------------------

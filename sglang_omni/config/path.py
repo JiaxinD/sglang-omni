@@ -43,6 +43,7 @@ __all__ = [
     "Segment",
     "SegmentKind",
     "coerce_scalar_text",
+    "example_leaf_paths",
     "iter_schema_paths",
 ]
 
@@ -597,6 +598,50 @@ def coerce_scalar_text(value: Any) -> Any:
         return float(value)
     except ValueError:
         return value
+
+
+def example_leaf_paths(path: ConfigPath, limit: int = 3) -> tuple[str, ...]:
+    """A few public leaf paths below a container path, for error messages.
+
+    Keys that come from the document rather than the schema -- stage names,
+    free mapping keys -- are rendered as a ``KEY`` placeholder.
+    """
+    out: list[str] = []
+
+    def walk(annotation: Any, prefix: str, depth: int) -> None:
+        if len(out) >= limit or depth > _MAX_SCHEMA_DEPTH:
+            return
+        core = _unwrap_optional(annotation)
+
+        if _is_model(core):
+            for name, field in core.model_fields.items():
+                if len(out) >= limit:
+                    return
+                child(field.annotation, f"{prefix}.{name}", depth + 1)
+            return
+
+        item = _named_collection_item(core)
+        if item is not None:
+            walk(item, f"{prefix}.KEY", depth + 1)
+            return
+
+        value_type = _mapping_value_type(core)
+        if value_type is not None:
+            child(value_type, f"{prefix}.KEY", depth + 1)
+
+    def child(annotation: Any, candidate: str, depth: int) -> None:
+        core = _unwrap_optional(annotation)
+        if _is_traversable(core) and core is not Any:
+            walk(annotation, candidate, depth)
+            return
+        try:
+            if ConfigPath.parse(candidate, path.root).is_public():
+                out.append(candidate)
+        except ConfigPathError:  # pragma: no cover - placeholder never binds
+            pass
+
+    walk(path.value_type, path.raw, 0)
+    return tuple(out)
 
 
 def iter_schema_paths(

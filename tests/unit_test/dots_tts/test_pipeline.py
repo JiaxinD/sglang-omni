@@ -185,7 +185,6 @@ def test_dots_tts_rejects_tp() -> None:
     raw = DotsTTSPipelineConfig(model_path="model").model_dump()
     stage = next(item for item in raw["stages"] if item["name"] == "latent_engine")
     stage["tp_size"] = 2
-    stage["parallelism"] = {"tp": 2}
     stage["gpu"] = [0, 1]
     with pytest.raises(ValueError, match="tp_size=1"):
         DotsTTSPipelineConfig(**raw)

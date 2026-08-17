@@ -21,7 +21,6 @@ def _ming_config_with_thinker_tp2(config_cls):
     for stage in stages:
         if stage.name == "thinker":
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [0, 1]
     return stages
 
@@ -314,7 +313,6 @@ def test_ming_rejects_non_ar_stage_tp_size_gt_one(
     for stage in stages:
         if stage.name == stage_name:
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = gpu
 
     with pytest.raises(ValueError, match=f"{stage_name}.*does not support TP"):
@@ -345,7 +343,6 @@ def test_ming_text_allows_image_encoder_tp_size_gt_one() -> None:
     for stage in stages:
         if stage.name == "image_encoder":
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [2, 3]
 
     rebuilt = MingOmniPipelineConfig(model_path="dummy", stages=stages)

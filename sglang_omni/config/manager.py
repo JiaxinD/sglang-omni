@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from transformers import AutoConfig
@@ -46,12 +46,16 @@ class ConfigManager:
     def __init__(self, config: PipelineConfig | None = None):
         self.config = config
 
-    def parse_extra_args(self, args: list[str]) -> dict[str, Any]:
-        """
-        Parse the CLI arguments and return the configuration.
+    def parse_extra_args(self, args: list[str]) -> list[tuple[str, str]]:
+        """Parse the CLI arguments into ordered ``(key, value)`` pairs.
+
+        Pairs, not a mapping: a flag written twice must survive parsing so the
+        resolver can rule on it -- two equal values are harmless, two
+        different ones are refused as a conflict. A dict here would keep
+        whichever came last and silently invent an argument-order rule.
         """
         # we expect the arguments to be key-values pairs
-        extra_args = {}
+        extra_args: list[tuple[str, str]] = []
         cur_key, cur_value = None, None
         for arg in args:
             if "=" in arg and cur_key is None and cur_value is None:
@@ -67,7 +71,7 @@ class ConfigManager:
             if cur_key is not None and cur_value is not None:
                 # remove the -- in front of the key
                 formatted_key = cur_key.lstrip("-").replace("-", "_")
-                extra_args[formatted_key] = cur_value
+                extra_args.append((formatted_key, cur_value))
                 cur_key, cur_value = None, None
         if cur_key is not None and cur_value is None:
             raise ValueError(f"Missing value for argument: {cur_key}")
@@ -75,7 +79,7 @@ class ConfigManager:
 
     def merge_config(
         self,
-        extra_args: dict[str, Any],
+        extra_args: Mapping[str, Any] | Iterable[tuple[str, Any]],
         *,
         set_values: Sequence[str] = (),
         extra_patches: ConfigPatchSet | None = None,

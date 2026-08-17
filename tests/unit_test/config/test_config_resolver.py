@@ -84,31 +84,11 @@ class TestResolve:
                 patchset(make(MEM_FRACTION, 0.5, YAML), make(MEM_FRACTION, 0.9, YAML))
             )
 
-    def test_tp_size_alias_is_kept_coherent(self, pipeline_config: PipelineConfig):
+    def test_tp_size_text_is_coerced_and_applied(self, pipeline_config: PipelineConfig):
         resolved = ConfigResolver(pipeline_config).resolve(
             patchset(make("stages.thinker.tp_size", "4"))
         )
         assert resolved.config.stages[1].tp_size == 4
-        assert resolved.config.stages[1].parallelism.tp == 4
-
-    def test_parallelism_alias_syncs_the_other_way(
-        self, pipeline_config: PipelineConfig
-    ):
-        resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make("stages.thinker.parallelism.tp", "2"))
-        )
-        assert resolved.config.stages[1].tp_size == 2
-
-    def test_both_sides_written_consistently_is_fine(
-        self, pipeline_config: PipelineConfig
-    ):
-        resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(
-                make("stages.thinker.tp_size", 2),
-                make("stages.thinker.parallelism.tp", 2),
-            )
-        )
-        assert resolved.config.stages[1].tp_size == 2
 
 
 class TestProvenance:
@@ -152,6 +132,30 @@ class TestProvenance:
         assert winner.value == 0.9
         assert winner.source is CLI
 
+    def test_headline_reports_the_value_the_config_holds(
+        self, pipeline_config: PipelineConfig
+    ):
+        """config_cls is rewritten by the model itself after every patch has
+        applied; explaining the winner's word as the outcome would be false."""
+        resolved = ConfigResolver(pipeline_config).resolve(
+            patchset(make("config_cls", "Foo"))
+        )
+        text = resolved.provenance.explain("config_cls")
+        assert text.splitlines()[0] == "config_cls = 'PipelineConfig'"
+        assert "'Foo'  <- cli set (--set)  [winner] (resolved to 'PipelineConfig')" in (
+            text
+        )
+
+    def test_no_rewrite_note_when_the_winning_value_sticks(
+        self, pipeline_config: PipelineConfig
+    ):
+        resolved = ConfigResolver(pipeline_config).resolve(
+            patchset(make(MEM_FRACTION, "0.8"))
+        )
+        text = resolved.provenance.explain(MEM_FRACTION)
+        assert text.splitlines()[0] == f"{MEM_FRACTION} = 0.8"
+        assert "(resolved to" not in text
+
 
 class TestDiff:
     def test_identical_configs_have_no_differences(
@@ -193,6 +197,44 @@ class TestCompatTranslation:
         for stage in pipeline_config.stages:
             assert stage.name in message
         assert excinfo.value.suggestions
+
+    def test_parallelism_spelling_becomes_tp_size(
+        self, pipeline_config: PipelineConfig
+    ):
+        canonical, deprecation = canonicalize_dotted_key(
+            "stages.thinker.parallelism.tp", pipeline_config
+        )
+        assert canonical == "stages.thinker.tp_size"
+        assert "tp_size" in deprecation
+
+    def test_parallelism_spelling_lands_in_tp_size(
+        self, pipeline_config: PipelineConfig
+    ):
+        patches = patches_from_dotted_cli(
+            {"stages.thinker.parallelism.tp": "2"}, pipeline_config
+        )
+        resolved = ConfigResolver(pipeline_config).resolve(patches)
+        assert resolved.config.stages[1].tp_size == 2
+        assert patches.deprecations()
+
+    def test_both_tp_spellings_agreeing_are_fine(self, pipeline_config: PipelineConfig):
+        patches = patches_from_dotted_cli(
+            {"stages.thinker.tp_size": "2", "stages.thinker.parallelism.tp": "2"},
+            pipeline_config,
+        )
+        resolved = ConfigResolver(pipeline_config).resolve(patches)
+        assert resolved.config.stages[1].tp_size == 2
+
+    def test_both_tp_spellings_disagreeing_are_refused(
+        self, pipeline_config: PipelineConfig
+    ):
+        """Translation maps them onto one path, so the duplicate check fires."""
+        patches = patches_from_dotted_cli(
+            {"stages.thinker.tp_size": "2", "stages.thinker.parallelism.tp": "4"},
+            pipeline_config,
+        )
+        with pytest.raises(ValueError, match="set twice"):
+            ConfigResolver(pipeline_config).resolve(patches)
 
     def test_stage_overrides_reject_non_runtime_keys(
         self, pipeline_config: PipelineConfig

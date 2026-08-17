@@ -13,7 +13,11 @@ from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, ResolvedConfig, diff_configs
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.sources import patches_from_dotted_cli, patches_from_set_cli
+from sglang_omni.config.sources import (
+    patches_from_dotted_cli,
+    patches_from_model_path_flag,
+    patches_from_set_cli,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +127,12 @@ def _resolve_sources(
     try:
         if config_file:
             baseline, patches = sources_from_config_file(config_file)
+            if model_path is not None:
+                # `serve` semantics: given both, the flag is a command line
+                # source and outranks the file's own model_path.
+                patches = patches.merge(
+                    patches_from_model_path_flag(model_path, baseline)
+                )
         else:
             manager = ConfigManager.from_model_path(
                 str(model_path), variant="text" if text_only else None
@@ -283,7 +293,8 @@ def explain(
         for touched in provenance.paths():
             winner = provenance.winner(touched)
             assert winner is not None  # a touched path always has a winner
-            print(f"{touched} = {winner.value!r}  <- {winner.source.describe()}")
+            value = provenance.resolved_value(touched, winner.value)
+            print(f"{touched} = {value!r}  <- {winner.source.describe()}")
         return
 
     try:

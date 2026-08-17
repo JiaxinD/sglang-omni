@@ -299,6 +299,43 @@ class TestExplain:
         )
 
 
+class TestModelPathWithConfig:
+    """``--config`` plus ``--model-path``: the flag wins, as it does in serve."""
+
+    def test_resolve_prefers_the_flag_over_the_file(self, runner, plain_config_file):
+        result = runner.invoke(
+            config_app,
+            [
+                "resolve",
+                "--config",
+                str(plain_config_file),
+                "--model-path",
+                "local/checkout",
+            ],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        assert yaml.safe_load(result.stdout)["model_path"] == "local/checkout"
+
+    def test_explain_names_the_flag_as_the_winner(self, runner, plain_config_file):
+        result = runner.invoke(
+            config_app,
+            [
+                "explain",
+                "model_path",
+                "--config",
+                str(plain_config_file),
+                "--model-path",
+                "local/checkout",
+            ],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        assert "model_path = 'local/checkout'" in result.stdout
+        assert "'dummy'" in result.stdout  # the file's value, on the losing line
+        assert "cli flag (--model-path)  [winner]" in result.stdout
+
+
 class TestSet:
     """``--set`` on these commands, so a launch can be rehearsed as written."""
 

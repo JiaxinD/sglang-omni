@@ -43,8 +43,8 @@ class _DummyManager:
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
 
-    def parse_extra_args(self, _args) -> dict[str, object]:
-        return {}
+    def parse_extra_args(self, _args) -> list[tuple[str, str]]:
+        return []
 
     def merge_config(
         self,

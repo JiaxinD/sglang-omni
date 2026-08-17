@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 
 from sglang_omni.config import (
-    ParallelismConfig,
     PipelineConfig,
     PlacementConfig,
     SGLangServerArgsConfig,
@@ -71,23 +70,15 @@ def test_stage_rejects_terminal_with_next() -> None:
         )
 
 
-def test_tp_size_normalizes_into_parallelism_tp() -> None:
+def test_tp_size_accepts_a_matching_gpu_list() -> None:
     stage = _stage(tp_size=2, gpu=[0, 1])
 
     assert stage.tp_size == 2
-    assert stage.parallelism.tp == 2
 
 
-def test_parallelism_tp_normalizes_back_to_tp_size() -> None:
-    stage = _stage(parallelism=ParallelismConfig(tp=2), gpu=[0, 1])
-
-    assert stage.tp_size == 2
-    assert stage.parallelism.tp == 2
-
-
-def test_conflicting_tp_size_and_parallelism_tp_raise() -> None:
-    with pytest.raises(ValueError, match="conflicts"):
-        _stage(tp_size=2, parallelism=ParallelismConfig(tp=3), gpu=[0, 1])
+def test_tp_size_below_one_raises() -> None:
+    with pytest.raises(ValueError, match="tp_size >= 1"):
+        _stage(tp_size=0)
 
 
 def test_pipeline_accepts_placement_config() -> None:

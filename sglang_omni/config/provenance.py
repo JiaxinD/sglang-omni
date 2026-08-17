@@ -34,6 +34,9 @@ BASELINE_SOURCE = ConfigSource(
     detail="value before any patch was applied",
 )
 
+_UNSET = object()
+"""Distinguishes "no resolved value recorded" from a recorded ``None``."""
+
 
 @dataclass(frozen=True)
 class ProvenanceEntry:
@@ -58,9 +61,13 @@ class ProvenanceEntry:
     def deprecated(self) -> str:
         return self.patch.deprecated
 
-    def render(self) -> str:
+    def render(self, resolved: Any = _UNSET) -> str:
         marker = "[winner]" if self.winning else "[superseded]"
         line = f"{self.value!r}  <- {self.source.describe()}  {marker}"
+        if self.winning and resolved is not _UNSET and resolved != self.value:
+            # The model's own validation rewrote the value after this patch
+            # won; showing only what the source said would claim it stuck.
+            line += f" (resolved to {resolved!r})"
         if self.deprecated:
             line += f"\n      deprecated: {self.deprecated}"
         return line
@@ -74,6 +81,9 @@ class ProvenanceMap:
     baseline: dict[str, Any] = field(default_factory=dict)
     """Pre-patch value per path, recorded only for paths a patch touched."""
 
+    resolved: dict[str, Any] = field(default_factory=dict)
+    """Post-validation value per touched path, read back off the built config."""
+
     # ------------------------------------------------------------------
     # building
     # ------------------------------------------------------------------
@@ -85,6 +95,9 @@ class ProvenanceMap:
 
     def record_baseline(self, path: str, value: Any) -> None:
         self.baseline.setdefault(path, value)
+
+    def record_resolved(self, path: str, value: Any) -> None:
+        self.resolved[path] = value
 
     @classmethod
     def from_patchset(cls, patchset: ConfigPatchSet) -> "ProvenanceMap":
@@ -110,15 +123,30 @@ class ProvenanceMap:
     def touched(self, path: str) -> bool:
         return path in self.entries
 
+    def resolved_value(self, path: str, default: Any = None) -> Any:
+        """The value the built config holds at a touched path."""
+        return self.resolved.get(path, default)
+
     def explain(self, path: str) -> str:
         """Human-readable answer to 'why is this value what it is'.
+
+        The headline reports the value the built config actually holds --
+        validation may have rewritten what the winning source supplied. The
+        winner's own line keeps the source's value, with the rewrite noted.
 
         Callers ask :meth:`touched` first; an untouched path raises ``KeyError``.
         """
         history = self.entries[path]
         winner = self.winner(path)
-        lines = [f"{path} = {winner.value!r}" if winner else path]
+        resolved = self.resolved.get(path, _UNSET)
+        if winner is None:
+            headline = path
+        elif resolved is _UNSET:
+            headline = f"{path} = {winner.value!r}"
+        else:
+            headline = f"{path} = {resolved!r}"
+        lines = [headline]
         if path in self.baseline:
             lines.append(f"  {self.baseline[path]!r}  <- {BASELINE_SOURCE.describe()}")
-        lines.extend(f"  {entry.render()}" for entry in history)
+        lines.extend(f"  {entry.render(resolved)}" for entry in history)
         return "\n".join(lines)

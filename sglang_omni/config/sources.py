@@ -47,12 +47,13 @@ from sglang_omni.config.patch import (
     ConfigSource,
     SourceKind,
 )
-from sglang_omni.config.path import ConfigPathError
+from sglang_omni.config.path import ConfigPath, ConfigPathError, example_leaf_paths
 from sglang_omni.config.schema import PipelineConfig
 
 __all__ = [
     "SET_BLOCK_KEY",
     "patches_from_dotted_cli",
+    "patches_from_model_path_flag",
     "patches_from_set_block",
     "patches_from_set_cli",
     "split_assignment",
@@ -67,8 +68,8 @@ _EXAMPLE = "stages.thinker.runtime.max_seq_len=8192"
 def split_assignment(text: str) -> tuple[str, str]:
     """Split one ``--set PATH=VALUE`` argument.
 
-    The value keeps every ``=`` after the first, so JSON and query-string
-    shaped values survive: ``--set stages.thinker.env={"A":"1=2"}``.
+    The value keeps every ``=`` after the first, so query-string and
+    flag-shaped values survive: ``--set stages.thinker.env.FLAGS=a=b``.
     """
     path, separator, value = text.partition("=")
     path = path.strip()
@@ -82,13 +83,41 @@ def split_assignment(text: str) -> tuple[str, str]:
     return path, value
 
 
+def _leaf_path(text: str, config: PipelineConfig, *, surface: str) -> ConfigPath:
+    """Compile a path for the set surfaces, refusing whole sections.
+
+    A dotted flag writing a container deep-merges its mapping value, because
+    that is what V1 did and the compatibility gate holds it there. These
+    surfaces are new, so they can afford the stricter rule: one path, one
+    value. Accepting a mapping here would leave ``set:`` merging where
+    ``--set`` replaces, a difference no error message could explain away.
+    Untyped (``Any``) positions have no leaves to point at and stay writable
+    as a whole.
+    """
+    path = ConfigPath.parse(text, type(config))
+    if path.is_leaf or path.value_type is Any:
+        return path
+    examples = example_leaf_paths(path)
+    example = examples[0] if examples else _EXAMPLE.split("=")[0]
+    raise ConfigPathError(
+        f"{surface} cannot write {path.raw!r}: it is a whole section, not a "
+        f"single value; set {example} instead, one path per assignment",
+        raw=path.raw,
+        suggestions=examples,
+    )
+
+
 def patches_from_dotted_cli(
-    extra_args: dict[str, Any],
+    extra_args: Mapping[str, Any] | Iterable[tuple[str, Any]],
     config: PipelineConfig,
     *,
     origin: str = "extra CLI args",
 ) -> ConfigPatchSet:
     """Normalize ``--stages.thinker.tp_size 4`` style arguments.
+
+    Accepts a mapping or ordered ``(key, value)`` pairs; the pairs keep a
+    repeated flag visible, so the resolver's duplicate check rules on it
+    instead of the parser keeping whichever spelling came last.
 
     The dotted flag is canonical syntax; the one legacy spelling it still
     accepts is a positional stage index (``--stages.1.tp_size``), which the
@@ -99,8 +128,9 @@ def patches_from_dotted_cli(
     # would be a cycle.
     from sglang_omni.config.compat import canonicalize_dotted_key
 
+    items = extra_args.items() if isinstance(extra_args, Mapping) else extra_args
     patchset = ConfigPatchSet()
-    for key, value in extra_args.items():
+    for key, value in items:
         canonical, deprecation = canonicalize_dotted_key(key, config)
         patchset.add(
             ConfigPatch.create(
@@ -132,8 +162,29 @@ def patches_from_set_cli(
     patchset = ConfigPatchSet()
     for text in values:
         path, value = split_assignment(text)
-        patchset.add(ConfigPatch.create(path, value, source, root=type(config)))
+        compiled = _leaf_path(path, config, surface="--set")
+        patchset.add(ConfigPatch.create(compiled, value, source))
     return patchset
+
+
+def patches_from_model_path_flag(
+    model_path: str,
+    config: PipelineConfig,
+    *,
+    origin: str = "--model-path",
+) -> ConfigPatchSet:
+    """Translate the typed ``--model-path`` flag into a CLI-layer patch.
+
+    Only needed alongside ``--config``: without a file the flag *selects* the
+    baseline and there is nothing to override. With one, the flag is a command
+    line source like any other and must outrank the file's ``model_path`` --
+    as a patch, so that a launch and ``config explain`` agree on the value and
+    on where it came from.
+    """
+    source = ConfigSource(SourceKind.CLI_FLAG, origin)
+    return ConfigPatchSet().add(
+        ConfigPatch.create("model_path", model_path, source, root=type(config))
+    )
 
 
 def patches_from_set_block(
@@ -163,5 +214,6 @@ def patches_from_set_block(
                 f"{SET_BLOCK_KEY} keys must be config paths written as strings, "
                 f"got {key!r}"
             )
-        patchset.add(ConfigPatch.create(key, value, source, root=type(config)))
+        compiled = _leaf_path(key, config, surface=f"{SET_BLOCK_KEY}:")
+        patchset.add(ConfigPatch.create(compiled, value, source))
     return patchset

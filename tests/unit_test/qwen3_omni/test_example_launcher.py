@@ -211,7 +211,6 @@ def test_unified_ming_offline_launcher_applies_tp_and_overrides(monkeypatch):
     stages = {stage.name: stage for stage in captured["config"].stages}
     thinker = stages["thinker"]
     assert thinker.tp_size == 2
-    assert thinker.parallelism.tp == 2
     assert thinker.gpu == [0, 1]
     assert stages["talker"].gpu == 2
     assert stages["talker"].factory_args["voice"] == "CUSTOM_VOICE"
@@ -306,7 +305,7 @@ def mock_launch_server():
 
 
 def test_tp2_config_contract(mock_launch_server):
-    """tp_size and parallelism.tp must stay in sync for TP=2."""
+    """The thinker TP flags land in tp_size and the GPU list for TP=2."""
     args = _make_args(thinker_tp_size=2, gpu_thinker_tp="0,1")
     with patch(
         "sglang_omni.utils.gpu_compat.should_disable_custom_all_reduce_for_gpus",
@@ -318,7 +317,6 @@ def test_tp2_config_contract(mock_launch_server):
     thinker = _stage(config, "thinker")
 
     assert thinker.tp_size == 2
-    assert thinker.parallelism.tp == 2
     assert thinker.gpu == [0, 1]
     assert (
         thinker.factory_args["server_args_overrides"]["disable_custom_all_reduce"]
@@ -353,7 +351,6 @@ def test_tp1_default_config_contract(mock_launch_server):
     code2wav = _stage(config, "code2wav")
 
     assert thinker.tp_size == 1
-    assert thinker.parallelism.tp == 1
     assert thinker.gpu == 0
     assert talker.gpu == 1
     assert code2wav.gpu == 0

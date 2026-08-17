@@ -102,6 +102,26 @@ class TestSetOnTheCommandLine:
         with pytest.raises(ConfigPathError, match="by name, not by index"):
             patches_from_set_cli(["stages.1.tp_size=2"], pipeline_config)
 
+    def test_a_container_path_is_refused_with_leaf_examples(self, pipeline_config):
+        """One path, one value: a whole runtime section cannot be assigned."""
+        with pytest.raises(ConfigPathError) as excinfo:
+            patches_from_set_cli(
+                ['stages.thinker.runtime={"max_seq_len": 100}'], pipeline_config
+            )
+        message = str(excinfo.value)
+        assert "whole section" in message
+        assert "stages.thinker.runtime.max_seq_len" in message
+
+    def test_a_typed_mapping_is_written_one_key_at_a_time(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="whole section"):
+            patches_from_set_cli(
+                ['stages.thinker.env={"OMP_NUM_THREADS": "8"}'], pipeline_config
+            )
+        (patch,) = patches_from_set_cli(
+            ["stages.thinker.env.OMP_NUM_THREADS=8"], pipeline_config
+        )
+        assert patch.value == "8"
+
     def test_several_paths_are_set_in_one_command(self, pipeline_config):
         config = resolve(
             pipeline_config,
@@ -149,6 +169,17 @@ class TestSetBlock:
         with pytest.raises(ConfigPathError):
             patches_from_set_block({"stages.thinker.nonesuch": 2}, pipeline_config)
 
+    def test_a_container_path_is_refused_like_on_the_command_line(
+        self, pipeline_config
+    ):
+        """Same rule as --set: the block would deep-merge where the flag
+        replaces, so neither surface takes a section at all."""
+        with pytest.raises(ConfigPathError, match="whole section") as excinfo:
+            patches_from_set_block(
+                {"stages.thinker.runtime": {"max_seq_len": 100}}, pipeline_config
+            )
+        assert "stages.thinker.runtime.max_seq_len" in str(excinfo.value)
+
 
 class TestPrecedence:
     def test_the_command_line_beats_the_file(self, pipeline_config):
@@ -183,6 +214,29 @@ class TestManager:
             ConfigManager(pipeline_config).merge_config(
                 {TP_SIZE: "4"}, set_values=[f"{TP_SIZE}=8"]
             )
+
+    def test_a_flag_repeated_with_different_values_is_refused(self, pipeline_config):
+        """Parsing keeps both spellings, so the duplicate check sees them."""
+        manager = ConfigManager(pipeline_config)
+        args = manager.parse_extra_args([f"--{TP_SIZE}", "2", f"--{TP_SIZE}", "4"])
+        with pytest.raises(DuplicatePatchError, match="set twice"):
+            manager.merge_config(args)
+
+    def test_a_flag_repeated_with_the_same_value_is_tolerated(self, pipeline_config):
+        manager = ConfigManager(pipeline_config)
+        args = manager.parse_extra_args([f"--{TP_SIZE}", "4", f"--{TP_SIZE}", "4"])
+        config = manager.merge_config(args)
+        assert config.stages[1].tp_size == 4
+
+    def test_an_index_and_a_name_disagreeing_are_refused(self, pipeline_config):
+        """`--stages.1.x` and `--stages.thinker.x` are one path after
+        translation, so disagreement is a conflict, not an ordering puzzle."""
+        manager = ConfigManager(pipeline_config)
+        args = manager.parse_extra_args(
+            ["--stages.1.tp_size", "2", f"--{TP_SIZE}", "4"]
+        )
+        with pytest.raises(DuplicatePatchError, match="set twice"):
+            manager.merge_config(args)
 
 
 class TestTypedFlagPatches:
@@ -296,3 +350,48 @@ class TestConfigFile:
             {}, set_values=[f"stages.{stage}.runtime.max_seq_len=2048"]
         )
         assert config.stages[1].runtime.max_seq_len == 2048
+
+
+class TestLegacyParallelismBlock:
+    """Files written against the retired per-stage ``parallelism`` field."""
+
+    def _write(self, tmp_path, shipped_config, mutate):
+        data = shipped_config.model_dump(mode="json")
+        mutate(data["stages"][1])
+        path = tmp_path / "pipeline.yaml"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return path
+
+    def test_the_block_is_translated_into_tp_size(self, tmp_path, shipped_config):
+        from sglang_omni.config.compat import sources_from_config_file
+
+        def mutate(stage):
+            del stage["tp_size"]
+            stage["parallelism"] = {"tp": 2}
+
+        path = self._write(tmp_path, shipped_config, mutate)
+        config = ConfigManager.from_file(str(path)).config
+        assert config.stages[1].tp_size == 2
+
+        _, patches = sources_from_config_file(str(path))
+        assert patches.deprecations()
+
+    def test_the_block_agreeing_with_tp_size_is_accepted(
+        self, tmp_path, shipped_config
+    ):
+        def mutate(stage):
+            stage["tp_size"] = 2
+            stage["parallelism"] = {"tp": 2}
+
+        path = self._write(tmp_path, shipped_config, mutate)
+        config = ConfigManager.from_file(str(path)).config
+        assert config.stages[1].tp_size == 2
+
+    def test_the_block_contradicting_tp_size_is_refused(self, tmp_path, shipped_config):
+        def mutate(stage):
+            stage["tp_size"] = 4
+            stage["parallelism"] = {"tp": 2}
+
+        path = self._write(tmp_path, shipped_config, mutate)
+        with pytest.raises(ValueError, match="conflicts with"):
+            ConfigManager.from_file(str(path))
