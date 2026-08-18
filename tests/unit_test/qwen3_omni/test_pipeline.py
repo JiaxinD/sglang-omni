@@ -13,9 +13,8 @@ import typer
 
 import sglang_omni.models.qwen3_omni.stages as qwen_stages
 from sglang_omni.cli.serve import (
-    apply_encoder_mem_reserve_cli_override,
-    apply_parallelism_cli_overrides,
-    patches_from_mem_fraction_flags,
+    apply_tensor_parallel_engine_overrides,
+    patches_from_broadcast_flags,
 )
 from sglang_omni.config import (
     PipelineConfig,
@@ -24,6 +23,7 @@ from sglang_omni.config import (
     build_stage_placement_plan,
     resolve_stage_factory_args,
 )
+from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.models.ming_omni.config import (
     MingOmniPipelineConfig,
@@ -65,11 +65,13 @@ def _stage(config: PipelineConfig, name: str):
 
 
 def _server_args_overrides(config: PipelineConfig, name: str) -> dict[str, object]:
-    return _stage(config, name).factory_args.get("server_args_overrides", {})
+    engine = _stage(config, name).engine
+    return engine.overrides() if engine is not None else {}
 
 
-def _runtime_mem_fraction_static(config, name: str) -> float | None:
-    return _stage(config, name).runtime.sglang_server_args.mem_fraction_static
+def _engine_mem_fraction_static(config, name: str) -> float | None:
+    engine = _stage(config, name).engine
+    return None if engine is None else engine.mem_fraction_static
 
 
 def test_qwen_pipeline_config_and_state_contracts() -> None:
@@ -682,107 +684,126 @@ def test_qwen_encoder_mem_reserve_applies_only_to_valid_auto_values() -> None:
             )
 
 
-def _resolve_mem_fraction_flags(config, **flags):
-    """Apply the typed mem-fraction flags the way `sgl-omni serve` does."""
+def _resolve_broadcast_mem_fraction(config, value):
+    """Apply the broadcast --mem-fraction-static the way `sgl-omni serve` does."""
     return (
         ConfigResolver(config)
-        .resolve(patches_from_mem_fraction_flags(config, **flags))
+        .resolve(
+            patches_from_broadcast_flags(
+                config,
+                mem_fraction_static=value,
+            )
+        )
         .config
     )
 
 
-def test_qwen_cli_global_and_specific_mem_fraction_target_only_ar_stages() -> None:
+def test_qwen_broadcast_mem_fraction_targets_only_engine_stages() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=0.70,
-        talker_mem_fraction_static=0.65,
-    )
+    resolved = _resolve_broadcast_mem_fraction(config, 0.80)
 
-    assert _runtime_mem_fraction_static(config, "thinker") == 0.70
-    assert _runtime_mem_fraction_static(config, "talker_ar") == 0.65
+    assert _engine_mem_fraction_static(resolved, "thinker") == 0.80
+    assert _engine_mem_fraction_static(resolved, "talker_ar") == 0.80
     for non_ar_stage in ("image_encoder", "audio_encoder", "code2wav"):
-        assert "server_args_overrides" not in _stage(config, non_ar_stage).factory_args
+        assert _server_args_overrides(resolved, non_ar_stage) == {}
 
 
-def test_qwen_cli_per_role_mem_fraction_overrides_global_when_all_three_passed() -> (
-    None
-):
+def test_qwen_dotted_per_stage_mem_fraction_overrides_the_broadcast() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-
-    config = _resolve_mem_fraction_flags(
+    patches = patches_from_broadcast_flags(
         config,
         mem_fraction_static=0.80,
-        thinker_mem_fraction_static=0.70,
-        talker_mem_fraction_static=0.65,
+    )
+    merged = ConfigManager(config).merge_config(
+        [
+            ("thinker.engine.mem_fraction_static", "0.70"),
+            ("talker_ar.engine.mem_fraction_static", "0.65"),
+        ],
+        extra_patches=patches,
     )
 
-    assert _runtime_mem_fraction_static(config, "thinker") == 0.70
-    assert _runtime_mem_fraction_static(config, "talker_ar") == 0.65
+    assert _engine_mem_fraction_static(merged, "thinker") == 0.70
+    assert _engine_mem_fraction_static(merged, "talker_ar") == 0.65
 
 
-def test_qwen_cli_global_mem_fraction_applies_when_no_per_role_override() -> None:
+def test_qwen_partial_dotted_override_falls_back_to_the_broadcast() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-
-    config = _resolve_mem_fraction_flags(
+    patches = patches_from_broadcast_flags(
         config,
         mem_fraction_static=0.80,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=None,
+    )
+    merged = ConfigManager(config).merge_config(
+        [("thinker.engine.mem_fraction_static", "0.70")],
+        extra_patches=patches,
     )
 
-    assert _runtime_mem_fraction_static(config, "thinker") == 0.80
-    assert _runtime_mem_fraction_static(config, "talker_ar") == 0.80
+    assert _engine_mem_fraction_static(merged, "thinker") == 0.70
+    assert _engine_mem_fraction_static(merged, "talker_ar") == 0.80
 
 
-def test_qwen_cli_partial_per_role_falls_back_to_global_for_unspecified_role() -> None:
+def test_qwen_broadcast_mem_fraction_keeps_other_engine_settings() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=0.70,
-        talker_mem_fraction_static=None,
+    merged = ConfigManager(config).merge_config(
+        [("thinker.engine.disable_cuda_graph", "true")],
+        extra_patches=patches_from_broadcast_flags(
+            config,
+            mem_fraction_static=0.80,
+        ),
     )
 
-    assert _runtime_mem_fraction_static(config, "thinker") == 0.70
-    assert _runtime_mem_fraction_static(config, "talker_ar") == 0.80
-
-
-def test_qwen_cli_talker_per_role_overrides_global_thinker_falls_back() -> None:
-    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=0.65,
-    )
-
-    assert _runtime_mem_fraction_static(config, "thinker") == 0.80
-    assert _runtime_mem_fraction_static(config, "talker_ar") == 0.65
-
-
-def test_qwen_cli_mem_fraction_static_survives_runtime_overrides_overlay() -> None:
-    config = Qwen3OmniSpeechPipelineConfig(
-        model_path="dummy",
-        runtime_overrides={
-            "thinker": {"server_args_overrides": {"disable_cuda_graph": True}}
-        },
-    )
-
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=None,
-    )
-
-    resolved = resolve_stage_factory_args(_stage(config, "thinker"), config)
+    resolved = resolve_stage_factory_args(_stage(merged, "thinker"), merged)
     assert resolved["server_args_overrides"]["mem_fraction_static"] == 0.80
     assert resolved["server_args_overrides"]["disable_cuda_graph"] is True
+
+
+def test_qwen_broadcast_rejects_invalid_mem_fraction_without_partial_write() -> None:
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+    original = config.model_dump()
+
+    with pytest.raises(typer.BadParameter, match="must be > 0 and < 1"):
+        patches_from_broadcast_flags(
+            config,
+            mem_fraction_static=1.0,
+        )
+
+    assert config.model_dump() == original
+
+
+def test_qwen_broadcast_rejects_pipelines_without_an_engine_stage() -> None:
+    config = PipelineConfig(
+        model_path="dummy",
+        stages=[
+            StageConfig(
+                name="preprocessing",
+                process="pipeline",
+                factory=(
+                    "sglang_omni.models.qwen3_omni.stages."
+                    "create_preprocessing_executor"
+                ),
+                terminal=True,
+            )
+        ],
+    )
+
+    with pytest.raises(typer.BadParameter, match="engine stage"):
+        patches_from_broadcast_flags(
+            config,
+            mem_fraction_static=0.80,
+        )
+
+
+def test_qwen_encoder_mem_reserve_routes_as_scheduler_group_value() -> None:
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    merged = ConfigManager(config).merge_config(
+        [("thinker.scheduler.encoder_mem_reserve", "0.15")]
+    )
+
+    thinker_args = resolve_stage_factory_args(_stage(merged, "thinker"), merged)
+    assert thinker_args["encoder_mem_reserve"] == 0.15
+    assert "encoder_mem_reserve" not in thinker_args.get("server_args_overrides", {})
+    assert _stage(merged, "talker_ar").scheduler.encoder_mem_reserve is None
 
 
 @pytest.mark.parametrize(
@@ -790,12 +811,11 @@ def test_qwen_cli_mem_fraction_static_survives_runtime_overrides_overlay() -> No
         "speech_enabled",
         "expected_infrastructure_graph_disabled",
         "expected_capture_hidden_layers",
-        "expected_graph_helper_calls",
-        "expected_infrastructure_return_hidden",
+        "expected_init_graph_calls",
     ),
     [
-        (False, False, None, 0, False),
-        (True, True, [0, 24], 1, True),
+        (False, False, None, 0),
+        (True, True, [0, 24], 1),
     ],
 )
 def test_qwen_thinker_cuda_graph_capture_lifecycle(
@@ -803,40 +823,29 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     speech_enabled: bool,
     expected_infrastructure_graph_disabled: bool,
     expected_capture_hidden_layers: list[int] | None,
-    expected_graph_helper_calls: int,
-    expected_infrastructure_return_hidden: bool,
+    expected_init_graph_calls: int,
 ) -> None:
     from sglang.srt.utils import hf_transformers_utils
 
     from sglang_omni.model_runner import thinker_model_runner
     from sglang_omni.models.qwen3_omni import bootstrap, request_builders
-    from sglang_omni.models.qwen3_omni import (
-        thinker_model_runner as qwen_thinker_runner,
-    )
     from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
     from sglang_omni.scheduling import omni_scheduler, sglang_backend
-    from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
 
     server_args = FakeServerArgs(
-        disable_cuda_graph=False,
-        enable_return_hidden_states=False,
-        cuda_graph_config=SimpleNamespace(
-            prefill=SimpleNamespace(backend=CudaGraphBackend.DISABLED)
-        ),
+        disable_cuda_graph=False, enable_return_hidden_states=False
     )
     infrastructure_saw_graph_disabled: list[bool] = []
-    infrastructure_saw_return_hidden: list[bool] = []
     capture_hidden_layers_seen: list[list[int] | None] = []
-    graph_init_workers: list[object] = []
-    generic_runner_calls: list[tuple[object, object]] = []
-    qwen_runner_calls: list[tuple[object, object]] = []
-    output_proc = object()
+    init_graph_calls = 0
 
     class FakeModelRunner:
         model = object()
 
         def init_cuda_graphs(self) -> None:
-            raise AssertionError("Qwen bootstrap must use the shared graph helper")
+            nonlocal init_graph_calls
+            init_graph_calls += 1
+            assert server_args.disable_cuda_graph is False
 
     model_config = SimpleNamespace(
         model_path="model",
@@ -846,16 +855,10 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     model_worker = SimpleNamespace(
         model_runner=FakeModelRunner(),
         model_config=model_config,
-        # Real ModelWorker always carries this; init_sglang_cuda_graphs reads
-        # it to decide whether to apply the prefill embeds view.
-        enable_prefill_input_embeds=False,
     )
 
     def fake_create_infrastructure(*args, **kwargs):
         infrastructure_saw_graph_disabled.append(bool(args[0].disable_cuda_graph))
-        infrastructure_saw_return_hidden.append(
-            bool(args[0].enable_return_hidden_states)
-        )
         capture_hidden_layers_seen.append(kwargs.get("capture_hidden_layers"))
         return (
             model_worker,
@@ -872,17 +875,6 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
         "create_sglang_infrastructure",
         fake_create_infrastructure,
     )
-
-    def fake_init_sglang_cuda_graphs(worker: object) -> None:
-        assert server_args.disable_cuda_graph is False
-        assert server_args.enable_return_hidden_states is False
-        graph_init_workers.append(worker)
-
-    monkeypatch.setattr(
-        scheduling_bootstrap,
-        "init_sglang_cuda_graphs",
-        fake_init_sglang_cuda_graphs,
-    )
     monkeypatch.setattr(
         hf_transformers_utils, "get_tokenizer", lambda *a, **k: object()
     )
@@ -896,21 +888,12 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
         request_builders, "should_generate_audio_output", lambda payload: False
     )
     monkeypatch.setattr(
-        sglang_backend, "SGLangOutputProcessor", lambda **kwargs: output_proc
+        sglang_backend, "SGLangOutputProcessor", lambda **kwargs: object()
     )
     monkeypatch.setattr(
         thinker_model_runner,
         "ThinkerModelRunner",
-        lambda model_worker, output_proc: (
-            generic_runner_calls.append((model_worker, output_proc)) or object()
-        ),
-    )
-    monkeypatch.setattr(
-        qwen_thinker_runner,
-        "Qwen3OmniThinkerModelRunner",
-        lambda model_worker, output_proc: (
-            qwen_runner_calls.append((model_worker, output_proc)) or object()
-        ),
+        lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(
         omni_scheduler,
@@ -924,377 +907,47 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
 
     assert infrastructure_saw_graph_disabled == [expected_infrastructure_graph_disabled]
     assert capture_hidden_layers_seen == [expected_capture_hidden_layers]
-    assert graph_init_workers == [model_worker] * expected_graph_helper_calls
-    assert infrastructure_saw_return_hidden == [expected_infrastructure_return_hidden]
-    assert server_args.enable_return_hidden_states is False
+    assert init_graph_calls == expected_init_graph_calls
+    assert server_args.enable_return_hidden_states is speech_enabled
     assert server_args.disable_cuda_graph is False
-    assert generic_runner_calls == (
-        [(model_worker, output_proc)] if speech_enabled else []
-    )
-    assert qwen_runner_calls == (
-        [] if speech_enabled else [(model_worker, output_proc)]
-    )
     assert scheduler.server_args is server_args
 
 
-@pytest.mark.parametrize(
-    "original_return_hidden_states",
-    [False, True],
-)
-def test_qwen_thinker_cuda_graph_capture_restores_args_when_infrastructure_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    original_return_hidden_states: bool,
-) -> None:
-    from sglang_omni.models.qwen3_omni import bootstrap
-    from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
-    from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
-
-    server_args = FakeServerArgs(
-        disable_cuda_graph=False,
-        enable_return_hidden_states=original_return_hidden_states,
-        cuda_graph_config=SimpleNamespace(
-            prefill=SimpleNamespace(backend=CudaGraphBackend.DISABLED)
-        ),
-    )
-    infrastructure_state: list[tuple[bool, bool]] = []
-    error = RuntimeError("infrastructure initialization failed")
-
-    def fake_create_infrastructure(*args, **kwargs):
-        del kwargs
-        infrastructure_state.append(
-            (
-                args[0].disable_cuda_graph,
-                args[0].enable_return_hidden_states,
-            )
-        )
-        raise error
-
-    monkeypatch.setattr(
-        scheduling_bootstrap,
-        "create_sglang_infrastructure",
-        fake_create_infrastructure,
-    )
-
-    with pytest.raises(RuntimeError) as exc_info:
-        bootstrap.create_thinker_scheduler(server_args, speech_enabled=True)
-
-    assert exc_info.value is error
-    assert infrastructure_state == [(True, True)]
-    assert server_args.disable_cuda_graph is False
-    assert server_args.enable_return_hidden_states is original_return_hidden_states
-
-
-@pytest.mark.parametrize("speech_enabled", [False, True])
-def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
-    monkeypatch: pytest.MonkeyPatch,
-    speech_enabled: bool,
-) -> None:
-    from sglang.srt.utils import hf_transformers_utils
-
-    from sglang_omni.models.qwen3_omni import bootstrap, request_builders
-    from sglang_omni.models.qwen3_omni import (
-        thinker_model_runner as qwen_thinker_runner,
-    )
-    from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
-    from sglang_omni.scheduling import omni_scheduler, sglang_backend
-    from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
-    from sglang_omni.utils import cuda_graph_batch_validator
-
-    server_args = FakeServerArgs(
-        disable_cuda_graph=False,
-        enable_return_hidden_states=False,
-        cuda_graph_config=SimpleNamespace(
-            prefill=SimpleNamespace(backend=CudaGraphBackend.BREAKABLE)
-        ),
-    )
-    captured: dict[str, object] = {}
-    attest_calls: list[tuple[object, object]] = []
-    graph_init_workers: list[object] = []
-    output_proc_kwargs: list[dict[str, object]] = []
-    qwen_runner_calls: list[tuple[object, object]] = []
-    model = object()
-    output_proc = object()
-    model_config = SimpleNamespace(
-        model_path="model",
-        vocab_size=10,
-        hf_config=SimpleNamespace(thinker_config=object()),
-    )
-    model_worker = SimpleNamespace(
-        model_runner=SimpleNamespace(model=model),
-        model_config=model_config,
-    )
-
-    def fake_create_infrastructure(*args, **kwargs):
-        captured.update(kwargs)
-        return (
-            model_worker,
-            object(),
-            object(),
-            object(),
-            object(),
-            object(),
-            model_config,
-        )
-
-    monkeypatch.setattr(
-        scheduling_bootstrap,
-        "create_sglang_infrastructure",
-        fake_create_infrastructure,
-    )
-
-    monkeypatch.setattr(
-        scheduling_bootstrap,
-        "init_sglang_cuda_graphs",
-        lambda worker: graph_init_workers.append(worker),
-    )
-    monkeypatch.setattr(
-        cuda_graph_batch_validator,
-        "attest_prefill_cuda_graphs",
-        lambda runner, args: attest_calls.append((runner, args)),
-    )
-    monkeypatch.setattr(
-        hf_transformers_utils, "get_tokenizer", lambda *a, **k: object()
-    )
-    monkeypatch.setattr(
-        request_builders,
-        "make_thinker_scheduler_adapters",
-        lambda **kwargs: (object(), object()),
-    )
-    monkeypatch.setattr(request_builders, "make_thinker_stream_output_builder", object)
-    monkeypatch.setattr(
-        request_builders,
-        "should_generate_audio_output",
-        lambda payload: False,
-    )
-    monkeypatch.setattr(
-        sglang_backend,
-        "SGLangOutputProcessor",
-        lambda **kwargs: output_proc_kwargs.append(kwargs) or output_proc,
-    )
-    monkeypatch.setattr(
-        qwen_thinker_runner,
-        "Qwen3OmniThinkerModelRunner",
-        lambda model_worker, output_proc: (
-            qwen_runner_calls.append((model_worker, output_proc)) or object()
-        ),
-    )
-    monkeypatch.setattr(omni_scheduler, "OmniScheduler", SimpleNamespace)
-
-    scheduler = bootstrap.create_thinker_scheduler(
-        server_args, speech_enabled=speech_enabled
-    )
-
-    assert captured["enable_prefill_input_embeds"] is True
-    assert captured["capture_hidden_layers"] == ([0, 24] if speech_enabled else None)
-    assert captured["defer_cuda_graph_capture"] is speech_enabled
-    assert graph_init_workers == ([model_worker] if speech_enabled else [])
-    assert attest_calls == [(model_worker.model_runner, server_args)]
-    assert len(output_proc_kwargs) == 1
-    output_args = output_proc_kwargs[0]
-    assert output_args["capture_hidden"] is speech_enabled
-    assert output_args["capture_hidden_layers"] == ([0, 24] if speech_enabled else None)
-    assert output_args["model"] is (model if speech_enabled else None)
-    assert callable(output_args["should_emit_hidden"])
-    assert qwen_runner_calls == [(model_worker, output_proc)]
-    assert scheduler.server_args is server_args
-
-
-def test_qwen_cli_mem_fraction_static_rejects_runtime_override_duplicate() -> None:
-    config = Qwen3OmniSpeechPipelineConfig(
-        model_path="dummy",
-        runtime_overrides={
-            "thinker": {"server_args_overrides": {"mem_fraction_static": 0.70}}
-        },
-    )
-
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.80,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=None,
-    )
-
-    with pytest.raises(ValueError, match="mem_fraction_static"):
-        resolve_stage_factory_args(_stage(config, "thinker"), config)
-
-
-def test_qwen_cli_rejects_talker_override_on_text_only_qwen_without_partial_write() -> (
-    None
-):
-    config = Qwen3OmniPipelineConfig(model_path="dummy")
-    original = config.model_dump()
-
-    with pytest.raises(typer.BadParameter, match="talker"):
-        patches_from_mem_fraction_flags(
-            config,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=None,
-            talker_mem_fraction_static=0.65,
-        )
-
-    assert config.model_dump() == original
-
-
-def test_qwen_cli_rejects_invalid_mem_fraction_without_partial_write() -> None:
+def test_qwen_broadcast_and_dotted_conflict_is_never_silent() -> None:
+    """Two spellings of one leaf at one precedence stay an error."""
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    original = config.model_dump()
-
-    with pytest.raises(typer.BadParameter, match="must be > 0 and < 1"):
-        patches_from_mem_fraction_flags(
-            config,
-            mem_fraction_static=1.0,
-            thinker_mem_fraction_static=None,
-            talker_mem_fraction_static=None,
-        )
-
-    assert config.model_dump() == original
-
-
-def test_qwen_cli_rejects_global_mem_fraction_when_pipeline_has_no_supported_roles() -> (
-    None
-):
-    config = PipelineConfig(
-        model_path="dummy",
-        stages=[
-            StageConfig(
-                name="preprocessing",
-                process="pipeline",
-                factory=(
-                    "sglang_omni.models.qwen3_omni.stages."
-                    "create_preprocessing_executor"
-                ),
-                terminal=True,
-            )
-        ],
-    )
-
-    with pytest.raises(typer.BadParameter, match="supported"):
-        patches_from_mem_fraction_flags(
-            config,
-            mem_fraction_static=0.80,
-            thinker_mem_fraction_static=None,
-            talker_mem_fraction_static=None,
+    with pytest.raises(Exception, match="same precedence"):
+        ConfigManager(config).merge_config(
+            [
+                ("thinker.engine.mem_fraction_static", "0.70"),
+                ("thinker.engine.mem_fraction_static", "0.80"),
+            ]
         )
 
 
-def test_qwen_cli_encoder_mem_reserve_routes_as_thinker_factory_arg() -> None:
-    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+def test_qwen_encoder_reserve_and_explicit_pin_conflict_consumer_side() -> None:
+    """encoder_mem_reserve only applies to the auto mem-fraction path; the
+    stage factory refuses the combination with an explicit pin."""
+    server_args = SimpleNamespace(mem_fraction_static=0.70)
 
-    apply_encoder_mem_reserve_cli_override(
-        config,
+    applied = qwen_stages._apply_qwen_thinker_encoder_reserve(
+        server_args,
+        has_explicit_mem_fraction_static=True,
         encoder_mem_reserve=0.15,
-        mem_fraction_static=None,
-        thinker_mem_fraction_static=None,
     )
 
-    thinker_args = _stage(config, "thinker").factory_args
-    assert thinker_args["encoder_mem_reserve"] == 0.15
-    assert "encoder_mem_reserve" not in thinker_args.get("server_args_overrides", {})
-    assert "encoder_mem_reserve" not in _stage(config, "talker_ar").factory_args
-
-
-def test_qwen_cli_encoder_mem_reserve_is_exclusive_with_thinker_auto_path_pins() -> (
-    None
-):
-    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-
-    with pytest.raises(typer.BadParameter, match="mutually exclusive"):
-        apply_encoder_mem_reserve_cli_override(
-            config,
-            encoder_mem_reserve=0.15,
-            mem_fraction_static=0.80,
-            thinker_mem_fraction_static=None,
-        )
-
-    with pytest.raises(typer.BadParameter, match="mutually exclusive"):
-        apply_encoder_mem_reserve_cli_override(
-            config,
-            encoder_mem_reserve=0.15,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=0.70,
-        )
-
-
-def test_qwen_cli_encoder_mem_reserve_rejects_config_pinned_thinker_mem_fraction() -> (
-    None
-):
-    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    thinker_args = _stage(config, "thinker").factory_args
-    thinker_args["server_args_overrides"] = {"mem_fraction_static": 0.70}
-
-    with pytest.raises(typer.BadParameter, match="not explicitly pinned"):
-        apply_encoder_mem_reserve_cli_override(
-            config,
-            encoder_mem_reserve=0.15,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=None,
-        )
-
-
-def test_qwen_cli_encoder_mem_reserve_rejects_runtime_pinned_thinker_mem_fraction() -> (
-    None
-):
-    config = Qwen3OmniSpeechPipelineConfig(
-        model_path="dummy",
-        runtime_overrides={
-            "thinker": {"server_args_overrides": {"mem_fraction_static": 0.70}}
-        },
-    )
-
-    with pytest.raises(typer.BadParameter, match="not explicitly pinned"):
-        apply_encoder_mem_reserve_cli_override(
-            config,
-            encoder_mem_reserve=0.15,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=None,
-        )
-
-
-def test_qwen_cli_encoder_mem_reserve_rejects_typed_pinned_thinker_mem_fraction() -> (
-    None
-):
-    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    _stage(config, "thinker").runtime.sglang_server_args.mem_fraction_static = 0.70
-
-    with pytest.raises(typer.BadParameter, match="not explicitly pinned"):
-        apply_encoder_mem_reserve_cli_override(
-            config,
-            encoder_mem_reserve=0.15,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=None,
-        )
-
-
-def test_qwen_cli_encoder_mem_reserve_survives_runtime_overrides_overlay() -> None:
-    config = Qwen3OmniSpeechPipelineConfig(
-        model_path="dummy",
-        runtime_overrides={"thinker": {"encoder_mem_reserve": 0.10}},
-    )
-
-    apply_encoder_mem_reserve_cli_override(
-        config,
-        encoder_mem_reserve=0.15,
-        mem_fraction_static=None,
-        thinker_mem_fraction_static=None,
-    )
-
-    resolved = resolve_stage_factory_args(_stage(config, "thinker"), config)
-
-    assert resolved["encoder_mem_reserve"] == 0.15
+    assert applied is False
+    assert server_args.mem_fraction_static == 0.70
 
 
 def test_qwen_cli_thinker_tp_override_applies_tp_size_and_gpus() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_parallelism_cli_overrides(
-        config,
-        thinker_tp_size=2,
-        thinker_gpus="0,1",
-        talker_gpu=None,
-        code2wav_gpu=None,
+    merged = ConfigManager(config).merge_config(
+        [("thinker.tp_size", "2"), ("thinker.gpu", "[0, 1]")]
     )
 
-    thinker = _stage(config, "thinker")
+    thinker = _stage(merged, "thinker")
     assert thinker.tp_size == 2
     assert thinker.gpu == [0, 1]
 
@@ -1302,27 +955,18 @@ def test_qwen_cli_thinker_tp_override_applies_tp_size_and_gpus() -> None:
 def test_qwen_text_thinker_tp_builds_topology_without_memory_fractions() -> None:
     config = Qwen3OmniPipelineConfig(model_path="dummy")
 
-    config = _resolve_mem_fraction_flags(
-        config,
-        mem_fraction_static=0.82,
-        thinker_mem_fraction_static=None,
-        talker_mem_fraction_static=None,
-    )
-    apply_parallelism_cli_overrides(
-        config,
-        thinker_tp_size=2,
-        thinker_gpus="0,1",
-        talker_gpu=None,
-        code2wav_gpu=None,
+    resolved = _resolve_broadcast_mem_fraction(config, 0.82)
+    merged = ConfigManager(resolved).merge_config(
+        [("thinker.tp_size", "2"), ("thinker.gpu", "[0, 1]")]
     )
 
-    placement = build_stage_placement_plan(config)
-    build_process_topology_plan(config, placement)
+    placement = build_stage_placement_plan(merged)
+    build_process_topology_plan(merged, placement)
 
-    thinker = _stage(config, "thinker")
+    thinker = _stage(merged, "thinker")
     assert thinker.tp_size == 2
     assert thinker.gpu == [0, 1]
-    assert _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction is None
+    assert thinker.gpu_memory_fraction is None
 
 
 def test_qwen_thinker_tp_disables_custom_all_reduce_across_configs() -> None:
@@ -1372,51 +1016,40 @@ def test_thinker_tp_disable_custom_all_reduce_uses_shared_config_hook() -> None:
 
 
 def test_qwen_cli_serve_applies_thinker_tp_override_to_server_args(monkeypatch) -> None:
-    """End-to-end: the CLI TP pass writes disable_custom_all_reduce into the
-    thinker stage server args when TP>1 is configured (issue #760)."""
-    from sglang_omni.cli.serve import _apply_tensor_parallel_server_args_overrides
-
+    """End-to-end: the TP pass writes disable_custom_all_reduce into the
+    thinker stage engine args when TP>1 is configured (issue #760)."""
     monkeypatch.setattr(
         "sglang_omni.cli.serve.should_disable_custom_all_reduce_for_gpus",
         lambda *args, **kwargs: True,
     )
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    apply_parallelism_cli_overrides(
-        config,
-        thinker_tp_size=2,
-        thinker_gpus="0,1",
-        talker_gpu=None,
-        code2wav_gpu=None,
+    merged = ConfigManager(config).merge_config(
+        [("thinker.tp_size", "2"), ("thinker.gpu", "[0, 1]")]
     )
-    _apply_tensor_parallel_server_args_overrides(config)
+    resolved = apply_tensor_parallel_engine_overrides(merged)
 
     assert (
-        _server_args_overrides(config, "thinker")["disable_custom_all_reduce"] is True
+        _server_args_overrides(resolved, "thinker")["disable_custom_all_reduce"] is True
     )
     assert "disable_custom_all_reduce" not in _server_args_overrides(
-        config, "audio_encoder"
+        resolved, "audio_encoder"
     )
 
 
 def test_qwen_cli_serve_enables_custom_all_reduce_on_p2p_mesh(monkeypatch) -> None:
-    from sglang_omni.cli.serve import _apply_tensor_parallel_server_args_overrides
-
     monkeypatch.setattr(
         "sglang_omni.cli.serve.should_disable_custom_all_reduce_for_gpus",
         lambda *args, **kwargs: False,
     )
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    apply_parallelism_cli_overrides(
-        config,
-        thinker_tp_size=2,
-        thinker_gpus="0,1",
-        talker_gpu=None,
-        code2wav_gpu=None,
+    merged = ConfigManager(config).merge_config(
+        [("thinker.tp_size", "2"), ("thinker.gpu", "[0, 1]")]
     )
-    _apply_tensor_parallel_server_args_overrides(config)
+    resolved = apply_tensor_parallel_engine_overrides(merged)
 
     assert (
-        _server_args_overrides(config, "thinker")["disable_custom_all_reduce"] is False
+        _server_args_overrides(resolved, "thinker")["disable_custom_all_reduce"]
+        is False
     )
 
 

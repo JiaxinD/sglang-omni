@@ -1,397 +1,382 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the canonical set surfaces: ``set:`` and ``--set``.
+"""Unit tests for the canonical write surfaces.
 
-Two things are being pinned down here. The first is that both spellings mean
-exactly the same thing as each other and as a dotted CLI override -- same
-coercion, same sentinel, same path validation -- because a second way to set a
-value is only worth having if it needs no separate mental model.
+There are exactly two ways to set a per-stage value, and they are the same
+path written twice: the YAML ``stages:`` mapping starts from the stage name,
+and a dotted CLI flag starts from the stage name too, with the ``stages.``
+prefix implied. What these tests pin down:
 
-The second is the refusal. ``--set stages.thinker.tp_size=8`` and
-``--stages.thinker.tp_size 4`` sit at the same layer *and* the same
-specificity, so the resolver has nothing to break the tie with and says so
-instead of inventing a rule. The tests below assert that this stays an error
-rather than quietly becoming last-one-wins.
+* both spellings resolve through the same patch machinery -- same paths, same
+  conflict rules, same provenance;
+* the CLI coerces text by the declared type while YAML values keep their
+  native types untouched;
+* the ``engine``/``scheduler``/``model`` groups accept keys beyond their
+  declared fields and pass them through untouched -- whether a key exists is
+  the consuming module's call, not the parser's;
+* writing one path twice at the same precedence stays an error rather than
+  quietly becoming last-one-wins.
 """
 
 from __future__ import annotations
 
 import pytest
-import yaml
 
 from sglang_omni.config.manager import ConfigManager
-from sglang_omni.config.patch import DuplicatePatchError, Layer, SourceKind, Specificity
+from sglang_omni.config.patch import (
+    ConfigPatchSet,
+    DuplicatePatchError,
+    Layer,
+    Specificity,
+)
 from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import (
     patches_from_dotted_cli,
-    patches_from_set_block,
-    patches_from_set_cli,
-    split_assignment,
+    patches_from_model_path_flag,
+    patches_from_shared_block,
+    patches_from_stages_mapping,
 )
 
-MAX_SEQ_LEN = "stages.thinker.runtime.max_seq_len"
-TP_SIZE = "stages.thinker.tp_size"
-ROUTE_FN = "stages.preprocessing.route_fn"
+MAX_SEQ_LEN = "stages.thinker.model.max_seq_len"
 
 
 def resolve(config: PipelineConfig, *patchsets) -> PipelineConfig:
     """Apply several patch sets the way a single entry point would."""
     merged = patchsets[0]
-    for extra in patchsets[1:]:
-        merged = merged.merge(extra)
+    for patchset in patchsets[1:]:
+        merged = merged.merge(patchset)
     return ConfigResolver(config).resolve(merged).config
 
 
-class TestSplitAssignment:
-    def test_splits_on_the_first_equals(self):
-        assert split_assignment(f"{TP_SIZE}=4") == (TP_SIZE, "4")
-
-    def test_the_value_keeps_every_later_equals(self):
-        """JSON and query-string shaped values have to survive intact."""
-        path, value = split_assignment('stages.thinker.env={"A": "x=y"}')
-        assert value == '{"A": "x=y"}'
-
-    def test_surrounding_space_around_the_path_is_ignored(self):
-        assert split_assignment(f"  {TP_SIZE} =4")[0] == TP_SIZE
-
-    @pytest.mark.parametrize("text", [TP_SIZE, "", "=4", " =4"])
-    def test_a_missing_path_or_equals_is_refused(self, text):
-        """A ConfigPathError, so the CLI's path-error handling catches it."""
-        with pytest.raises(ConfigPathError, match="PATH=VALUE"):
-            split_assignment(text)
+def stage(config: PipelineConfig, name: str):
+    return config.stage_named(name)
 
 
-class TestSetOnTheCommandLine:
+class TestDottedCli:
     def test_text_is_coerced_to_the_declared_type(self, pipeline_config):
-        patches = patches_from_set_cli([f"{MAX_SEQ_LEN}=8192"], pipeline_config)
-        (patch,) = patches
-        assert patch.value == 8192
-        assert isinstance(patch.value, int)
+        patches = patches_from_dotted_cli([("thinker.tp_size", "2")], pipeline_config)
+        resolved = resolve(pipeline_config, patches)
+        assert stage(resolved, "thinker").tp_size == 2
 
-    def test_the_none_sentinel_clears_a_field(self, pipeline_config):
-        """The same sentinel a dotted override honours, not the string 'none'.
-
-        Worth an end-to-end assertion rather than a check on the patch: what
-        made this go wrong in the first place was pydantic's smart union mode
-        satisfying ``str | None`` with the *word*, so the field has to be read
-        back off a validated config.
-        """
-        seeded = resolve(
-            pipeline_config,
-            patches_from_set_cli([f"{ROUTE_FN}=tests.fake:route"], pipeline_config),
+    def test_the_stage_name_head_gets_the_implied_prefix(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("thinker.model.max_seq_len", "4096")], pipeline_config
         )
-        assert seeded.stages[0].route_fn == "tests.fake:route"
-
-        config = resolve(seeded, patches_from_set_cli([f"{ROUTE_FN}=none"], seeded))
-        assert config.stages[0].route_fn is None
-
-    def test_it_lands_on_the_cli_layer_as_an_explicit_path(self, pipeline_config):
-        (patch,) = patches_from_set_cli([f"{TP_SIZE}=2"], pipeline_config)
-        assert patch.source.kind is SourceKind.CLI_SET
+        (patch,) = list(patches)
+        assert patch.path.raw == MAX_SEQ_LEN
         assert patch.layer is Layer.CLI
         assert patch.specificity is Specificity.EXPLICIT
 
-    def test_an_unknown_path_is_refused_with_suggestions(self, pipeline_config):
+    def test_the_explicit_stages_prefix_is_refused(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="implied"):
+            patches_from_dotted_cli([("stages.thinker.tp_size", "2")], pipeline_config)
+
+    def test_a_whole_stage_flag_is_refused(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="one field below"):
+            patches_from_dotted_cli([("thinker", "2")], pipeline_config)
+
+    def test_an_unknown_head_suggests_stages_and_top_level_fields(
+        self, pipeline_config
+    ):
         with pytest.raises(ConfigPathError) as excinfo:
-            patches_from_set_cli(["stages.thinker.tp_siz=2"], pipeline_config)
-        assert "did you mean" in str(excinfo.value).lower()
+            patches_from_dotted_cli([("thinkr.tp_size", "2")], pipeline_config)
+        assert "thinker" in str(excinfo.value)
 
-    def test_positional_stage_indices_are_not_accepted(self, pipeline_config):
-        """New syntax, so it is not born deprecated -- and the error says why."""
-        with pytest.raises(ConfigPathError, match="by name, not by index"):
-            patches_from_set_cli(["stages.1.tp_size=2"], pipeline_config)
+    def test_an_unknown_field_inside_a_stage_gets_suggestions(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="tp_size"):
+            patches_from_dotted_cli([("thinker.tp_siz", "2")], pipeline_config)
 
-    def test_a_container_path_is_refused_with_leaf_examples(self, pipeline_config):
-        """One path, one value: a whole runtime section cannot be assigned."""
-        with pytest.raises(ConfigPathError) as excinfo:
-            patches_from_set_cli(
-                ['stages.thinker.runtime={"max_seq_len": 100}'], pipeline_config
-            )
-        message = str(excinfo.value)
-        assert "whole section" in message
-        assert "stages.thinker.runtime.max_seq_len" in message
-
-    def test_a_typed_mapping_is_written_one_key_at_a_time(self, pipeline_config):
-        with pytest.raises(ConfigPathError, match="whole section"):
-            patches_from_set_cli(
-                ['stages.thinker.env={"OMP_NUM_THREADS": "8"}'], pipeline_config
-            )
-        (patch,) = patches_from_set_cli(
-            ["stages.thinker.env.OMP_NUM_THREADS=8"], pipeline_config
+    def test_the_none_sentinel_clears_a_field(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("thinker.model.max_seq_len", "none")], pipeline_config
         )
-        assert patch.value == "8"
+        resolved = resolve(pipeline_config, patches)
+        assert stage(resolved, "thinker").model.max_seq_len is None
 
-    def test_several_paths_are_set_in_one_command(self, pipeline_config):
-        config = resolve(
-            pipeline_config,
-            patches_from_set_cli(
-                [f"{MAX_SEQ_LEN}=8192", f"{TP_SIZE}=2"], pipeline_config
-            ),
+    def test_a_top_level_field_passes_through(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("model_path", "/models/other")], pipeline_config
         )
-        assert config.stages[1].runtime.max_seq_len == 8192
-        assert config.stages[1].tp_size == 2
+        resolved = resolve(pipeline_config, patches)
+        assert resolved.model_path == "/models/other"
 
-
-class TestSetBlock:
-    def test_flat_dotted_keys_with_yaml_typed_values(self, pipeline_config):
-        config = resolve(
-            pipeline_config,
-            patches_from_set_block(
-                {MAX_SEQ_LEN: 8192, TP_SIZE: 2, "entry_stage": "preprocessing"},
+    def test_engine_on_a_non_engine_stage_is_refused(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="not an engine stage"):
+            patches_from_dotted_cli(
+                [("preprocessing.engine.mem_fraction_static", "0.5")],
                 pipeline_config,
-            ),
-        )
-        assert config.stages[1].runtime.max_seq_len == 8192
-        assert config.stages[1].tp_size == 2
-        assert config.entry_stage == "preprocessing"
-
-    def test_a_quoted_number_still_reaches_an_int_field_as_an_int(
-        self, pipeline_config
-    ):
-        (patch,) = patches_from_set_block({MAX_SEQ_LEN: "8192"}, pipeline_config)
-        assert patch.value == 8192
-
-    def test_it_lands_on_the_user_file_layer(self, pipeline_config):
-        (patch,) = patches_from_set_block({TP_SIZE: 2}, pipeline_config)
-        assert patch.source.kind is SourceKind.YAML_FILE
-        assert patch.layer is Layer.USER_FILE
-
-    def test_a_block_that_is_not_a_mapping_is_refused(self, pipeline_config):
-        with pytest.raises(ValueError, match="must be a mapping"):
-            patches_from_set_block([f"{TP_SIZE}=2"], pipeline_config)
-
-    def test_a_key_that_is_not_a_path_is_refused(self, pipeline_config):
-        with pytest.raises(ValueError, match="written as strings"):
-            patches_from_set_block({4: 2}, pipeline_config)
-
-    def test_an_unknown_path_is_refused(self, pipeline_config):
-        with pytest.raises(ConfigPathError):
-            patches_from_set_block({"stages.thinker.nonesuch": 2}, pipeline_config)
-
-    def test_a_container_path_is_refused_like_on_the_command_line(
-        self, pipeline_config
-    ):
-        """Same rule as --set: the block would deep-merge where the flag
-        replaces, so neither surface takes a section at all."""
-        with pytest.raises(ConfigPathError, match="whole section") as excinfo:
-            patches_from_set_block(
-                {"stages.thinker.runtime": {"max_seq_len": 100}}, pipeline_config
             )
-        assert "stages.thinker.runtime.max_seq_len" in str(excinfo.value)
+
+
+class TestGroupPassThrough:
+    """Keys the groups do not declare travel to the consumer untouched."""
+
+    def test_a_free_form_engine_key_reaches_the_overrides(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("thinker.engine.disable_radix_cache", "true")], pipeline_config
+        )
+        resolved = resolve(pipeline_config, patches)
+        assert (
+            stage(resolved, "thinker").engine.overrides()["disable_radix_cache"] is True
+        )
+
+    def test_free_form_scheduler_and_model_keys_are_kept(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("thinker.scheduler.made_up_knob", "7"), ("thinker.model.lookahead", "9")],
+            pipeline_config,
+        )
+        resolved = resolve(pipeline_config, patches)
+        thinker = stage(resolved, "thinker")
+        assert thinker.scheduler.model_extra["made_up_knob"] == 7
+        assert thinker.model.model_extra["lookahead"] == 9
+
+    def test_a_declared_key_still_validates_eagerly(self, pipeline_config):
+        patches = patches_from_dotted_cli(
+            [("thinker.scheduler.max_concurrency", "0")], pipeline_config
+        )
+        with pytest.raises(Exception, match="max_concurrency"):
+            resolve(pipeline_config, patches)
+
+
+class TestStagesMapping:
+    def test_a_known_name_merges_as_leaf_patches(self, pipeline_config):
+        patches = patches_from_stages_mapping(
+            {"thinker": {"tp_size": 2, "engine": {"mem_fraction_static": 0.6}}},
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        paths = {patch.path.raw for patch in patches}
+        assert paths == {
+            "stages.thinker.tp_size",
+            "stages.thinker.engine.mem_fraction_static",
+        }
+        assert all(patch.layer is Layer.USER_FILE for patch in patches)
+
+    def test_yaml_values_keep_their_native_types(self, pipeline_config):
+        patches = patches_from_stages_mapping(
+            {"thinker": {"engine": {"mem_fraction_static": 0.6}}},
+            type(pipeline_config),
+            ["thinker"],
+        )
+        (patch,) = list(patches)
+        assert patch.value == 0.6 and isinstance(patch.value, float)
+
+    def test_the_mapping_resolves_onto_the_config(self, pipeline_config):
+        patches = patches_from_stages_mapping(
+            {
+                "thinker": {
+                    "engine": {"disable_radix_cache": True},
+                    "model": {"lookahead": 9},
+                }
+            },
+            type(pipeline_config),
+            ["thinker"],
+        )
+        resolved = resolve(pipeline_config, patches)
+        thinker = stage(resolved, "thinker")
+        assert thinker.engine.overrides()["disable_radix_cache"] is True
+        assert thinker.model.model_extra["lookahead"] == 9
+
+    def test_an_unknown_name_is_refused_with_the_real_names(self, pipeline_config):
+        """Stage topology lives in the model's config class; a config file
+        cannot introduce stages."""
+        with pytest.raises(ValueError, match="thinker"):
+            patches_from_stages_mapping(
+                {"decode": {"factory": "x:y", "terminal": True}},
+                type(pipeline_config),
+                ["preprocessing", "thinker"],
+            )
+
+    def test_name_inside_a_body_is_refused(self, pipeline_config):
+        with pytest.raises(ValueError, match="mapping key is the stage's name"):
+            patches_from_stages_mapping(
+                {"thinker": {"name": "thinker"}},
+                type(pipeline_config),
+                ["thinker"],
+            )
+
+    def test_the_list_form_is_refused_with_guidance(self, pipeline_config):
+        with pytest.raises(ValueError, match="mapping"):
+            patches_from_stages_mapping(
+                [{"name": "thinker"}], type(pipeline_config), ["thinker"]
+            )
+
+    def test_a_non_mapping_stage_body_is_refused(self, pipeline_config):
+        with pytest.raises(ValueError, match="must be a mapping"):
+            patches_from_stages_mapping(
+                {"thinker": 4}, type(pipeline_config), ["thinker"]
+            )
+
+
+class TestStageDefaults:
+    """``shared`` fans one body out to the selected stages."""
+
+    def test_the_selection_expands_to_one_patch_per_stage(self, pipeline_config):
+        patches = patches_from_shared_block(
+            [
+                {
+                    "select": {"stages": ["preprocessing", "thinker"]},
+                    "model": {"max_seq_len": 4096},
+                }
+            ],
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        assert {patch.path.raw for patch in patches.ordered()} == {
+            "stages.preprocessing.model.max_seq_len",
+            "stages.thinker.model.max_seq_len",
+        }
+        assert all(patch.specificity is Specificity.ROLE for patch in patches.ordered())
+
+    def test_an_explicit_stage_entry_overrides_the_selection(self, pipeline_config):
+        defaults = patches_from_shared_block(
+            [
+                {
+                    "select": {"stages": ["preprocessing", "thinker"]},
+                    "model": {"max_seq_len": 4096},
+                }
+            ],
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        explicit = patches_from_stages_mapping(
+            {"thinker": {"model": {"max_seq_len": 8192}}},
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        resolved = resolve(pipeline_config, defaults, explicit)
+        assert stage(resolved, "thinker").model.max_seq_len == 8192
+        assert stage(resolved, "preprocessing").model.max_seq_len == 4096
+
+    def test_the_engine_selector_matches_engine_stages_only(self, pipeline_config):
+        patches = patches_from_shared_block(
+            [{"select": {"engine": True}, "engine": {"mem_fraction_static": 0.5}}],
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        assert [patch.path.raw for patch in patches.ordered()] == [
+            "stages.thinker.engine.mem_fraction_static"
+        ]
+
+    def test_exclude_removes_matched_stages(self, pipeline_config):
+        patches = patches_from_shared_block(
+            [
+                {
+                    "select": {
+                        "stages": ["preprocessing", "thinker"],
+                        "exclude": ["thinker"],
+                    },
+                    "model": {"max_seq_len": 4096},
+                }
+            ],
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        assert [patch.path.raw for patch in patches.ordered()] == [
+            "stages.preprocessing.model.max_seq_len"
+        ]
+
+    def test_two_entries_writing_one_leaf_conflict(self, pipeline_config):
+        patches = patches_from_shared_block(
+            [
+                {"select": {"stages": ["thinker"]}, "model": {"max_seq_len": 4096}},
+                {
+                    "select": {"stages": ["preprocessing", "thinker"]},
+                    "model": {"max_seq_len": 2048},
+                },
+            ],
+            type(pipeline_config),
+            ["preprocessing", "thinker"],
+        )
+        with pytest.raises(DuplicatePatchError):
+            resolve(pipeline_config, patches)
+
+    def test_an_unknown_stage_name_is_refused_with_the_real_names(
+        self, pipeline_config
+    ):
+        with pytest.raises(ValueError, match="thinker"):
+            patches_from_shared_block(
+                [{"select": {"stages": ["thinkr"]}, "model": {"max_seq_len": 1}}],
+                type(pipeline_config),
+                ["preprocessing", "thinker"],
+            )
+
+    def test_an_empty_selection_is_refused(self, pipeline_config):
+        with pytest.raises(ValueError, match="matches no stage"):
+            patches_from_shared_block(
+                [
+                    {
+                        "select": {"engine": True, "exclude": ["thinker"]},
+                        "engine": {"mem_fraction_static": 0.5},
+                    }
+                ],
+                type(pipeline_config),
+                ["preprocessing", "thinker"],
+            )
+
+    def test_a_bodyless_entry_is_refused(self, pipeline_config):
+        with pytest.raises(ValueError, match="writes nothing"):
+            patches_from_shared_block(
+                [{"select": {"stages": ["thinker"]}}],
+                type(pipeline_config),
+                ["preprocessing", "thinker"],
+            )
+
+    def test_an_unknown_selector_key_is_refused(self, pipeline_config):
+        with pytest.raises(ValueError, match="capability"):
+            patches_from_shared_block(
+                [
+                    {
+                        "select": {"capability": "sglang"},
+                        "engine": {"mem_fraction_static": 0.5},
+                    }
+                ],
+                type(pipeline_config),
+                ["preprocessing", "thinker"],
+            )
 
 
 class TestPrecedence:
     def test_the_command_line_beats_the_file(self, pipeline_config):
-        config = resolve(
-            pipeline_config,
-            patches_from_set_block({TP_SIZE: 2}, pipeline_config),
-            patches_from_set_cli([f"{TP_SIZE}=4"], pipeline_config),
+        file_patches = patches_from_stages_mapping(
+            {"thinker": {"tp_size": 2}}, type(pipeline_config), ["thinker"]
         )
-        assert config.stages[1].tp_size == 4
+        cli_patches = patches_from_dotted_cli(
+            [("thinker.tp_size", "4")], pipeline_config
+        )
+        resolved = resolve(pipeline_config, file_patches, cli_patches)
+        assert stage(resolved, "thinker").tp_size == 4
 
-    def test_set_and_a_dotted_override_of_different_paths_both_apply(
-        self, pipeline_config
-    ):
-        config = resolve(
-            pipeline_config,
-            patches_from_dotted_cli({TP_SIZE: "4"}, pipeline_config),
-            patches_from_set_cli([f"{MAX_SEQ_LEN}=8192"], pipeline_config),
-        )
-        assert config.stages[1].tp_size == 4
-        assert config.stages[1].runtime.max_seq_len == 8192
+    def test_the_model_path_flag_beats_the_file_value(self, pipeline_config):
+        flag = patches_from_model_path_flag("/models/flag", pipeline_config)
+        resolved = resolve(pipeline_config, flag)
+        assert resolved.model_path == "/models/flag"
 
 
 class TestManager:
-    def test_merge_config_applies_set_values(self, pipeline_config):
-        config = ConfigManager(pipeline_config).merge_config(
-            {}, set_values=[f"{MAX_SEQ_LEN}=8192"]
-        )
-        assert config.stages[1].runtime.max_seq_len == 8192
-
-    def test_merge_config_refuses_a_path_written_both_ways(self, pipeline_config):
-        with pytest.raises(DuplicatePatchError, match="set twice"):
-            ConfigManager(pipeline_config).merge_config(
-                {TP_SIZE: "4"}, set_values=[f"{TP_SIZE}=8"]
-            )
+    def test_merge_config_applies_dotted_pairs(self, pipeline_config):
+        manager = ConfigManager(pipeline_config)
+        merged = manager.merge_config([("thinker.tp_size", "2")])
+        assert stage(merged, "thinker").tp_size == 2
 
     def test_a_flag_repeated_with_different_values_is_refused(self, pipeline_config):
-        """Parsing keeps both spellings, so the duplicate check sees them."""
         manager = ConfigManager(pipeline_config)
-        args = manager.parse_extra_args([f"--{TP_SIZE}", "2", f"--{TP_SIZE}", "4"])
-        with pytest.raises(DuplicatePatchError, match="set twice"):
-            manager.merge_config(args)
+        with pytest.raises(DuplicatePatchError):
+            manager.merge_config([("thinker.tp_size", "2"), ("thinker.tp_size", "4")])
 
     def test_a_flag_repeated_with_the_same_value_is_tolerated(self, pipeline_config):
         manager = ConfigManager(pipeline_config)
-        args = manager.parse_extra_args([f"--{TP_SIZE}", "4", f"--{TP_SIZE}", "4"])
-        config = manager.merge_config(args)
-        assert config.stages[1].tp_size == 4
+        merged = manager.merge_config(
+            [("thinker.tp_size", "2"), ("thinker.tp_size", "2")]
+        )
+        assert stage(merged, "thinker").tp_size == 2
 
-    def test_an_index_and_a_name_disagreeing_are_refused(self, pipeline_config):
-        """`--stages.1.x` and `--stages.thinker.x` are one path after
-        translation, so disagreement is a conflict, not an ordering puzzle."""
+    def test_extra_patches_join_the_same_conflict_check(self, pipeline_config):
         manager = ConfigManager(pipeline_config)
-        args = manager.parse_extra_args(
-            ["--stages.1.tp_size", "2", f"--{TP_SIZE}", "4"]
+        extra = ConfigPatchSet().merge(
+            patches_from_model_path_flag("/models/flag", pipeline_config)
         )
-        with pytest.raises(DuplicatePatchError, match="set twice"):
-            manager.merge_config(args)
-
-
-class TestTypedFlagPatches:
-    """The typed mem-fraction flags as `sgl-omni serve` now merges them."""
-
-    @staticmethod
-    def _mem_fraction(config, stage_name):
-        stage = next(s for s in config.stages if s.name == stage_name)
-        return stage.runtime.sglang_server_args.mem_fraction_static
-
-    def test_the_flag_is_applied_through_merge_config(self, shipped_config):
-        """`sgl-omni serve --config f.yaml --mem-fraction-static 0.8`."""
-        from sglang_omni.cli.serve import patches_from_mem_fraction_flags
-
-        config = ConfigManager(shipped_config).merge_config(
-            {},
-            extra_patches=patches_from_mem_fraction_flags(
-                shipped_config,
-                mem_fraction_static=0.8,
-                thinker_mem_fraction_static=None,
-                talker_mem_fraction_static=None,
-            ),
-        )
-        assert self._mem_fraction(config, "tts_engine") == 0.8
-
-    def test_an_explicit_set_beats_the_typed_flag(self, shipped_config):
-        """`--mem-fraction-static 0.8 --set stages...=0.7`: the explicit path
-        wins by specificity, instead of the typed flag silently overwriting it
-        because its helper used to run after the merge."""
-        from sglang_omni.cli.serve import patches_from_mem_fraction_flags
-
-        path = "stages.tts_engine.runtime.sglang_server_args.mem_fraction_static"
-        config = ConfigManager(shipped_config).merge_config(
-            {},
-            set_values=[f"{path}=0.7"],
-            extra_patches=patches_from_mem_fraction_flags(
-                shipped_config,
-                mem_fraction_static=0.8,
-                thinker_mem_fraction_static=None,
-                talker_mem_fraction_static=None,
-            ),
-        )
-        assert self._mem_fraction(config, "tts_engine") == 0.7
-
-
-@pytest.fixture
-def shipped_config():
-    """A shipped pipeline config, so the paths are ones users actually type."""
-    module = pytest.importorskip("sglang_omni.models.moss_tts.config")
-    return module.MossTTSPipelineConfig(model_path="dummy")
-
-
-def write_config(tmp_path, config, **blocks):
-    data = config.model_dump(mode="json")
-    data.update(blocks)
-    path = tmp_path / "pipeline.yaml"
-    path.write_text(yaml.safe_dump(data, sort_keys=False))
-    return path
-
-
-class TestConfigFile:
-    def test_from_file_applies_the_set_block(self, tmp_path, shipped_config):
-        stage = shipped_config.stages[1].name
-        path = write_config(
-            tmp_path, shipped_config, set={f"stages.{stage}.runtime.max_seq_len": 8192}
-        )
-        config = ConfigManager.from_file(str(path)).config
-        assert config.stages[1].runtime.max_seq_len == 8192
-
-    def test_set_and_stage_overrides_coexist_on_different_paths(
-        self, tmp_path, shipped_config
-    ):
-        stage = shipped_config.stages[1].name
-        path = write_config(
-            tmp_path,
-            shipped_config,
-            set={f"stages.{stage}.runtime.max_seq_len": 8192},
-            stage_overrides={
-                stage: {"runtime": {"resources": {"total_gpu_memory_fraction": 0.55}}}
-            },
-        )
-        config = ConfigManager.from_file(str(path)).config
-        assert config.stages[1].runtime.max_seq_len == 8192
-        assert config.stages[1].runtime.resources.total_gpu_memory_fraction == 0.55
-
-    def test_set_and_stage_overrides_disagreeing_on_one_path_is_refused(
-        self, tmp_path, shipped_config
-    ):
-        """Both blocks are the user's file, so neither can outrank the other."""
-        stage = shipped_config.stages[1].name
-        path = write_config(
-            tmp_path,
-            shipped_config,
-            set={f"stages.{stage}.runtime.max_seq_len": 8192},
-            stage_overrides={stage: {"runtime": {"max_seq_len": 4096}}},
-        )
-        with pytest.raises(DuplicatePatchError) as excinfo:
-            ConfigManager.from_file(str(path))
-        message = str(excinfo.value)
-        assert "user_file layer" in message
-        assert "yaml file" in message
-        assert "yaml stage overrides" in message
-
-    def test_the_command_line_beats_the_set_block(self, tmp_path, shipped_config):
-        stage = shipped_config.stages[1].name
-        path = write_config(
-            tmp_path, shipped_config, set={f"stages.{stage}.runtime.max_seq_len": 8192}
-        )
-        manager = ConfigManager.from_file(str(path))
-        config = manager.merge_config(
-            {}, set_values=[f"stages.{stage}.runtime.max_seq_len=2048"]
-        )
-        assert config.stages[1].runtime.max_seq_len == 2048
-
-
-class TestLegacyParallelismBlock:
-    """Files written against the retired per-stage ``parallelism`` field."""
-
-    def _write(self, tmp_path, shipped_config, mutate):
-        data = shipped_config.model_dump(mode="json")
-        mutate(data["stages"][1])
-        path = tmp_path / "pipeline.yaml"
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
-        return path
-
-    def test_the_block_is_translated_into_tp_size(self, tmp_path, shipped_config):
-        from sglang_omni.config.compat import sources_from_config_file
-
-        def mutate(stage):
-            del stage["tp_size"]
-            stage["parallelism"] = {"tp": 2}
-
-        path = self._write(tmp_path, shipped_config, mutate)
-        config = ConfigManager.from_file(str(path)).config
-        assert config.stages[1].tp_size == 2
-
-        _, patches = sources_from_config_file(str(path))
-        assert patches.deprecations()
-
-    def test_the_block_agreeing_with_tp_size_is_accepted(
-        self, tmp_path, shipped_config
-    ):
-        def mutate(stage):
-            stage["tp_size"] = 2
-            stage["parallelism"] = {"tp": 2}
-
-        path = self._write(tmp_path, shipped_config, mutate)
-        config = ConfigManager.from_file(str(path)).config
-        assert config.stages[1].tp_size == 2
-
-    def test_the_block_contradicting_tp_size_is_refused(self, tmp_path, shipped_config):
-        def mutate(stage):
-            stage["tp_size"] = 4
-            stage["parallelism"] = {"tp": 2}
-
-        path = self._write(tmp_path, shipped_config, mutate)
-        with pytest.raises(ValueError, match="conflicts with"):
-            ConfigManager.from_file(str(path))
+        merged = manager.merge_config([("thinker.tp_size", "2")], extra_patches=extra)
+        assert merged.model_path == "/models/flag"
+        assert stage(merged, "thinker").tp_size == 2

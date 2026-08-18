@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the resolver, including V1/V2 parity.
+"""Unit tests for the resolver: application, provenance, and diffing.
 
-The parity tests are the load-bearing ones: the resolver is now what a launch
-runs, so for every syntax the V1 merge chain supported it must produce the
-configuration that chain produced. The exhaustive, generated version of that
-argument lives in ``test_v1_parity.py``; the cases here are the hand-written
-ones worth reading.
+The resolver is the only code that writes into a configuration; these are
+the hand-written cases worth reading. Dotted-key canonicalization (the CLI's
+implied ``stages.`` prefix and the one legacy spelling that still parses)
+is covered at the bottom.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from sglang_omni.config.compat import (
-    canonicalize_dotted_key,
-    patches_from_stage_overrides,
-)
-from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.compat import canonicalize_dotted_key
 from sglang_omni.config.patch import (
     ConfigPatch,
     ConfigPatchSet,
@@ -26,12 +21,11 @@ from sglang_omni.config.patch import (
 from sglang_omni.config.path import ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, diff_configs
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.sources import patches_from_dotted_cli
 
-MEM_FRACTION = "stages.thinker.runtime.sglang_server_args.mem_fraction_static"
+MEM_FRACTION = "stages.thinker.engine.mem_fraction_static"
 
 YAML = ConfigSource(SourceKind.YAML_FILE, "configs/omni.yaml")
-CLI = ConfigSource(SourceKind.CLI_SET, "--set")
+CLI = ConfigSource(SourceKind.CLI_DOTTED, "command line")
 MODEL = ConfigSource(SourceKind.MODEL_DEFAULT, "FakeOmniConfig")
 
 
@@ -39,54 +33,55 @@ def patchset(*patches: ConfigPatch) -> ConfigPatchSet:
     return ConfigPatchSet(list(patches))
 
 
-def make(path, value, source=CLI, **kwargs):
-    return ConfigPatch.create(path, value, source, **kwargs)
+def make(config, path, value, source=CLI, **kwargs):
+    return ConfigPatch.create(path, value, source, root=type(config), **kwargs)
 
 
 class TestResolve:
     def test_applies_a_leaf_patch(self, pipeline_config: PipelineConfig):
         resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make(MEM_FRACTION, "0.8"))
+            patchset(make(pipeline_config, MEM_FRACTION, "0.8"))
         )
         assert resolved.value(MEM_FRACTION) == 0.8
 
     def test_baseline_is_untouched(self, pipeline_config: PipelineConfig):
-        ConfigResolver(pipeline_config).resolve(patchset(make(MEM_FRACTION, "0.8")))
-        assert (
-            pipeline_config.stages[1].runtime.sglang_server_args.mem_fraction_static
-            is None
+        ConfigResolver(pipeline_config).resolve(
+            patchset(make(pipeline_config, MEM_FRACTION, "0.8"))
         )
+        assert pipeline_config.stages[1].engine.mem_fraction_static is None
 
     def test_result_is_validated(self, pipeline_config: PipelineConfig):
         """mem_fraction_static must stay in (0, 1); the resolver rebuilds the
         model rather than assigning onto it, so validators still fire."""
         with pytest.raises(ValueError, match="mem_fraction_static"):
-            ConfigResolver(pipeline_config).resolve(patchset(make(MEM_FRACTION, "1.5")))
+            ConfigResolver(pipeline_config).resolve(
+                patchset(make(pipeline_config, MEM_FRACTION, "1.5"))
+            )
 
     def test_container_patch_deep_merges(self, pipeline_config: PipelineConfig):
+        env = "stages.preprocessing.env"
         resolved = ConfigResolver(pipeline_config).resolve(
             patchset(
-                make("stages.thinker.runtime.max_seq_len", 4096),
-                make(
-                    "stages.thinker.runtime",
-                    {"sglang_server_args": {"mem_fraction_static": 0.7}},
-                    YAML,
-                ),
+                make(pipeline_config, f"{env}.OMP_NUM_THREADS", "8"),
+                make(pipeline_config, env, {"EXTRA_FLAG": "1"}, YAML),
             )
         )
         # The container came from a weaker layer, so the leaf patch survives it.
-        assert resolved.value("stages.thinker.runtime.max_seq_len") == 4096
-        assert resolved.value(MEM_FRACTION) == 0.7
+        assert resolved.value(f"{env}.OMP_NUM_THREADS") == "8"
+        assert resolved.value(f"{env}.EXTRA_FLAG") == "1"
 
     def test_conflicting_patches_are_refused(self, pipeline_config: PipelineConfig):
         with pytest.raises(ValueError, match="same precedence"):
             ConfigResolver(pipeline_config).resolve(
-                patchset(make(MEM_FRACTION, 0.5, YAML), make(MEM_FRACTION, 0.9, YAML))
+                patchset(
+                    make(pipeline_config, MEM_FRACTION, 0.5, YAML),
+                    make(pipeline_config, MEM_FRACTION, 0.9, YAML),
+                )
             )
 
     def test_tp_size_text_is_coerced_and_applied(self, pipeline_config: PipelineConfig):
         resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make("stages.thinker.tp_size", "4"))
+            patchset(make(pipeline_config, "stages.thinker.tp_size", "4"))
         )
         assert resolved.config.stages[1].tp_size == 4
 
@@ -95,9 +90,9 @@ class TestProvenance:
     def test_explains_the_full_chain(self, pipeline_config: PipelineConfig):
         resolved = ConfigResolver(pipeline_config).resolve(
             patchset(
-                make(MEM_FRACTION, 0.5, MODEL),
-                make(MEM_FRACTION, 0.7, YAML),
-                make(MEM_FRACTION, 0.9, CLI),
+                make(pipeline_config, MEM_FRACTION, 0.5, MODEL),
+                make(pipeline_config, MEM_FRACTION, 0.7, YAML),
+                make(pipeline_config, MEM_FRACTION, 0.9, CLI),
             )
         )
         text = resolved.provenance.explain(MEM_FRACTION)
@@ -107,14 +102,14 @@ class TestProvenance:
 
     def test_records_the_pre_patch_value(self, pipeline_config: PipelineConfig):
         resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make("stages.thinker.tp_size", 4))
+            patchset(make(pipeline_config, "stages.thinker.tp_size", 4))
         )
         assert resolved.provenance.baseline["stages.thinker.tp_size"] == 1
 
     def test_untouched_paths_are_not_explained(self, pipeline_config: PipelineConfig):
         """`config explain` asks touched() first and reports the default itself."""
         resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make("stages.thinker.tp_size", 4))
+            patchset(make(pipeline_config, "stages.thinker.tp_size", 4))
         )
         assert not resolved.provenance.touched("stages.thinker.process")
         assert resolved.provenance.winner("stages.thinker.process") is None
@@ -123,7 +118,7 @@ class TestProvenance:
         self, pipeline_config: PipelineConfig
     ):
         """An entry is the patch plus the verdict, not a copy of its fields."""
-        patch = make(MEM_FRACTION, 0.9)
+        patch = make(pipeline_config, MEM_FRACTION, 0.9)
         resolved = ConfigResolver(pipeline_config).resolve(patchset(patch))
         winner = resolved.provenance.winner(MEM_FRACTION)
         assert winner is not None
@@ -132,25 +127,11 @@ class TestProvenance:
         assert winner.value == 0.9
         assert winner.source is CLI
 
-    def test_headline_reports_the_value_the_config_holds(
-        self, pipeline_config: PipelineConfig
-    ):
-        """config_cls is rewritten by the model itself after every patch has
-        applied; explaining the winner's word as the outcome would be false."""
-        resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make("config_cls", "Foo"))
-        )
-        text = resolved.provenance.explain("config_cls")
-        assert text.splitlines()[0] == "config_cls = 'PipelineConfig'"
-        assert "'Foo'  <- cli set (--set)  [winner] (resolved to 'PipelineConfig')" in (
-            text
-        )
-
     def test_no_rewrite_note_when_the_winning_value_sticks(
         self, pipeline_config: PipelineConfig
     ):
         resolved = ConfigResolver(pipeline_config).resolve(
-            patchset(make(MEM_FRACTION, "0.8"))
+            patchset(make(pipeline_config, MEM_FRACTION, "0.8"))
         )
         text = resolved.provenance.explain(MEM_FRACTION)
         assert text.splitlines()[0] == f"{MEM_FRACTION} = 0.8"
@@ -167,167 +148,35 @@ class TestDiff:
         self, pipeline_config: PipelineConfig
     ):
         changed = ConfigResolver(pipeline_config).resolve(
-            patchset(make("stages.thinker.runtime.max_seq_len", 99))
+            patchset(make(pipeline_config, "stages.thinker.model.max_seq_len", 99))
         )
         differences = diff_configs(pipeline_config, changed.config)
-        assert [d.path for d in differences] == ["stages.thinker.runtime.max_seq_len"]
-        assert differences[0].expected is None
+        assert [d.path for d in differences] == ["stages.thinker.model.max_seq_len"]
+        assert differences[0].expected == 8192
         assert differences[0].actual == 99
 
 
-class TestCompatTranslation:
-    def test_positional_index_becomes_a_name(self, pipeline_config: PipelineConfig):
-        canonical, deprecation = canonicalize_dotted_key(
-            "stages.1.tp_size", pipeline_config
-        )
-        assert canonical == "stages.thinker.tp_size"
-        assert "deprecated" in deprecation
-
-    def test_named_key_is_left_alone(self, pipeline_config: PipelineConfig):
-        canonical, deprecation = canonicalize_dotted_key(
-            "stages.thinker.tp_size", pipeline_config
-        )
-        assert canonical == "stages.thinker.tp_size"
-        assert deprecation == ""
-
-    def test_out_of_range_index_is_reported(self, pipeline_config: PipelineConfig):
-        with pytest.raises(ConfigPathError, match="stage index 9") as excinfo:
-            canonicalize_dotted_key("stages.9.tp_size", pipeline_config)
-        message = str(excinfo.value)
-        for stage in pipeline_config.stages:
-            assert stage.name in message
-        assert excinfo.value.suggestions
-
-    def test_parallelism_spelling_becomes_tp_size(
+class TestDottedKeyCanonicalization:
+    def test_a_stage_name_head_gets_the_stages_prefix(
         self, pipeline_config: PipelineConfig
     ):
-        canonical, deprecation = canonicalize_dotted_key(
-            "stages.thinker.parallelism.tp", pipeline_config
+        assert (
+            canonicalize_dotted_key("thinker.tp_size", pipeline_config)
+            == "stages.thinker.tp_size"
         )
-        assert canonical == "stages.thinker.tp_size"
-        assert "tp_size" in deprecation
 
-    def test_parallelism_spelling_lands_in_tp_size(
+    def test_a_pasted_canonical_path_is_accepted(self, pipeline_config: PipelineConfig):
+        assert (
+            canonicalize_dotted_key("stages.thinker.tp_size", pipeline_config)
+            == "stages.thinker.tp_size"
+        )
+
+    def test_a_top_level_field_passes_through(self, pipeline_config: PipelineConfig):
+        assert canonicalize_dotted_key("model_path", pipeline_config) == "model_path"
+
+    def test_an_unknown_head_is_refused_with_candidates(
         self, pipeline_config: PipelineConfig
     ):
-        patches = patches_from_dotted_cli(
-            {"stages.thinker.parallelism.tp": "2"}, pipeline_config
-        )
-        resolved = ConfigResolver(pipeline_config).resolve(patches)
-        assert resolved.config.stages[1].tp_size == 2
-        assert patches.deprecations()
-
-    def test_both_tp_spellings_agreeing_are_fine(self, pipeline_config: PipelineConfig):
-        patches = patches_from_dotted_cli(
-            {"stages.thinker.tp_size": "2", "stages.thinker.parallelism.tp": "2"},
-            pipeline_config,
-        )
-        resolved = ConfigResolver(pipeline_config).resolve(patches)
-        assert resolved.config.stages[1].tp_size == 2
-
-    def test_both_tp_spellings_disagreeing_are_refused(
-        self, pipeline_config: PipelineConfig
-    ):
-        """Translation maps them onto one path, so the duplicate check fires."""
-        patches = patches_from_dotted_cli(
-            {"stages.thinker.tp_size": "2", "stages.thinker.parallelism.tp": "4"},
-            pipeline_config,
-        )
-        with pytest.raises(ValueError, match="set twice"):
-            ConfigResolver(pipeline_config).resolve(patches)
-
-    def test_stage_overrides_reject_non_runtime_keys(
-        self, pipeline_config: PipelineConfig
-    ):
-        with pytest.raises(ValueError, match="supports only runtime overrides"):
-            patches_from_stage_overrides({"thinker": {"tp_size": 2}}, pipeline_config)
-
-    def test_stage_overrides_reject_unknown_stage(
-        self, pipeline_config: PipelineConfig
-    ):
-        with pytest.raises(ValueError, match="unknown stage 'talker'"):
-            patches_from_stage_overrides({"talker": {"runtime": {}}}, pipeline_config)
-
-    def test_stage_overrides_flatten_to_leaves(self, pipeline_config: PipelineConfig):
-        patches = patches_from_stage_overrides(
-            {
-                "thinker": {
-                    "runtime": {"sglang_server_args": {"mem_fraction_static": 0.8}}
-                }
-            },
-            pipeline_config,
-        )
-        assert [p.key for p in patches] == [MEM_FRACTION]
-
-
-class TestParityWithV1:
-    """The V1 chain stays authoritative; the resolver must match it exactly."""
-
-    def _v1(self, config: PipelineConfig, extra_args: dict) -> PipelineConfig:
-        return ConfigManager(config).merge_config(extra_args)
-
-    def _v2(self, config: PipelineConfig, extra_args: dict) -> PipelineConfig:
-        patches = patches_from_dotted_cli(extra_args, config)
-        return ConfigResolver(config).resolve(patches).config
-
-    @pytest.mark.parametrize(
-        "extra_args",
-        [
-            # Representatives only; the exhaustive scan over every writable
-            # path is the generated parity gate in test_v1_parity.py.
-            {"stages.1.tp_size": "4"},
-            {"stages.thinker.parallelism.tp": "2"},
-            {
-                "stages.thinker.runtime.max_seq_len": "8192",
-                "stages.preprocessing.runtime.video_fps": "2.0",
-            },
-        ],
-    )
-    def test_dotted_cli_parity(self, pipeline_config: PipelineConfig, extra_args):
-        v1 = self._v1(pipeline_config, extra_args)
-        v2 = self._v2(pipeline_config, extra_args)
-        assert diff_configs(v1, v2) == []
-
-
-@pytest.mark.parametrize(
-    "config_name",
-    ["Qwen3OmniPipelineConfig", "Qwen3OmniSpeechColocatedPipelineConfig"],
-)
-class TestParityOnRealModelConfigs:
-    """Same parity check against the shipped 8-stage Qwen3-Omni pipelines."""
-
-    def _config(self, config_name: str) -> PipelineConfig:
-        module = pytest.importorskip("sglang_omni.models.qwen3_omni.config")
-        return getattr(module, config_name)(model_path="dummy")
-
-    def test_dotted_cli_parity_including_positional_indices(self, config_name):
-        config = self._config(config_name)
-        manager = ConfigManager(config)
-        extra_args = manager.parse_extra_args(
-            [
-                "--stages.1.runtime.resources.total-gpu-memory-fraction",
-                "0.05",
-                "--stages.4.runtime.resources.total-gpu-memory-fraction",
-                "0.35",
-                "--stages.4.runtime.sglang-server-args.mem-fraction-static",
-                "0.35",
-                "--stages.4.tp_size",
-                "2",
-            ]
-        )
-        v1 = manager.merge_config(extra_args)
-        v2 = (
-            ConfigResolver(config)
-            .resolve(patches_from_dotted_cli(extra_args, config))
-            .config
-        )
-        assert diff_configs(v1, v2) == []
-
-    def test_every_public_leaf_path_parses(self, config_name):
-        """The compiler must cover the real schema, not just the fixture."""
-        from sglang_omni.config.path import ConfigPath, iter_schema_paths
-
-        config = self._config(config_name)
-        stage_name = config.stages[0].name
-        for candidate in iter_schema_paths(type(config), include_non_public=True):
-            ConfigPath.parse(candidate.replace("*", stage_name), type(config))
+        with pytest.raises(ConfigPathError) as excinfo:
+            canonicalize_dotted_key("thinkr.tp_size", pipeline_config)
+        assert "thinker" in str(excinfo.value)

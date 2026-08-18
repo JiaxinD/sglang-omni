@@ -3,14 +3,34 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
-from sglang_omni.config.schema import PipelineConfig, StageConfig
+from sglang_omni.config.schema import EngineStageConfig, PipelineConfig, StageConfig
+
+
+class FakePipelineConfig(PipelineConfig):
+    """A minimal two-stage pipeline that needs no model weights.
+
+    ``thinker`` is declared an engine stage so the ``engine.*`` group exists
+    on it and path compilation can be exercised against a per-stage type.
+    The factory-kwargs hook seeds one author-owned constructor kwarg so the
+    code-channel/config-channel overlay is part of the fixture too.
+    """
+
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "thinker": EngineStageConfig,
+    }
+
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, object]:
+        if stage_name == "thinker":
+            return {"lookahead": 4}
+        return {}
 
 
 def build_pipeline_config() -> PipelineConfig:
-    """A minimal two-stage pipeline that needs no model weights."""
-    return PipelineConfig(
+    return FakePipelineConfig(
         model_path="/models/fake-omni",
         stages=[
             StageConfig(
@@ -20,13 +40,13 @@ def build_pipeline_config() -> PipelineConfig:
                 next="thinker",
                 env={"OMP_NUM_THREADS": "4"},
             ),
-            StageConfig(
+            EngineStageConfig(
                 name="thinker",
                 factory="tests.fake:create_thinker",
                 process="gen",
                 terminal=True,
-                factory_args={"lookahead": 4},
-                runtime_arg_map={"max_seq_len": "thinker_max_seq_len"},
+                scheduler={"max_concurrency": 4},
+                model={"max_seq_len": 8192},
             ),
         ],
     )

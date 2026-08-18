@@ -3824,76 +3824,60 @@ def test_qwen3_tts_engine_probes_runtime_before_checkpoint_resolution(
     assert checkpoint_resolutions == []
 
 
-def test_qwen3_tts_mem_fraction_role_to_stage_targets_tts_engine() -> None:
-    assert Qwen3TTSPipelineConfig.mem_fraction_role_to_stage() == {
-        "talker": "tts_engine"
-    }
-
-
 def test_qwen3_tts_cli_mem_fraction_static_pins_tts_engine() -> None:
-    from sglang_omni.cli.serve import patches_from_mem_fraction_flags
+    from sglang_omni.cli.serve import patches_from_broadcast_flags
     from sglang_omni.config.resolver import ConfigResolver
 
     config = Qwen3TTSPipelineConfig(model_path="fake-model")
 
-    config = (
+    resolved = (
         ConfigResolver(config)
         .resolve(
-            patches_from_mem_fraction_flags(
+            patches_from_broadcast_flags(
                 config,
                 mem_fraction_static=0.27,
-                thinker_mem_fraction_static=None,
-                talker_mem_fraction_static=None,
             )
         )
         .config
     )
 
-    tts_engine = next(s for s in config.stages if s.name == "tts_engine")
-    assert tts_engine.runtime.sglang_server_args.mem_fraction_static == 0.27
+    tts_engine = resolved.stage_named("tts_engine")
+    assert tts_engine.engine.mem_fraction_static == 0.27
     assert all(
-        s.runtime.sglang_server_args.mem_fraction_static is None
-        for s in config.stages
+        s.engine is None or s.engine.mem_fraction_static is None
+        for s in resolved.stages
         if s.name != "tts_engine"
     )
 
 
-def test_qwen3_tts_cli_talker_mem_fraction_wins_over_global() -> None:
-    from sglang_omni.cli.serve import patches_from_mem_fraction_flags
-    from sglang_omni.config.resolver import ConfigResolver
+def test_qwen3_tts_dotted_mem_fraction_wins_over_the_broadcast() -> None:
+    from sglang_omni.cli.serve import patches_from_broadcast_flags
+    from sglang_omni.config.manager import ConfigManager
 
     config = Qwen3TTSPipelineConfig(model_path="fake-model")
-
-    config = (
-        ConfigResolver(config)
-        .resolve(
-            patches_from_mem_fraction_flags(
-                config,
-                mem_fraction_static=0.27,
-                thinker_mem_fraction_static=None,
-                talker_mem_fraction_static=0.3,
-            )
-        )
-        .config
+    patches = patches_from_broadcast_flags(
+        config,
+        mem_fraction_static=0.27,
+    )
+    merged = ConfigManager(config).merge_config(
+        [("tts_engine.engine.mem_fraction_static", "0.3")],
+        extra_patches=patches,
     )
 
-    tts_engine = next(s for s in config.stages if s.name == "tts_engine")
-    assert tts_engine.runtime.sglang_server_args.mem_fraction_static == 0.3
+    assert merged.stage_named("tts_engine").engine.mem_fraction_static == 0.3
 
 
-def test_qwen3_tts_cli_rejects_unsupported_thinker_mem_fraction() -> None:
+def test_qwen3_tts_cli_rejects_out_of_range_mem_fraction() -> None:
     import typer
 
-    from sglang_omni.cli.serve import patches_from_mem_fraction_flags
+    from sglang_omni.cli.serve import patches_from_broadcast_flags
 
     config = Qwen3TTSPipelineConfig(model_path="fake-model")
 
     with pytest.raises(typer.BadParameter):
-        patches_from_mem_fraction_flags(
+        patches_from_broadcast_flags(
             config,
-            mem_fraction_static=None,
-            thinker_mem_fraction_static=0.5,
-            talker_mem_fraction_static=None,
+            mem_fraction_static=1.5,
         )
 
 

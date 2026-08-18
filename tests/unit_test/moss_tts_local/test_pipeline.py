@@ -2430,24 +2430,26 @@ def test_chunked_rows_do_not_advance_sampling_steps():
         assert _pool_sampling_steps(r, "r") == expected_steps
 
 
-def test_async_decode_cli_accepts_moss_local():
-    """The decode-mode CLI gate accepts the MOSS-TTS-Local engine
-    factory (no BadParameter) and writes the flags onto its tts_engine stage.
-    Default stays OFF (config sets no key); only an explicit --decode-mode async
-    turns it on, pending the Phase-3 flag-flip PR.
+def test_async_decode_dotted_flags_accept_moss_local():
+    """The dotted scheduler flags reach the MOSS-TTS-Local tts_engine
+    factory. Default stays OFF (config sets no key); only an explicit
+    enable turns it on, pending the Phase-3 flag-flip PR.
     """
     pytest.importorskip("sglang")
 
-    from sglang_omni.cli.serve import apply_decode_mode_cli_overrides
     from sglang_omni.config import resolve_stage_factory_args
+    from sglang_omni.config.manager import ConfigManager
     from sglang_omni.models.moss_tts_local.config import MossTTSLocalPipelineConfig
 
     config = MossTTSLocalPipelineConfig(model_path="dummy")
-    apply_decode_mode_cli_overrides(
-        config, decode_mode="async", async_lookahead_min_batch_size=4
+    resolved = ConfigManager(config).merge_config(
+        [
+            ("tts_engine.scheduler.enable_async_decode", "true"),
+            ("tts_engine.scheduler.async_decode_min_batch_size", "4"),
+        ]
     )
-    stage = next(s for s in config.stages if s.name == "tts_engine")
-    args = resolve_stage_factory_args(stage, config)
+    stage = next(s for s in resolved.stages if s.name == "tts_engine")
+    args = resolve_stage_factory_args(stage, resolved)
     assert args["enable_async_decode"] is True
     assert args["async_decode_min_batch_size"] == 4
     assert args["total_gpu_memory_fraction"] == pytest.approx(0.67)

@@ -287,7 +287,7 @@ def test_scheduler_applies_child_defaults_without_overriding_explicit_args(
     spec = StageLaunchConfig(
         stage_name="thinker",
         factory=fake_factory_path("runtime_factory"),
-        factory_args={
+        factory_kwargs={
             "model_path": "runtime-model",
             "thinker_max_seq_len": 128,
         },

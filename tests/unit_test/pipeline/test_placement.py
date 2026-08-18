@@ -6,8 +6,6 @@ import pytest
 from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
-    StageResourceConfig,
-    StageRuntimeConfig,
     build_stage_placement_plan,
     resolve_stage_gpu_ids,
 )
@@ -30,9 +28,7 @@ def _stage(
         factory=_FACTORY,
         gpu=gpu,
         tp_size=tp_size,
-        runtime=StageRuntimeConfig(
-            resources=StageResourceConfig(total_gpu_memory_fraction=fraction)
-        ),
+        gpu_memory_fraction=fraction,
         next=next_stage,
         terminal=terminal,
     )
@@ -68,36 +64,6 @@ def test_same_gpu_without_budget_records_placement() -> None:
         "image_encoder",
         "thinker",
     )
-
-
-def test_untyped_factory_budget_is_rejected_before_placement() -> None:
-    config = PipelineConfig(
-        model_path="dummy",
-        stages=[
-            StageConfig(
-                name="thinker",
-                process="pipeline",
-                factory=_FACTORY,
-                factory_args={"total_gpu_memory_fraction": 0.50},
-                gpu=0,
-                terminal=True,
-            )
-        ],
-    )
-
-    with pytest.raises(ValueError, match="runtime.resources.total_gpu_memory_fraction"):
-        build_stage_placement_plan(config)
-
-
-def test_untyped_runtime_override_budget_is_rejected_before_placement() -> None:
-    config = PipelineConfig(
-        model_path="dummy",
-        runtime_overrides={"thinker": {"total_gpu_memory_fraction": 0.50}},
-        stages=[_stage("thinker", gpu=0, terminal=True)],
-    )
-
-    with pytest.raises(ValueError, match="runtime.resources.total_gpu_memory_fraction"):
-        build_stage_placement_plan(config)
 
 
 def test_same_gpu_colocation_sums_budget() -> None:

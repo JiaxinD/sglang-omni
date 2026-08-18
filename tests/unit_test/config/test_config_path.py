@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from sglang_omni.config.path import (
-    _VISIBILITY_RULES,
     ConfigPath,
     ConfigPathError,
     PathVisibility,
@@ -14,120 +13,106 @@ from sglang_omni.config.path import (
 )
 from sglang_omni.config.schema import PipelineConfig
 
-MEM_FRACTION = "stages.thinker.runtime.sglang_server_args.mem_fraction_static"
+MEM_FRACTION = "stages.thinker.engine.mem_fraction_static"
 
 
 class TestParsing:
-    def test_typed_leaf_carries_its_declared_type(self):
-        path = ConfigPath.parse("stages.thinker.runtime.max_seq_len")
-        assert path.parts == ("stages", "thinker", "runtime", "max_seq_len")
+    def test_typed_leaf_carries_its_declared_type(self, pipeline_config):
+        path = ConfigPath.parse(
+            "stages.thinker.model.max_seq_len", type(pipeline_config)
+        )
+        assert path.parts == ("stages", "thinker", "model", "max_seq_len")
         assert path.value_type == (int | None)
         assert path.is_leaf
         assert path.stage_name == "thinker"
 
-    def test_container_paths_are_not_leaves(self):
-        assert not ConfigPath.parse("stages.thinker.runtime").is_leaf
-        assert not ConfigPath.parse("stages").is_leaf
-        assert not ConfigPath.parse("stages.thinker.env").is_leaf
+    def test_container_paths_are_not_leaves(self, pipeline_config):
+        cls = type(pipeline_config)
+        assert not ConfigPath.parse("stages.thinker.model", cls).is_leaf
+        assert not ConfigPath.parse("stages", cls).is_leaf
+        assert not ConfigPath.parse("stages.thinker.env", cls).is_leaf
 
-    def test_scalar_list_is_a_leaf_replaced_as_a_whole(self):
-        assert ConfigPath.parse("stages.thinker.stream_to").is_leaf
+    def test_scalar_list_is_a_leaf_replaced_as_a_whole(self, pipeline_config):
+        cls = type(pipeline_config)
+        assert ConfigPath.parse("stages.thinker.stream_to", cls).is_leaf
         with pytest.raises(ConfigPathError, match="replaced as a whole"):
-            ConfigPath.parse("stages.thinker.stream_to.0")
+            ConfigPath.parse("stages.thinker.stream_to.0", cls)
 
-    def test_free_mapping_accepts_any_key(self):
-        path = ConfigPath.parse("stages.preprocessing.env.OMP_NUM_THREADS")
+    def test_free_mapping_accepts_any_key(self, pipeline_config):
+        path = ConfigPath.parse(
+            "stages.preprocessing.env.OMP_NUM_THREADS", type(pipeline_config)
+        )
         assert path.value_type is str
+
+    def test_the_engine_group_exists_only_on_engine_stages(self, pipeline_config):
+        cls = type(pipeline_config)
+        ConfigPath.parse(MEM_FRACTION, cls)
+        with pytest.raises(ConfigPathError, match="not an engine stage"):
+            ConfigPath.parse("stages.preprocessing.engine.mem_fraction_static", cls)
+
+    def test_group_keys_beyond_the_declared_fields_parse_as_free_form(
+        self, pipeline_config
+    ):
+        """The groups' vocabularies belong to their consumers; the parser
+        accepts any key and leaves legality to the module that reads it."""
+        cls = type(pipeline_config)
+        for raw in (
+            "stages.thinker.engine.disable_radix_cache",
+            "stages.thinker.scheduler.made_up_knob",
+            "stages.thinker.model.lookahead",
+        ):
+            # Parses without a did-you-mean refusal; the value type is open
+            # because only the consumer knows what the key means.
+            assert ConfigPath.parse(raw, cls).value_type is not None
 
 
 class TestErrors:
-    def test_unknown_field_suggests_neighbours(self):
+    def test_unknown_field_suggests_neighbours(self, pipeline_config):
         with pytest.raises(ConfigPathError) as excinfo:
-            ConfigPath.parse("stages.thinker.runtime.sglang_server_args.mem_fraction")
+            ConfigPath.parse("stages.thinker.tp_siz", type(pipeline_config))
         message = str(excinfo.value)
-        assert "mem_fraction_static" in message
+        assert "tp_size" in message
         assert "did you mean" in message
 
-    def test_positional_stage_index_is_refused_with_a_hint(self):
+    def test_positional_stage_index_is_refused_with_a_hint(self, pipeline_config):
         with pytest.raises(ConfigPathError) as excinfo:
-            ConfigPath.parse("stages.1.tp_size")
+            ConfigPath.parse("stages.1.tp_size", type(pipeline_config))
         assert "addressed by name" in str(excinfo.value)
 
-    def test_descending_below_a_scalar_is_refused(self):
+    def test_descending_below_a_scalar_is_refused(self, pipeline_config):
         with pytest.raises(ConfigPathError, match="leaf of type"):
-            ConfigPath.parse("stages.thinker.tp_size.value")
+            ConfigPath.parse("stages.thinker.tp_size.value", type(pipeline_config))
 
-    def test_empty_and_malformed_paths(self):
+    def test_empty_and_malformed_paths(self, pipeline_config):
         with pytest.raises(ConfigPathError):
-            ConfigPath.parse("")
+            ConfigPath.parse("", type(pipeline_config))
         with pytest.raises(ConfigPathError, match="empty segment"):
-            ConfigPath.parse("stages..tp_size")
+            ConfigPath.parse("stages..tp_size", type(pipeline_config))
 
-    def test_unknown_top_level_field(self):
+    def test_unknown_top_level_field(self, pipeline_config):
         with pytest.raises(ConfigPathError) as excinfo:
-            ConfigPath.parse("stagez")
+            ConfigPath.parse("stagez", type(pipeline_config))
         assert "stages" in str(excinfo.value)
 
 
 class TestVisibility:
-    @pytest.mark.parametrize(
-        "raw,expected",
-        [
-            (MEM_FRACTION, PathVisibility.PUBLIC),
-            ("stages.thinker.factory_args", PathVisibility.DEPRECATED),
-            ("stages.thinker.factory_args.lookahead", PathVisibility.DEPRECATED),
-            ("stages.thinker.runtime_arg_map.max_seq_len", PathVisibility.DEPRECATED),
-            ("stages.thinker.name", PathVisibility.DEPRECATED),
-            ("config_cls", PathVisibility.DEPRECATED),
-            ("runtime_overrides.thinker", PathVisibility.DEPRECATED),
-        ],
-    )
-    def test_classification(self, raw, expected):
-        assert ConfigPath.parse(raw).visibility is expected
-
-    def test_nothing_the_v1_chain_allowed_is_refused(self):
-        """The rule table warns; it does not take away a working spelling.
-
-        Every path the table names was writable through the V1 dotted CLI.
-        Classifying one as INTERNAL/DERIVED/IDENTITY would refuse a
-        configuration that launches today, which a deprecation period exists to
-        avoid — so a new rule of that kind needs a version boundary, not just
-        an entry here.
-        """
-        refused = [
-            (pattern, visibility.value)
-            for pattern, visibility, _ in _VISIBILITY_RULES
-            if visibility not in (PathVisibility.PUBLIC, PathVisibility.DEPRECATED)
-        ]
-        assert not refused, f"these paths would stop working: {refused}"
-
-    def test_public_paths_pass(self):
-        ConfigPath.parse(MEM_FRACTION).require_writable()
-
-    @pytest.mark.parametrize(
-        "raw",
-        [
-            "stages.thinker.factory_args.lookahead",
-            "stages.thinker.runtime_arg_map.max_seq_len",
-            "stages.thinker.name",
-            "config_cls",
-            "runtime_overrides.thinker",
-        ],
-    )
-    def test_deprecated_paths_are_writable_but_not_public(self, raw):
-        """Deprecation warns; it does not break configurations that work today."""
-        path = ConfigPath.parse(raw)
-        assert path.is_writable()
-        assert not path.is_public()
+    def test_the_engine_leaf_is_public(self, pipeline_config):
+        path = ConfigPath.parse(MEM_FRACTION, type(pipeline_config))
+        assert path.visibility is PathVisibility.PUBLIC
         path.require_writable()
-        assert path.visibility_reason
 
-    def test_rules_are_model_agnostic(self):
-        """A differently-named stage hits the same rule."""
-        assert (
-            ConfigPath.parse("stages.code2wav.factory_args.foo").visibility
-            is PathVisibility.DEPRECATED
-        )
+    @pytest.mark.parametrize(
+        "raw", ["stages", "entry_stage", "config_cls", "stages.thinker.name"]
+    )
+    def test_internal_paths_are_not_writable(self, pipeline_config, raw):
+        """Stage topology and derived identity belong to the config class; no
+        user-facing source may write them."""
+        path = ConfigPath.parse(raw, type(pipeline_config))
+        assert path.visibility is PathVisibility.INTERNAL
+        assert not path.is_public()
+        assert path.visibility_reason
+        with pytest.raises(ConfigPathError, match="cannot be set"):
+            path.require_writable()
 
 
 class TestCoercion:
@@ -141,22 +126,26 @@ class TestCoercion:
             ("stages.thinker.gpu", "0", 0),
             ("stages.thinker.gpu", "[0, 1]", [0, 1]),
             ("stages.thinker.stream_to", '["a", "b"]', ["a", "b"]),
-            ("stages.thinker.runtime.max_seq_len", "32768", 32768),
+            ("stages.thinker.model.max_seq_len", "32768", 32768),
         ],
     )
-    def test_typed_coercion(self, raw, text, expected):
-        assert ConfigPath.parse(raw).coerce(text) == expected
+    def test_typed_coercion(self, pipeline_config, raw, text, expected):
+        assert ConfigPath.parse(raw, type(pipeline_config)).coerce(text) == expected
 
-    def test_string_fields_are_not_guessed_into_numbers(self):
-        """The V1 walker turned every numeric-looking value into an int."""
-        path = ConfigPath.parse("stages.preprocessing.env.OMP_NUM_THREADS")
+    def test_string_fields_are_not_guessed_into_numbers(self, pipeline_config):
+        path = ConfigPath.parse(
+            "stages.preprocessing.env.OMP_NUM_THREADS", type(pipeline_config)
+        )
         assert path.coerce("4") == "4"
 
-    def test_non_string_values_pass_through(self):
-        assert ConfigPath.parse("stages.thinker.tp_size").coerce(4) == 4
+    def test_non_string_values_pass_through(self, pipeline_config):
+        path = ConfigPath.parse("stages.thinker.tp_size", type(pipeline_config))
+        assert path.coerce(4) == 4
 
-    def test_untyped_positions_fall_back_to_scalar_parsing(self):
-        path = ConfigPath.parse("runtime_overrides.thinker.foo")
+    def test_free_form_group_keys_fall_back_to_scalar_parsing(self, pipeline_config):
+        path = ConfigPath.parse(
+            "stages.thinker.scheduler.made_up_knob", type(pipeline_config)
+        )
         assert path.coerce("true") is True
         assert path.coerce("7") == 7
         assert path.coerce("bar") == "bar"
@@ -164,63 +153,75 @@ class TestCoercion:
 
 class TestReadWrite:
     def test_read_from_model_and_from_dump(self, pipeline_config: PipelineConfig):
-        path = ConfigPath.parse("stages.thinker.tp_size")
+        path = ConfigPath.parse("stages.thinker.tp_size", type(pipeline_config))
         assert path.read(pipeline_config) == 1
         assert path.read(pipeline_config.model_dump()) == 1
 
     def test_read_optional_none(self, pipeline_config: PipelineConfig):
-        assert ConfigPath.parse(MEM_FRACTION).read(pipeline_config) is None
+        path = ConfigPath.parse(MEM_FRACTION, type(pipeline_config))
+        assert path.read(pipeline_config) is None
 
     def test_write_round_trips_through_validation(
         self, pipeline_config: PipelineConfig
     ):
+        cls = type(pipeline_config)
         data = pipeline_config.model_dump()
-        ConfigPath.parse(MEM_FRACTION).write(data, 0.8)
-        ConfigPath.parse("stages.thinker.runtime.max_seq_len").write(data, 4096)
-        rebuilt = type(pipeline_config)(**data)
-        assert rebuilt.stages[1].runtime.sglang_server_args.mem_fraction_static == 0.8
-        assert rebuilt.stages[1].runtime.max_seq_len == 4096
+        ConfigPath.parse(MEM_FRACTION, cls).write(data, 0.8)
+        ConfigPath.parse("stages.thinker.model.max_seq_len", cls).write(data, 4096)
+        rebuilt = cls(**data)
+        thinker = rebuilt.stage_named("thinker")
+        assert thinker.engine.mem_fraction_static == 0.8
+        assert thinker.model.max_seq_len == 4096
 
     def test_write_creates_missing_optional_container(
         self, pipeline_config: PipelineConfig
     ):
+        cls = type(pipeline_config)
         data = pipeline_config.model_dump()
         assert data["stages"][1]["comm"] is None
-        ConfigPath.parse("stages.thinker.comm.credits").write(data, 8)
-        rebuilt = type(pipeline_config)(**data)
-        assert rebuilt.stages[1].comm.credits == 8
+        ConfigPath.parse("stages.thinker.comm.credits", cls).write(data, 8)
+        rebuilt = cls(**data)
+        assert rebuilt.stage_named("thinker").comm.credits == 8
 
     def test_write_new_mapping_key(self, pipeline_config: PipelineConfig):
+        cls = type(pipeline_config)
         data = pipeline_config.model_dump()
-        ConfigPath.parse("stages.thinker.env.CUDA_LAUNCH_BLOCKING").write(data, "1")
-        rebuilt = type(pipeline_config)(**data)
-        assert rebuilt.stages[1].env["CUDA_LAUNCH_BLOCKING"] == "1"
+        ConfigPath.parse("stages.thinker.env.CUDA_LAUNCH_BLOCKING", cls).write(
+            data, "1"
+        )
+        rebuilt = cls(**data)
+        assert rebuilt.stage_named("thinker").env["CUDA_LAUNCH_BLOCKING"] == "1"
 
     def test_unknown_stage_lists_the_real_names(self, pipeline_config: PipelineConfig):
         data = pipeline_config.model_dump()
         with pytest.raises(ConfigPathError) as excinfo:
-            ConfigPath.parse("stages.talker.tp_size").write(data, 2)
+            ConfigPath.parse("stages.talker.tp_size", type(pipeline_config)).write(
+                data, 2
+            )
         message = str(excinfo.value)
         assert "no entry named 'talker'" in message
         assert "thinker" in message
 
     def test_write_does_not_touch_siblings(self, pipeline_config: PipelineConfig):
+        cls = type(pipeline_config)
         data = pipeline_config.model_dump()
-        ConfigPath.parse("stages.thinker.runtime.max_seq_len").write(data, 128)
-        assert data["stages"][0]["runtime"]["max_seq_len"] is None
-        assert data["stages"][1]["factory_args"] == {"lookahead": 4}
+        ConfigPath.parse("stages.thinker.model.max_seq_len", cls).write(data, 128)
+        assert data["stages"][0]["model"].get("max_seq_len") is None
+        assert data["stages"][1]["scheduler"]["max_concurrency"] == 4
 
 
 class TestSchemaEnumeration:
-    def test_public_enumeration_hides_internal_paths(self):
-        public = iter_schema_paths()
-        every = iter_schema_paths(include_non_public=True)
+    def test_public_enumeration_hides_internal_paths(self, pipeline_config):
+        cls = type(pipeline_config)
+        public = iter_schema_paths(cls)
+        every = iter_schema_paths(cls, include_non_public=True)
         assert MEM_FRACTION.replace("thinker", "*") in public
-        assert "stages.*.factory_args" not in public
         assert "config_cls" not in public
-        assert "stages.*.factory_args" in every
+        assert "stages" not in public
         assert "config_cls" in every
+        assert "stages" in every
 
-    def test_every_enumerated_path_parses(self):
-        for candidate in iter_schema_paths(include_non_public=True):
-            ConfigPath.parse(candidate.replace("*", "somename"))
+    def test_every_enumerated_path_parses(self, pipeline_config):
+        cls = type(pipeline_config)
+        for candidate in iter_schema_paths(cls, include_non_public=True):
+            ConfigPath.parse(candidate.replace("*", "thinker"), cls)

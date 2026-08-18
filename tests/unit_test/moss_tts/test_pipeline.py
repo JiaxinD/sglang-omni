@@ -513,20 +513,19 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
     ]
 
 
-def test_moss_tts_talker_torch_compile_cli_override_targets_tts_engine() -> None:
-    from sglang_omni.cli.serve import apply_torch_compile_cli_overrides
+def test_moss_tts_talker_torch_compile_dotted_flags_target_tts_engine() -> None:
+    from sglang_omni.config.manager import ConfigManager
 
     config = MossTTSPipelineConfig(model_path="model")
-    apply_torch_compile_cli_overrides(
-        config,
-        thinker_torch_compile="default",
-        talker_torch_compile="on",
-        thinker_torch_compile_max_bs=None,
-        talker_torch_compile_max_bs=4,
+    merged = ConfigManager(config).merge_config(
+        [
+            ("tts_engine.engine.enable_torch_compile", "true"),
+            ("tts_engine.engine.torch_compile_max_bs", "4"),
+        ]
     )
 
-    tts_engine = next(stage for stage in config.stages if stage.name == "tts_engine")
-    server_args_overrides = tts_engine.factory_args["server_args_overrides"]
+    tts_engine = merged.stage_named("tts_engine")
+    server_args_overrides = tts_engine.engine.overrides()
     assert server_args_overrides["enable_torch_compile"] is True
     assert server_args_overrides["torch_compile_max_bs"] == 4
 
