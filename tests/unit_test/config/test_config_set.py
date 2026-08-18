@@ -38,7 +38,7 @@ from sglang_omni.config.sources import (
     patches_from_stages_mapping,
 )
 
-MAX_SEQ_LEN = "stages.thinker.model.max_seq_len"
+MAX_SEQ_LEN = "stages.thinker.factory.max_seq_len"
 
 
 def resolve(config: PipelineConfig, *patchsets) -> PipelineConfig:
@@ -61,7 +61,7 @@ class TestDottedCli:
 
     def test_the_stage_name_head_gets_the_implied_prefix(self, pipeline_config):
         patches = patches_from_dotted_cli(
-            [("thinker.model.max_seq_len", "4096")], pipeline_config
+            [("thinker.factory.max_seq_len", "4096")], pipeline_config
         )
         (patch,) = list(patches)
         assert patch.path.raw == MAX_SEQ_LEN
@@ -89,10 +89,10 @@ class TestDottedCli:
 
     def test_the_none_sentinel_clears_a_field(self, pipeline_config):
         patches = patches_from_dotted_cli(
-            [("thinker.model.max_seq_len", "none")], pipeline_config
+            [("thinker.factory.max_seq_len", "none")], pipeline_config
         )
         resolved = resolve(pipeline_config, patches)
-        assert stage(resolved, "thinker").model.max_seq_len is None
+        assert stage(resolved, "thinker").factory.max_seq_len is None
 
     def test_a_top_level_field_passes_through(self, pipeline_config):
         patches = patches_from_dotted_cli(
@@ -123,17 +123,17 @@ class TestGroupPassThrough:
 
     def test_free_form_scheduler_and_model_keys_are_kept(self, pipeline_config):
         patches = patches_from_dotted_cli(
-            [("thinker.scheduler.made_up_knob", "7"), ("thinker.model.lookahead", "9")],
+            [("thinker.factory.made_up_knob", "7"), ("thinker.factory.lookahead", "9")],
             pipeline_config,
         )
         resolved = resolve(pipeline_config, patches)
         thinker = stage(resolved, "thinker")
-        assert thinker.scheduler.model_extra["made_up_knob"] == 7
-        assert thinker.model.model_extra["lookahead"] == 9
+        assert thinker.factory.model_extra["made_up_knob"] == 7
+        assert thinker.factory.model_extra["lookahead"] == 9
 
     def test_a_declared_key_still_validates_eagerly(self, pipeline_config):
         patches = patches_from_dotted_cli(
-            [("thinker.scheduler.max_concurrency", "0")], pipeline_config
+            [("thinker.factory.max_concurrency", "0")], pipeline_config
         )
         with pytest.raises(Exception, match="max_concurrency"):
             resolve(pipeline_config, patches)
@@ -167,7 +167,7 @@ class TestStagesMapping:
             {
                 "thinker": {
                     "engine": {"disable_radix_cache": True},
-                    "model": {"lookahead": 9},
+                    "factory": {"lookahead": 9},
                 }
             },
             type(pipeline_config),
@@ -176,14 +176,14 @@ class TestStagesMapping:
         resolved = resolve(pipeline_config, patches)
         thinker = stage(resolved, "thinker")
         assert thinker.engine.overrides()["disable_radix_cache"] is True
-        assert thinker.model.model_extra["lookahead"] == 9
+        assert thinker.factory.model_extra["lookahead"] == 9
 
     def test_an_unknown_name_is_refused_with_the_real_names(self, pipeline_config):
         """Stage topology lives in the model's config class; a config file
         cannot introduce stages."""
         with pytest.raises(ValueError, match="thinker"):
             patches_from_stages_mapping(
-                {"decode": {"factory": "x:y", "terminal": True}},
+                {"decode": {"factory_path": "x:y", "terminal": True}},
                 type(pipeline_config),
                 ["preprocessing", "thinker"],
             )
@@ -217,15 +217,15 @@ class TestStageDefaults:
             [
                 {
                     "select": {"stages": ["preprocessing", "thinker"]},
-                    "model": {"max_seq_len": 4096},
+                    "factory": {"max_seq_len": 4096},
                 }
             ],
             type(pipeline_config),
             ["preprocessing", "thinker"],
         )
         assert {patch.path.raw for patch in patches.ordered()} == {
-            "stages.preprocessing.model.max_seq_len",
-            "stages.thinker.model.max_seq_len",
+            "stages.preprocessing.factory.max_seq_len",
+            "stages.thinker.factory.max_seq_len",
         }
         assert all(patch.specificity is Specificity.ROLE for patch in patches.ordered())
 
@@ -234,20 +234,20 @@ class TestStageDefaults:
             [
                 {
                     "select": {"stages": ["preprocessing", "thinker"]},
-                    "model": {"max_seq_len": 4096},
+                    "factory": {"max_seq_len": 4096},
                 }
             ],
             type(pipeline_config),
             ["preprocessing", "thinker"],
         )
         explicit = patches_from_stages_mapping(
-            {"thinker": {"model": {"max_seq_len": 8192}}},
+            {"thinker": {"factory": {"max_seq_len": 8192}}},
             type(pipeline_config),
             ["preprocessing", "thinker"],
         )
         resolved = resolve(pipeline_config, defaults, explicit)
-        assert stage(resolved, "thinker").model.max_seq_len == 8192
-        assert stage(resolved, "preprocessing").model.max_seq_len == 4096
+        assert stage(resolved, "thinker").factory.max_seq_len == 8192
+        assert stage(resolved, "preprocessing").factory.max_seq_len == 4096
 
     def test_the_engine_selector_matches_engine_stages_only(self, pipeline_config):
         patches = patches_from_shared_block(
@@ -267,23 +267,23 @@ class TestStageDefaults:
                         "stages": ["preprocessing", "thinker"],
                         "exclude": ["thinker"],
                     },
-                    "model": {"max_seq_len": 4096},
+                    "factory": {"max_seq_len": 4096},
                 }
             ],
             type(pipeline_config),
             ["preprocessing", "thinker"],
         )
         assert [patch.path.raw for patch in patches.ordered()] == [
-            "stages.preprocessing.model.max_seq_len"
+            "stages.preprocessing.factory.max_seq_len"
         ]
 
     def test_two_entries_writing_one_leaf_conflict(self, pipeline_config):
         patches = patches_from_shared_block(
             [
-                {"select": {"stages": ["thinker"]}, "model": {"max_seq_len": 4096}},
+                {"select": {"stages": ["thinker"]}, "factory": {"max_seq_len": 4096}},
                 {
                     "select": {"stages": ["preprocessing", "thinker"]},
-                    "model": {"max_seq_len": 2048},
+                    "factory": {"max_seq_len": 2048},
                 },
             ],
             type(pipeline_config),
@@ -297,7 +297,7 @@ class TestStageDefaults:
     ):
         with pytest.raises(ValueError, match="thinker"):
             patches_from_shared_block(
-                [{"select": {"stages": ["thinkr"]}, "model": {"max_seq_len": 1}}],
+                [{"select": {"stages": ["thinkr"]}, "factory": {"max_seq_len": 1}}],
                 type(pipeline_config),
                 ["preprocessing", "thinker"],
             )

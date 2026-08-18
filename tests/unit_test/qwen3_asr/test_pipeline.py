@@ -100,14 +100,14 @@ def test_qwen3_asr_config_declares_the_batched_stage_settings() -> None:
     assert config.gpu_placement == {"asr": 0}
     stage = config.stages[0]
     assert stage.factory.endswith("create_sglang_qwen3_asr_executor")
-    assert stage.model.max_new_tokens == 128
+    assert stage.factory.max_new_tokens == 128
     assert stage.engine.enable_torch_compile is True
     assert stage.engine.torch_compile_max_bs == 2
-    assert stage.scheduler.prefill_coalesce_requests == 16
-    assert stage.scheduler.prefill_coalesce_wait_ms == 40
-    assert stage.scheduler.prefill_coalesce_when_idle is True
-    assert stage.scheduler.prefill_coalesce_requires_pending_builds is True
-    assert stage.scheduler.prefill_coalesce_after_builds_during_decode is True
+    assert stage.factory.prefill_coalesce_requests == 16
+    assert stage.factory.prefill_coalesce_wait_ms == 40
+    assert stage.factory.prefill_coalesce_when_idle is True
+    assert stage.factory.prefill_coalesce_requires_pending_builds is True
+    assert stage.factory.prefill_coalesce_after_builds_during_decode is True
     kwargs = resolve_stage_typed_kwargs(stage)
     assert kwargs["max_new_tokens"] == 128
     assert kwargs["prefill_coalesce_requests"] == 16

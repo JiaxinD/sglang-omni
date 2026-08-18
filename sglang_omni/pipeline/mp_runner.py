@@ -141,7 +141,7 @@ def _build_stage_groups(
 
         stage_kwargs = dict(
             stage_name=stage_cfg.name,
-            factory=stage_cfg.factory,
+            factory=stage_cfg.factory_path,
             next_stages=stage_cfg.next,
             route_fn=stage_cfg.route_fn,
             is_terminal=stage_cfg.terminal,

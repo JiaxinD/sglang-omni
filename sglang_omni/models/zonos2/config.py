@@ -12,7 +12,7 @@ from pydantic import Field
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -25,22 +25,22 @@ def _stages(*, auxiliary_gpu: int, auxiliary_process: str) -> list[StageConfig]:
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
             gpu=0,
             next="speaker_encode",
         ),
         StageConfig(
             name="speaker_encode",
             process=auxiliary_process,
-            factory=f"{_PKG}.stages.create_speaker_encode_executor",
+            factory_path=f"{_PKG}.stages.create_speaker_encode_executor",
             gpu=auxiliary_gpu,
             next="tts_engine",
         ),
         EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_omni_tts_engine_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_sglang_omni_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -48,7 +48,7 @@ def _stages(*, auxiliary_gpu: int, auxiliary_process: str) -> list[StageConfig]:
         StageConfig(
             name="vocoder",
             process=auxiliary_process,
-            factory=f"{_PKG}.stages.create_vocoder_executor",
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
             gpu=auxiliary_gpu,
             terminal=True,
             can_accept_stream_before_payload=True,

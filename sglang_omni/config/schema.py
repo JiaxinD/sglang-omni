@@ -91,18 +91,27 @@ class EngineArgs(BaseModel):
         }
 
 
-class SchedulerConfig(BaseModel):
-    """Scheduler and batching tuning for one stage's executor.
+class FactoryArgs(BaseModel):
+    """Constructor kwargs for one stage's factory.
 
-    Every field defaults to ``None``, meaning "use the factory's default".
-    A field set here is passed to the stage factory by its own name. The
-    declared fields are the commonly tuned ones and validate eagerly; any
+    Every declared field defaults to ``None``, meaning "use the factory's
+    default"; a set field is passed to the stage factory under its own name.
+    The declared fields are the commonly tuned ones and validate eagerly; any
     other key passes through untouched -- whether the factory accepts it is
     the factory's own call, made where the kwargs are applied.
     """
 
     model_config = ConfigDict(extra="allow")
 
+    # --- model construction ---
+    device: str | None = None
+    dtype: str | None = None
+    max_seq_len: int | None = None
+    video_fps: float | None = None
+    max_new_tokens: int | None = None
+    context_length: int | None = None
+
+    # --- executor / batching ---
     max_concurrency: int | None = None
     max_batch_size: int | None = None
     max_batch_wait_ms: float | None = None
@@ -130,47 +139,24 @@ class SchedulerConfig(BaseModel):
         ):
             count = getattr(self, name)
             if count is not None and count < 1:
-                raise ValueError(f"scheduler.{name} must be >= 1")
-        if self.max_batch_wait_ms is not None and self.max_batch_wait_ms < 0:
-            raise ValueError("scheduler.max_batch_wait_ms must be >= 0")
-        requests = self.prefill_coalesce_requests
-        if requests is not None and requests < 0:
-            raise ValueError("scheduler.prefill_coalesce_requests must be >= 0")
-        wait_ms = self.prefill_coalesce_wait_ms
-        if wait_ms is not None and not wait_ms > 0:
-            raise ValueError("scheduler.prefill_coalesce_wait_ms must be > 0")
-        reserve = self.encoder_mem_reserve
-        if reserve is not None and not 0.0 <= reserve < 1.0:
-            raise ValueError("scheduler.encoder_mem_reserve must be in [0, 1)")
-
-
-class ModelGroup(BaseModel):
-    """Factory/model-construction knobs shared by every stage type.
-
-    Every field defaults to ``None``, meaning "use the factory's default";
-    a set field is passed to the stage factory under its own name. The
-    declared fields validate eagerly; any other key passes through untouched
-    to the factory, which is the only party that knows its own parameter
-    names. Model-specific knobs may also be declared on per-stage
-    ``ModelGroup`` subclasses when eager validation is worth having.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    device: str | None = None
-    dtype: str | None = None
-    max_seq_len: int | None = None
-    video_fps: float | None = None
-    max_new_tokens: int | None = None
-    context_length: int | None = None
-
-    def model_post_init(self, __context: Any = None) -> None:
+                raise ValueError(f"factory.{name} must be >= 1")
         for name in ("max_seq_len", "max_new_tokens", "context_length"):
             count = getattr(self, name)
             if count is not None and count <= 0:
-                raise ValueError(f"model.{name} must be positive")
+                raise ValueError(f"factory.{name} must be positive")
         if self.video_fps is not None and self.video_fps <= 0:
-            raise ValueError("model.video_fps must be positive")
+            raise ValueError("factory.video_fps must be positive")
+        if self.max_batch_wait_ms is not None and self.max_batch_wait_ms < 0:
+            raise ValueError("factory.max_batch_wait_ms must be >= 0")
+        requests = self.prefill_coalesce_requests
+        if requests is not None and requests < 0:
+            raise ValueError("factory.prefill_coalesce_requests must be >= 0")
+        wait_ms = self.prefill_coalesce_wait_ms
+        if wait_ms is not None and not wait_ms > 0:
+            raise ValueError("factory.prefill_coalesce_wait_ms must be > 0")
+        reserve = self.encoder_mem_reserve
+        if reserve is not None and not 0.0 <= reserve < 1.0:
+            raise ValueError("factory.encoder_mem_reserve must be in [0, 1)")
 
 
 class PlacementConfig(BaseModel):
@@ -194,18 +180,17 @@ class StageConfig(BaseModel):
 
     Stage settings are grouped by consumer: fields at the top level are read
     by the parent process (placement, process planning, wiring), ``engine.*``
-    by SGLang ServerArgs, ``scheduler.*`` by the stage's executor, and
-    ``model.*`` by the factory/model construction.
+    by SGLang ServerArgs, and ``factory.*`` by the stage factory's signature.
 
     Minimal example::
 
-        StageConfig(name="decode", factory="...create_decode", terminal=True)
+        StageConfig(name="decode", factory_path="...create_decode", terminal=True)
 
     Fan-in example::
 
         StageConfig(
             name="aggregate",
-            factory="...create_aggregate",
+            factory_path="...create_aggregate",
             wait_for=["preprocessor", "image_enc", "audio_enc"],
             merge_fn="...merge_for_thinker",
             next="thinker",
@@ -225,7 +210,8 @@ class StageConfig(BaseModel):
     name: str
 
     # --- Factory ---
-    factory: str
+    factory_path: str
+    """Dotted import path of the stage factory."""
 
     # --- Routing (set `next` for static routing or `terminal`) ---
     next: str | list[str] | None = None
@@ -248,8 +234,7 @@ class StageConfig(BaseModel):
 
     # --- Consumer groups ---
     engine: EngineArgs | None = None
-    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
-    model: ModelGroup = Field(default_factory=ModelGroup)
+    factory: FactoryArgs = Field(default_factory=FactoryArgs)
 
     # Note (Yueying Li): per-stage env defaults applied in this stage's worker process at spawn
     # (merged over the pipeline-level env_defaults; never overrides os.environ).
@@ -545,7 +530,7 @@ class PipelineConfig(BaseModel):
             raise ValueError(f"entry_stage {entry!r} is not defined")
 
         for s in self.stages:
-            if not s.factory:
+            if not s.factory_path:
                 raise ValueError(f"Stage {s.name!r} missing factory")
             has_next = s.next is not None
             if has_next == bool(s.terminal):

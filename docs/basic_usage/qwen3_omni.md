@@ -183,7 +183,7 @@ To disable replay, set it on the stage in the YAML config:
 ```yaml
 stages:
   code2wav:
-    model:
+    factory:
       enable_cuda_graph: false
 ```
 

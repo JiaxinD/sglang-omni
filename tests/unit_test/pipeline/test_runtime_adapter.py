@@ -30,7 +30,7 @@ def _stage(**kwargs) -> EngineStageConfig:
     data = {
         "name": "thinker",
         "process": "pipeline",
-        "factory": _FACTORY,
+        "factory_path": _FACTORY,
         "terminal": True,
         "gpu": 1,
     }
@@ -60,7 +60,7 @@ def test_typed_groups_map_to_factory_kwargs() -> None:
     stage = _stage(
         gpu_memory_fraction=0.25,
         engine={"mem_fraction_static": 0.72},
-        model={"video_fps": 2.0},
+        factory={"video_fps": 2.0},
     )
     config = PipelineConfig(model_path="dummy-model", stages=[stage])
 
@@ -75,7 +75,7 @@ def test_typed_groups_map_to_factory_kwargs() -> None:
 
 def test_total_gpu_memory_fraction_is_not_injected_into_unrelated_factories() -> None:
     stage = _stage(
-        factory=_FACTORY_WITHOUT_TOTAL_BUDGET,
+        factory_path=_FACTORY_WITHOUT_TOTAL_BUDGET,
         gpu_memory_fraction=0.25,
         engine={"mem_fraction_static": 0.72},
     )
@@ -88,7 +88,7 @@ def test_total_gpu_memory_fraction_is_not_injected_into_unrelated_factories() ->
 
 
 def test_a_user_group_value_overrides_the_author_kwarg() -> None:
-    stage = _stage(model={"video_fps": 2.0})
+    stage = _stage(factory={"video_fps": 2.0})
     config = _HookedPipelineConfig(model_path="dummy-model", stages=[stage])
 
     args = resolve_stage_factory_args(stage, config)
@@ -128,7 +128,7 @@ def test_placement_owned_kwargs_are_refused_from_the_hook() -> None:
 
 def test_a_set_key_the_factory_does_not_accept_is_refused() -> None:
     """Silently dropping a set path would turn configuration into a no-op."""
-    stage = _stage(model={"lookahead": 9})
+    stage = _stage(factory={"lookahead": 9})
     config = PipelineConfig(model_path="dummy-model", stages=[stage])
 
     with pytest.raises(ValueError, match="does not accept a 'lookahead'"):
@@ -136,7 +136,7 @@ def test_a_set_key_the_factory_does_not_accept_is_refused() -> None:
 
 
 def test_free_form_keys_reach_a_factory_that_takes_kwargs() -> None:
-    stage = _stage(factory=_OPEN_FACTORY, model={"lookahead": 9})
+    stage = _stage(factory_path=_OPEN_FACTORY, factory={"lookahead": 9})
     config = PipelineConfig(model_path="dummy-model", stages=[stage])
 
     args = resolve_stage_factory_args(stage, config)
@@ -145,7 +145,7 @@ def test_free_form_keys_reach_a_factory_that_takes_kwargs() -> None:
 
 
 def test_scheduler_keys_pass_under_their_own_names() -> None:
-    stage = _stage(factory=_FACTORY, scheduler={"encoder_mem_reserve": 0.1})
+    stage = _stage(factory_path=_FACTORY, factory={"encoder_mem_reserve": 0.1})
     config = PipelineConfig(model_path="dummy-model", stages=[stage])
 
     args = resolve_stage_factory_args(stage, config)
@@ -166,7 +166,7 @@ def test_a_plain_stage_carries_no_server_args() -> None:
     stage = StageConfig(
         name="front",
         process="pipeline",
-        factory=_OPEN_FACTORY,
+        factory_path=_OPEN_FACTORY,
         terminal=True,
     )
     config = PipelineConfig(model_path="dummy-model", stages=[stage])

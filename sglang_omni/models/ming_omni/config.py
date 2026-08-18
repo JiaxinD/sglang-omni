@@ -50,7 +50,7 @@ def _preprocessing_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name=PREPROCESSING_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_preprocessing_executor",
+        factory_path=f"{_PKG}.stages.create_preprocessing_executor",
         next=[AUDIO_STAGE, IMAGE_STAGE, AGGREGATE_STAGE],
         project_payload={
             AUDIO_STAGE: f"{_PKG}.stages.project_preprocessing_to_audio_encoder",
@@ -64,7 +64,7 @@ def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name=AUDIO_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_audio_encoder_executor",
+        factory_path=f"{_PKG}.stages.create_audio_encoder_executor",
         factory_args={"device": "cuda", "dtype": None},
         gpu=gpu,
         next=AGGREGATE_STAGE,
@@ -80,7 +80,7 @@ def _image_encoder_stage(
     return StageConfig(
         name=IMAGE_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_image_encoder_executor",
+        factory_path=f"{_PKG}.stages.create_image_encoder_executor",
         factory_args={"device": "cuda", "dtype": None},
         gpu=gpu,
         tp_size=tp_size,
@@ -95,7 +95,7 @@ def _aggregate_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name=AGGREGATE_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_aggregate_executor",
+        factory_path=f"{_PKG}.stages.create_aggregate_executor",
         wait_for=[PREPROCESSING_STAGE, AUDIO_STAGE, IMAGE_STAGE],
         merge_fn=f"{_PKG}.pipeline.merge.merge_for_thinker",
         next=THINKER_STAGE,
@@ -113,7 +113,7 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
     return StageConfig(
         name=THINKER_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
+        factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
         factory_args={"thinker_max_seq_len": 8192},
         gpu=gpu,
         next=[DECODE_STAGE, TALKER_STAGE] if speech_enabled else DECODE_STAGE,
@@ -132,7 +132,7 @@ def _streaming_thinker_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name=THINKER_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
+        factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
         factory_args={"thinker_max_seq_len": 8192, "enable_streaming_tts": True},
         gpu=gpu,
         next=[DECODE_STAGE, SEGMENTER_STAGE],
@@ -148,7 +148,7 @@ def _segmenter_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name=SEGMENTER_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_streaming_segmenter_executor",
+        factory_path=f"{_PKG}.stages.create_streaming_segmenter_executor",
         next=TALKER_STREAM_STAGE,
         stream_to=[TALKER_STREAM_STAGE],
         can_accept_stream_before_payload=True,
@@ -159,7 +159,7 @@ def _talker_stream_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name=TALKER_STREAM_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_streaming_talker_executor",
+        factory_path=f"{_PKG}.stages.create_streaming_talker_executor",
         factory_args={"device": "cuda", "voice": "DB30"},
         gpu=gpu,
         terminal=True,
@@ -171,7 +171,7 @@ def _decode_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name=DECODE_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_decode_executor",
+        factory_path=f"{_PKG}.stages.create_decode_executor",
         terminal=True,
         can_accept_stream_before_payload=True,
     )
@@ -181,7 +181,7 @@ def _talker_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name=TALKER_STAGE,
         process=process,
-        factory=f"{_PKG}.stages.create_talker_executor",
+        factory_path=f"{_PKG}.stages.create_talker_executor",
         factory_args={"device": "cuda", "voice": "DB30"},
         gpu=gpu,
         terminal=True,

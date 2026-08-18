@@ -9,13 +9,13 @@ model_path: dots-studio/dots.tts-soar
 shared:
   - select:
       stages: [preprocessing, latent_engine]
-    model:
+    factory:
       num_steps: 10
       max_generate_length: 500
 
 stages:
   latent_engine:
-    model:
+    factory:
       optimize: true
     engine:
       mem_fraction_static: 0.20
@@ -23,5 +23,5 @@ stages:
       disable_cuda_graph: false
       cuda_graph_max_bs: 1
   vocoder:
-    model:
+    factory:
       optimize: true

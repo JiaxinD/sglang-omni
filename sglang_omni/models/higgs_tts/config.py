@@ -7,9 +7,8 @@ from typing import Any, ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
-    SchedulerConfig,
     StageConfig,
 )
 from sglang_omni.utils.cpu import bounded_intraop_threads
@@ -39,15 +38,15 @@ class HiggsTtsPipelineConfig(PipelineConfig):
         StageConfig(
             name="preprocessing",
             process="tts_frontend",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            scheduler=SchedulerConfig(max_concurrency=_PREPROCESS_MAX_WORKERS),
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(max_concurrency=_PREPROCESS_MAX_WORKERS),
             next="audio_encoder",
         ),
         StageConfig(
             name="audio_encoder",
             process="tts_frontend",
-            factory=f"{_PKG}.stages.create_audio_encoder_executor",
-            model=ModelGroup(device="cuda"),
+            factory_path=f"{_PKG}.stages.create_audio_encoder_executor",
+            factory=FactoryArgs(device="cuda"),
             gpu=0,
             gpu_memory_fraction=0.03,
             next="tts_engine",
@@ -55,9 +54,10 @@ class HiggsTtsPipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            model=ModelGroup(device="cuda", max_new_tokens=2048),
-            scheduler=SchedulerConfig(enable_async_decode=True),
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(
+                device="cuda", max_new_tokens=2048, enable_async_decode=True
+            ),
             gpu=0,
             gpu_memory_fraction=0.85,
             next="vocoder",
@@ -69,8 +69,8 @@ class HiggsTtsPipelineConfig(PipelineConfig):
             # them into same-GPU processes time-slices the H100 at ordinary
             # serving concurrency and prevents decode/vocoder overlap.
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
-            model=ModelGroup(device="cuda"),
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
+            factory=FactoryArgs(device="cuda"),
             gpu=0,
             gpu_memory_fraction=0.10,
             terminal=True,

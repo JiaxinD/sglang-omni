@@ -31,7 +31,7 @@ model_path: openai/whisper-large-v3-turbo
 
 stages:
   asr:
-    model:
+    factory:
       enable_encoder_cuda_graph: false
 ```
 

@@ -29,7 +29,7 @@ stages = [
     StageConfig(
         name="preprocessing",
         process="preprocessing",
-        factory="...create_preprocessing_executor",
+        factory_path="...create_preprocessing_executor",
         next=["image_encoder", "audio_encoder", "mm_aggregate"],
         project_payload={
             "image_encoder": "...project_preprocessing_to_image_encoder",
@@ -40,7 +40,7 @@ stages = [
     StageConfig(
         name="mm_aggregate",
         process="mm_aggregate",
-        factory="...create_aggregate_executor",
+        factory_path="...create_aggregate_executor",
         wait_for=["preprocessing", "image_encoder", "audio_encoder"],
         merge_fn="...merge_for_thinker",
         next="thinker",
@@ -48,8 +48,8 @@ stages = [
     EngineStageConfig(               # drives an SGLang engine, so engine.* exists
         name="thinker",
         process="thinker",
-        factory="...create_sglang_thinker_executor_from_config",
-        model=ModelGroup(max_seq_len=8192),
+        factory_path="...create_sglang_thinker_executor_from_config",
+        factory=FactoryArgs(max_seq_len=8192),
         gpu=0,
         next=["decode", "talker_ar"],
         stream_to=["talker_ar"],
@@ -57,7 +57,7 @@ stages = [
     StageConfig(
         name="decode",
         process="decode",
-        factory="...create_decode_executor",
+        factory_path="...create_decode_executor",
         terminal=True,
     ),
 ]
@@ -71,22 +71,21 @@ Stage settings are grouped by the module that consumes them:
 | --- | --- | --- |
 | stage top level | parent process: placement, process planning, wiring | `gpu`, `tp_size`, `process`, `gpu_memory_fraction` |
 | `engine.*` | SGLang `ServerArgs` (only on `EngineStageConfig` stages) | `mem_fraction_static`, `max_running_requests`, `disable_cuda_graph` |
-| `scheduler.*` | the stage's executor/scheduler | `max_concurrency`, `enable_async_decode`, `prefill_coalesce_requests` |
-| `model.*` | the stage factory / model construction | `dtype`, `max_seq_len`, `video_fps` |
+| `factory.*` | the stage factory's signature | `dtype`, `max_seq_len`, `max_concurrency`, `enable_async_decode` |
 
 Each group declares its commonly tuned fields, which validate eagerly. **Any
 other key passes through untouched**: the group vocabularies belong to their
 consumers, so the entry side never format-checks unknown keys. A free-form
-`model.*` or `scheduler.*` key reaches the stage factory under its own name;
-a free-form `engine.*` key travels in the `server_args_overrides` mapping to
-SGLang, which rules on it. This is how factory-specific knobs are passed —
-what used to be a `factory_args` entry is now written under `model.*`:
+`factory.*` key reaches the stage factory under its own name; a free-form
+`engine.*` key travels in the `server_args_overrides` mapping to SGLang,
+which rules on it. This is how factory-specific knobs are passed — what used
+to be a `factory_args` entry is now written under `factory.*`:
 
 ```yaml
 stages:
   latent_engine:
-    model:
-      num_steps: 4          # not a declared ModelGroup field; passed to the
+    factory:
+      num_steps: 4          # not a declared FactoryArgs field; passed to the
                             # factory as num_steps=4, validated by its signature
 ```
 
@@ -109,7 +108,7 @@ stages:
     engine:
       mem_fraction_static: 0.7
   vocoder:
-    model:
+    factory:
       dtype: bfloat16
 ```
 
@@ -124,7 +123,7 @@ from the stage name exactly as the mapping does:
 sgl-omni serve --config omni.yaml \
     --tts_engine.tp_size 2 \
     --tts_engine.engine.mem_fraction_static 0.7 \
-    --vocoder.model.dtype bfloat16 \
+    --vocoder.factory.dtype bfloat16 \
     --vocoder.process vocoder
 ```
 
@@ -141,7 +140,7 @@ stages at once:
 shared:
   - select:
       stages: [preprocessing, latent_engine]   # or engine: true, exclude: [...]
-    model:
+    factory:
       num_steps: 4
 ```
 
@@ -163,10 +162,9 @@ overrode. Both run the same merge as `serve`.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `name` | `str` | required | Unique stage identifier. Set by the config class; a config file addresses stages by name and never renames them. |
-| `factory` | `str` | required | Dotted import path to the stage factory. |
+| `factory_path` | `str` | required | Dotted import path to the stage factory. |
 | `engine` | `EngineArgs` or `None` | `None` | SGLang ServerArgs overrides. Exists only on `EngineStageConfig` stages; writing it elsewhere is a path error. |
-| `scheduler` | `SchedulerConfig` | empty | Executor/batching tuning, passed to the factory by field name. |
-| `model` | `ModelGroup` | empty | Factory/model-construction knobs, passed to the factory by field name. Unknown keys pass through. |
+| `factory` | `FactoryArgs` | empty | Constructor kwargs for the stage factory, passed by field name. Unknown keys pass through. |
 | `next` | `str`, `list[str]`, or `None` | `None` | Static downstream stage or stages for normal result routing. |
 | `terminal` | `bool` | `False` | Marks a stage as terminal; terminal results are sent to the coordinator. |
 | `route_fn` | `str` or `None` | `None` | Dotted function path for request-aware result routing. The function receives `(request_id, stage_output)` and returns a downstream stage name or list of stage names. |
@@ -212,7 +210,7 @@ Class-level hooks a model config may declare:
   stage to `EngineStageConfig` is what makes `engine.*` exist on it.
 - `stage_factory_kwargs(stage_name)` — constructor kwargs the pipeline author
   passes to the factory in code (wiring, not configuration). A user-set
-  `model.*`/`scheduler.*` value with the same name overrides the hook's value.
+  `factory.*` value with the same name overrides the hook's value.
 - `tensor_parallel_server_args_overrides(stage_name, tp_size)` /
   `topology_gated_custom_all_reduce_stages()` — engine overrides derived from
   the resolved TP topology at launch.
@@ -235,7 +233,7 @@ against the factory signature in the worker:
 
 ```text
 PipelineConfig.stage_factory_kwargs(name)      # author channel: code wiring
-stage.model.* / stage.scheduler.*              # config channel: by field name
+stage.factory.*                                # config channel: by field name
 stage.engine.*  ->  server_args_overrides      # config channel: one dict to SGLang
 ```
 

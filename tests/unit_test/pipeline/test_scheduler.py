@@ -1978,7 +1978,7 @@ def test_omni_scheduler_initializes_upstream_queue_limit(monkeypatch) -> None:
     assert global_server_args.pp_max_micro_batch_size == 1
     assert global_server_args.override_calls == [
         (
-            "sglang_omni.scheduler.pp_max_micro_batch_size_default",
+            "sglang_omni.factory.pp_max_micro_batch_size_default",
             {"pp_max_micro_batch_size": 1},
         )
     ]

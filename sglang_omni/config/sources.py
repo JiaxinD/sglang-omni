@@ -71,8 +71,8 @@ _REMOVED_TOP_LEVEL_BLOCKS: dict[str, str] = {
         "the document, e.g. under the stages: mapping"
     ),
     "runtime_overrides": (
-        "runtime_overrides was removed; write stages.<name>.engine.*, "
-        "stages.<name>.scheduler.* or stages.<name>.model.* instead"
+        "runtime_overrides was removed; write stages.<name>.engine.* or "
+        "stages.<name>.factory.* instead"
     ),
     "entry_stage": (
         "entry_stage is not user configuration; the entry stage is declared "

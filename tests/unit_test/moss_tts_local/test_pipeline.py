@@ -433,7 +433,7 @@ def test_pipeline_stage_wiring():
     assert stages["tts_engine"].next == "vocoder"
     assert stages["vocoder"].terminal
     for stage in stages.values():
-        assert "moss_tts_local" in stage.factory
+        assert "moss_tts_local" in stage.factory_path
     assert stages["preprocessing"].process == "pipeline"
     assert stages["preprocessing"].gpu == 0
     assert stages["preprocessing"].factory_args["device"] == "cuda:0"
@@ -582,7 +582,7 @@ def test_pipeline_without_preprocessing_does_not_set_omp_default() -> None:
             StageConfig(
                 name="custom",
                 process="pipeline",
-                factory="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
+                factory_path="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
                 terminal=True,
             )
         ],
@@ -2444,8 +2444,8 @@ def test_async_decode_dotted_flags_accept_moss_local():
     config = MossTTSLocalPipelineConfig(model_path="dummy")
     resolved = ConfigManager(config).merge_config(
         [
-            ("tts_engine.scheduler.enable_async_decode", "true"),
-            ("tts_engine.scheduler.async_decode_min_batch_size", "4"),
+            ("tts_engine.factory.enable_async_decode", "true"),
+            ("tts_engine.factory.async_decode_min_batch_size", "4"),
         ]
     )
     stage = next(s for s in resolved.stages if s.name == "tts_engine")

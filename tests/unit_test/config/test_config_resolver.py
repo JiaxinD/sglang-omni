@@ -148,10 +148,10 @@ class TestDiff:
         self, pipeline_config: PipelineConfig
     ):
         changed = ConfigResolver(pipeline_config).resolve(
-            patchset(make(pipeline_config, "stages.thinker.model.max_seq_len", 99))
+            patchset(make(pipeline_config, "stages.thinker.factory.max_seq_len", 99))
         )
         differences = diff_configs(pipeline_config, changed.config)
-        assert [d.path for d in differences] == ["stages.thinker.model.max_seq_len"]
+        assert [d.path for d in differences] == ["stages.thinker.factory.max_seq_len"]
         assert differences[0].expected == 8192
         assert differences[0].actual == 99
 

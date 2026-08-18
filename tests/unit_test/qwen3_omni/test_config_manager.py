@@ -155,7 +155,7 @@ def test_qwen3_omni_mmsu_example_config_uses_text_pipeline() -> None:
 def test_qwen_preprocessing_model_video_fps_resolves_to_factory_arg() -> None:
     config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
     merged = ConfigManager(config).merge_config(
-        [("preprocessing.model.video_fps", "2.0")]
+        [("preprocessing.factory.video_fps", "2.0")]
     )
 
     args = resolve_stage_factory_args(_stage(merged, "preprocessing"), merged)
@@ -168,7 +168,7 @@ def test_h20_colocated_example_reserve_keeps_raw_budget_in_resolved_config() -> 
     config = ConfigManager.from_file(str(config_path)).config
 
     merged = ConfigManager(config).merge_config(
-        [("thinker.scheduler.encoder_mem_reserve", "0.05")]
+        [("thinker.factory.encoder_mem_reserve", "0.05")]
     )
     plan = build_stage_placement_plan(merged)
     thinker = _stage(merged, "thinker")

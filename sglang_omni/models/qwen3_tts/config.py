@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -48,14 +48,14 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
             next="tts_engine",
         ),
         EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -63,8 +63,8 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="vocoder",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,

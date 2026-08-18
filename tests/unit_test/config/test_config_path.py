@@ -19,16 +19,16 @@ MEM_FRACTION = "stages.thinker.engine.mem_fraction_static"
 class TestParsing:
     def test_typed_leaf_carries_its_declared_type(self, pipeline_config):
         path = ConfigPath.parse(
-            "stages.thinker.model.max_seq_len", type(pipeline_config)
+            "stages.thinker.factory.max_seq_len", type(pipeline_config)
         )
-        assert path.parts == ("stages", "thinker", "model", "max_seq_len")
+        assert path.parts == ("stages", "thinker", "factory", "max_seq_len")
         assert path.value_type == (int | None)
         assert path.is_leaf
         assert path.stage_name == "thinker"
 
     def test_container_paths_are_not_leaves(self, pipeline_config):
         cls = type(pipeline_config)
-        assert not ConfigPath.parse("stages.thinker.model", cls).is_leaf
+        assert not ConfigPath.parse("stages.thinker.factory", cls).is_leaf
         assert not ConfigPath.parse("stages", cls).is_leaf
         assert not ConfigPath.parse("stages.thinker.env", cls).is_leaf
 
@@ -58,8 +58,8 @@ class TestParsing:
         cls = type(pipeline_config)
         for raw in (
             "stages.thinker.engine.disable_radix_cache",
-            "stages.thinker.scheduler.made_up_knob",
-            "stages.thinker.model.lookahead",
+            "stages.thinker.factory.made_up_knob",
+            "stages.thinker.factory.lookahead",
         ):
             # Parses without a did-you-mean refusal; the value type is open
             # because only the consumer knows what the key means.
@@ -126,7 +126,7 @@ class TestCoercion:
             ("stages.thinker.gpu", "0", 0),
             ("stages.thinker.gpu", "[0, 1]", [0, 1]),
             ("stages.thinker.stream_to", '["a", "b"]', ["a", "b"]),
-            ("stages.thinker.model.max_seq_len", "32768", 32768),
+            ("stages.thinker.factory.max_seq_len", "32768", 32768),
         ],
     )
     def test_typed_coercion(self, pipeline_config, raw, text, expected):
@@ -144,7 +144,7 @@ class TestCoercion:
 
     def test_free_form_group_keys_fall_back_to_scalar_parsing(self, pipeline_config):
         path = ConfigPath.parse(
-            "stages.thinker.scheduler.made_up_knob", type(pipeline_config)
+            "stages.thinker.factory.made_up_knob", type(pipeline_config)
         )
         assert path.coerce("true") is True
         assert path.coerce("7") == 7
@@ -167,11 +167,11 @@ class TestReadWrite:
         cls = type(pipeline_config)
         data = pipeline_config.model_dump()
         ConfigPath.parse(MEM_FRACTION, cls).write(data, 0.8)
-        ConfigPath.parse("stages.thinker.model.max_seq_len", cls).write(data, 4096)
+        ConfigPath.parse("stages.thinker.factory.max_seq_len", cls).write(data, 4096)
         rebuilt = cls(**data)
         thinker = rebuilt.stage_named("thinker")
         assert thinker.engine.mem_fraction_static == 0.8
-        assert thinker.model.max_seq_len == 4096
+        assert thinker.factory.max_seq_len == 4096
 
     def test_write_creates_missing_optional_container(
         self, pipeline_config: PipelineConfig
@@ -205,9 +205,9 @@ class TestReadWrite:
     def test_write_does_not_touch_siblings(self, pipeline_config: PipelineConfig):
         cls = type(pipeline_config)
         data = pipeline_config.model_dump()
-        ConfigPath.parse("stages.thinker.model.max_seq_len", cls).write(data, 128)
-        assert data["stages"][0]["model"].get("max_seq_len") is None
-        assert data["stages"][1]["scheduler"]["max_concurrency"] == 4
+        ConfigPath.parse("stages.thinker.factory.max_seq_len", cls).write(data, 128)
+        assert data["stages"][0]["factory"].get("max_seq_len") is None
+        assert data["stages"][1]["factory"]["max_concurrency"] == 4
 
 
 class TestSchemaEnumeration:

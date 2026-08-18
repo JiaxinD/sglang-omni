@@ -3,10 +3,9 @@ model_path: OpenMOSS-Team/MOSS-TTS-v1.5
 
 stages:
   preprocessing:
-    model:
+    factory:
       device: cpu
       dtype: float32
-    scheduler:
       max_concurrency: 1
 
   tts_engine:
@@ -16,8 +15,7 @@ stages:
       cuda_graph_max_bs: 1
 
   vocoder:
-    model:
+    factory:
       dtype: bfloat16
-    scheduler:
       max_batch_size: 1
       max_batch_wait_ms: 2

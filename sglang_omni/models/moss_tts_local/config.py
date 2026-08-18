@@ -10,9 +10,8 @@ from pydantic import Field
 from sglang_omni.config import (
     EngineArgs,
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
-    SchedulerConfig,
     StageConfig,
 )
 from sglang_omni.utils.cpu import bounded_intraop_threads
@@ -36,9 +35,11 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            model=ModelGroup(device=codec_device),
-            scheduler=SchedulerConfig(max_concurrency=_PREPROCESSING_MAX_CONCURRENCY),
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(
+                device=codec_device,
+                max_concurrency=_PREPROCESSING_MAX_CONCURRENCY,
+            ),
             gpu_memory_fraction=(
                 _COLOCATED_PREPROCESSING_GPU_MEMORY_FRACTION if colocated else None
             ),
@@ -48,8 +49,8 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             engine=EngineArgs(
                 mem_fraction_static=None if colocated else _AR_MEM_FRACTION_STATIC
             ),
@@ -63,8 +64,8 @@ def _stages(*, codec_device: str, colocated: bool) -> list[StageConfig]:
         StageConfig(
             name="vocoder",
             process="vocoder" if colocated else "pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
-            model=ModelGroup(device=codec_device),
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
+            factory=FactoryArgs(device=codec_device),
             gpu_memory_fraction=(
                 _COLOCATED_VOCODER_GPU_MEMORY_FRACTION if colocated else None
             ),
@@ -158,7 +159,7 @@ class MossTTSLocalPipelineConfig(PipelineConfig):
             None,
         )
         if preprocessing is not None:
-            configured_workers = preprocessing.scheduler.max_concurrency
+            configured_workers = preprocessing.factory.max_concurrency
             preprocessing_workers = max(
                 int(
                     configured_workers

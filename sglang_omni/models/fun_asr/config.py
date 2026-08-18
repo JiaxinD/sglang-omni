@@ -27,7 +27,7 @@ class FunASRPipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="asr",
             process="asr",
-            factory=f"{_PKG}.stages.create_sglang_fun_asr_executor",
+            factory_path=f"{_PKG}.stages.create_sglang_fun_asr_executor",
             gpu=0,
             terminal=True,
         )

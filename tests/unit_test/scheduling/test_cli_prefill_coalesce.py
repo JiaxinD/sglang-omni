@@ -2,7 +2,7 @@
 """Prefill coalescing is plain per-stage configuration.
 
 The knobs live in the stage's ``scheduler`` group, so they are set with the
-same dotted spelling as everything else (``--<stage>.scheduler.prefill_coalesce_requests``)
+same dotted spelling as everything else (``--<stage>.factory.prefill_coalesce_requests``)
 or under the stage's ``stages:`` entry in YAML. These tests pin that the
 values reach the AR stage factories of every supported pipeline, and that
 the schema rejects nonsense eagerly.
@@ -37,7 +37,7 @@ def _ar_stage_args(config: PipelineConfig, stage_name: str) -> dict[str, object]
     # the two kwarg channels in the parent, stage_workers overlays them against
     # the factory signature in the child.
     stage = next(s for s in config.stages if s.name == stage_name)
-    factory = import_string(stage.factory)
+    factory = import_string(stage.factory_path)
     args = apply_typed_stage_kwargs(
         factory,
         resolve_stage_factory_kwargs(stage, config),
@@ -66,8 +66,8 @@ def test_dotted_flags_set_coalesce_args(config_cls, stage_name):
     config = config_cls(model_path="dummy")
     merged = ConfigManager(config).merge_config(
         [
-            (f"{stage_name}.scheduler.prefill_coalesce_requests", "32"),
-            (f"{stage_name}.scheduler.prefill_coalesce_wait_ms", "300.0"),
+            (f"{stage_name}.factory.prefill_coalesce_requests", "32"),
+            (f"{stage_name}.factory.prefill_coalesce_wait_ms", "300.0"),
         ]
     )
     args = _ar_stage_args(merged, stage_name)
@@ -101,7 +101,7 @@ def test_a_flag_for_one_stage_leaves_the_other_settings_alone():
     before = _ar_stage_args(config, "tts_engine")
 
     merged = ConfigManager(config).merge_config(
-        [("tts_engine.scheduler.prefill_coalesce_wait_ms", "200.0")]
+        [("tts_engine.factory.prefill_coalesce_wait_ms", "200.0")]
     )
 
     after = _ar_stage_args(merged, "tts_engine")
@@ -116,7 +116,7 @@ def test_a_stage_without_the_knob_refuses_the_flag():
     launch with the path named, instead of silently dropping the value."""
     config = MossTTSLocalPipelineConfig(model_path="dummy")
     merged = ConfigManager(config).merge_config(
-        [("vocoder.scheduler.prefill_coalesce_requests", "32")]
+        [("vocoder.factory.prefill_coalesce_requests", "32")]
     )
     with pytest.raises(ValueError, match="prefill_coalesce_requests"):
         _ar_stage_args(merged, "vocoder")
@@ -126,6 +126,6 @@ def test_rejects_invalid_values_eagerly():
     config = HiggsTtsPipelineConfig(model_path="dummy")
     manager = ConfigManager(config)
     with pytest.raises(ValueError, match="prefill_coalesce_requests"):
-        manager.merge_config([("tts_engine.scheduler.prefill_coalesce_requests", "-1")])
+        manager.merge_config([("tts_engine.factory.prefill_coalesce_requests", "-1")])
     with pytest.raises(ValueError, match="prefill_coalesce_wait_ms"):
-        manager.merge_config([("tts_engine.scheduler.prefill_coalesce_wait_ms", "0")])
+        manager.merge_config([("tts_engine.factory.prefill_coalesce_wait_ms", "0")])

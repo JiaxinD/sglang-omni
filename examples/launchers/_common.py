@@ -126,26 +126,19 @@ def apply_stage_factory_updates(
 ) -> None:
     """Fold launcher flag values into one stage's consumer groups.
 
-    ``updates`` are factory kwargs: a key the scheduler group declares lands
-    there, everything else passes through the model group. ``server_arg_updates``
-    merge into the stage's ``engine`` block.
+    ``updates`` are constructor kwargs and merge into the stage's ``factory``
+    group; ``server_arg_updates`` merge into its ``engine`` block.
     """
-    from sglang_omni.config.schema import EngineArgs, SchedulerConfig
+    from sglang_omni.config.schema import EngineArgs
 
     for stage in config.stages:
         if stage.name != stage_name:
             continue
-        for key, value in (updates or {}).items():
-            if key in SchedulerConfig.model_fields:
-                group = stage.scheduler
-                stage.scheduler = type(group)(
-                    **{**group.model_dump(exclude_none=True), key: value}
-                )
-            else:
-                group = stage.model
-                stage.model = type(group)(
-                    **{**group.model_dump(exclude_none=True), key: value}
-                )
+        if updates:
+            group = stage.factory
+            stage.factory = type(group)(
+                **{**group.model_dump(exclude_none=True), **updates}
+            )
         if server_arg_updates:
             engine = stage.engine
             data = dict(engine.overrides()) if engine is not None else {}

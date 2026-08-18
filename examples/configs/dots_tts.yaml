@@ -8,18 +8,18 @@ model_path: dots-studio/dots.tts-mf
 shared:
   - select:
       stages: [preprocessing, latent_engine]
-    model:
+    factory:
       num_steps: 4
       max_generate_length: 500
 
 stages:
   reference_encode:
-    scheduler:
+    factory:
       max_concurrency: 8
       max_batch_size: 1
       max_batch_wait_ms: 4
   latent_engine:
-    model:
+    factory:
       optimize: true
     engine:
       mem_fraction_static: 0.20
@@ -30,8 +30,7 @@ stages:
       disable_cuda_graph: false
       cuda_graph_max_bs: 16
   vocoder:
-    model:
+    factory:
       optimize: true
-    scheduler:
       max_batch_size: 4
       max_batch_wait_ms: 2

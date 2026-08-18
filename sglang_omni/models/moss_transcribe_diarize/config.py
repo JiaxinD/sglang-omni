@@ -8,9 +8,8 @@ from typing import Any, ClassVar
 from sglang_omni.config import (
     EngineArgs,
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
-    SchedulerConfig,
     StageConfig,
 )
 from sglang_omni.models.moss_transcribe_diarize import (  # noqa: F401
@@ -40,18 +39,11 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="asr",
             process="asr",
-            factory=f"{_PKG}.stages.create_sglang_moss_transcribe_diarize_executor",
-            model=ModelGroup(
+factory_path=f"{_PKG}.stages.create_sglang_moss_transcribe_diarize_executor",
+            factory=FactoryArgs(
                 device="cuda:0",
                 encoder_cache_size_bytes=4 * 1024**3,
                 encoder_max_batch_size=_ENCODER_MAX_BATCH_SIZE,
-            ),
-            engine=EngineArgs(
-                max_running_requests=16,
-                enable_torch_compile=True,
-                torch_compile_max_bs=4,
-            ),
-            scheduler=SchedulerConfig(
                 request_build_max_workers=_REQUEST_BUILD_MAX_WORKERS,
                 request_build_max_pending=16,
                 prefill_coalesce_requests=4,
@@ -59,6 +51,11 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
                 prefill_coalesce_when_idle=True,
                 prefill_coalesce_requires_pending_builds=True,
                 prefill_coalesce_after_builds_during_decode=True,
+            ),
+            engine=EngineArgs(
+                max_running_requests=16,
+                enable_torch_compile=True,
+                torch_compile_max_bs=4,
             ),
             gpu=0,
             terminal=True,
@@ -76,7 +73,7 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
             return
 
         asr_stage = next(stage for stage in self.stages if stage.name == "asr")
-        configured_workers = asr_stage.scheduler.request_build_max_workers
+        configured_workers = asr_stage.factory.request_build_max_workers
         request_build_workers = max(
             int(
                 configured_workers

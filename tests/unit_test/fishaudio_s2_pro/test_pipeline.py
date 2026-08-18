@@ -794,7 +794,7 @@ def test_s2pro_engine_disables_generic_compile_after_local_compile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _run_s2pro_engine_with_fake_buffers(monkeypatch)
-    scheduler = result.scheduler
+    scheduler = result.factory
     build_kwargs = result.build_kwargs
 
     # note (Gaokai): the Fish migration hinges on make_adapters() saving the
@@ -863,7 +863,7 @@ def test_s2pro_engine_selects_model_local_attention_backend(
         sm_version=sm_version,
     )
 
-    assert result.scheduler.server_args.attention_backend == expected_backend
+    assert result.factory.server_args.attention_backend == expected_backend
 
 
 def test_s2pro_engine_preserves_explicit_attention_backend(
@@ -876,7 +876,7 @@ def test_s2pro_engine_preserves_explicit_attention_backend(
         server_args_overrides={"attention_backend": "triton"},
     )
 
-    assert result.scheduler.server_args.attention_backend == "triton"
+    assert result.factory.server_args.attention_backend == "triton"
 
 
 @pytest.mark.parametrize(
@@ -931,7 +931,7 @@ def test_s2pro_engine_compile_default_follows_validation_scope(
 
     assert result.build_kwargs["enable_torch_compile"] is expected_compile
     expected_compile_calls = (
-        [(result.scheduler.model_runner.args[0].model_runner.model, 64)]
+        [(result.factory.model_runner.args[0].model_runner.model, 64)]
         if expected_compile
         else []
     )

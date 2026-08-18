@@ -243,8 +243,8 @@ def explain(
     path: Optional[str] = typer.Argument(
         None,
         help=(
-            "Config path, canonical (stages.thinker.model.max_seq_len) or "
-            "CLI-spelled (thinker.model.max_seq_len). Omit to list every "
+            "Config path, canonical (stages.thinker.factory.max_seq_len) or "
+            "CLI-spelled (thinker.factory.max_seq_len). Omit to list every "
             "path a source touched. Pass it before any dotted override so "
             "it is not mistaken for one."
         ),
@@ -260,8 +260,8 @@ def explain(
 ) -> None:
     """Say where one configuration value came from, and what it overrode.
 
-        sgl-omni config explain stages.thinker.model.max_seq_len \\
-            --config omni.yaml --thinker.model.max_seq_len 8192
+        sgl-omni config explain stages.thinker.factory.max_seq_len \\
+            --config omni.yaml --thinker.factory.max_seq_len 8192
     """
     resolution = _resolve_sources(
         model_path=model_path,

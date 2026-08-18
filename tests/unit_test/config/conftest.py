@@ -35,18 +35,17 @@ def build_pipeline_config() -> PipelineConfig:
         stages=[
             StageConfig(
                 name="preprocessing",
-                factory="tests.fake:create_preprocessing",
+                factory_path="tests.fake:create_preprocessing",
                 process="front",
                 next="thinker",
                 env={"OMP_NUM_THREADS": "4"},
             ),
             EngineStageConfig(
                 name="thinker",
-                factory="tests.fake:create_thinker",
+                factory_path="tests.fake:create_thinker",
                 process="gen",
                 terminal=True,
-                scheduler={"max_concurrency": 4},
-                model={"max_seq_len": 8192},
+                factory={"max_concurrency": 4, "max_seq_len": 8192},
             ),
         ],
     )

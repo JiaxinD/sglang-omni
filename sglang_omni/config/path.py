@@ -11,9 +11,9 @@ against a dict. That buys three things a dict walker cannot offer:
 * every path knows whether it is part of the public surface, so derived
   values such as ``config_cls`` can be refused up front.
 
-Stages are addressed **by name** (``stages.thinker.model.max_seq_len``) and
+Stages are addressed **by name** (``stages.thinker.factory.max_seq_len``) and
 compile against their *own* stage type: the root config class declares a
-``StageConfig`` subclass per stage name, so a model-specific ``model.*``
+``StageConfig`` subclass per stage name, so a model-specific ``factory.*``
 field exists only on the stage that declares it, and ``engine.*`` exists
 only on stages whose type drives an SGLang engine. Positional indices are
 not accepted anywhere.
@@ -112,14 +112,21 @@ _VISIBILITY_RULES: tuple[tuple[str, PathVisibility, str], ...] = (
 _REMOVED_FIELD_GUIDANCE: dict[str, str] = {
     "factory_args": (
         "factory_args was removed: user-tunable knobs live in the stage's "
-        "model./scheduler./engine. groups, and constructor wiring in "
+        "factory./engine. groups, and constructor wiring in "
         "PipelineConfig.stage_factory_kwargs()"
     ),
     "runtime": (
         "the runtime group was removed: resources.total_gpu_memory_fraction "
         "is now the stage-level gpu_memory_fraction, sglang_server_args is "
-        "now engine.*, scheduler tuning is scheduler.*, and the remaining "
-        "fields moved to model.*"
+        "now engine.* and the remaining fields moved to factory.*"
+    ),
+    "scheduler": (
+        "the scheduler group was folded into factory.*: every key is a "
+        "constructor kwarg for the stage factory"
+    ),
+    "model": (
+        "the model group was folded into factory.*: every key is a "
+        "constructor kwarg for the stage factory"
     ),
     "runtime_arg_map": (
         "runtime_arg_map was removed: stage factories take canonical "
@@ -127,7 +134,7 @@ _REMOVED_FIELD_GUIDANCE: dict[str, str] = {
     ),
     "runtime_overrides": (
         "runtime_overrides was removed: write stages.<name>.engine.*, "
-        "stages.<name>.scheduler.* or stages.<name>.model.* instead"
+        "stages.<name>.engine.* or stages.<name>.factory.* instead"
     ),
     "stage_overrides": (
         "stage_overrides was removed: per-stage settings are written under "
@@ -215,7 +222,7 @@ class ConfigPath:
                 # Per-stage-type compilation: the root config class declares
                 # which StageConfig subclass each stage name uses, so the
                 # remaining segments resolve against that stage's own fields
-                # (engine marker, model-specific model.* fields) rather than
+                # (engine marker, model-specific factory.* fields) rather than
                 # the generic base type.
                 segment = Segment(
                     raw=segment.raw,

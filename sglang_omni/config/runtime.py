@@ -5,9 +5,9 @@ Factory kwargs for a stage come from exactly two sources:
 
 * :meth:`PipelineConfig.stage_factory_kwargs` — wiring the pipeline author
   passes to the factory in code. Not a configuration path.
-* the stage's typed consumer groups — ``model.*`` and ``scheduler.*`` fields
-  pass through under their own names, and the set keys of ``engine.*``
-  travel together as one ``server_args_overrides`` mapping. Every set value
+* the stage's typed consumer groups — ``factory.*`` fields pass through
+  under their own names, and the set keys of ``engine.*`` travel together
+  as one ``server_args_overrides`` mapping. Every set value
   is passed to the factory; a factory that does not declare the parameter is
   an error, because the value the user set would otherwise be dropped on the
   floor.
@@ -25,12 +25,7 @@ import inspect
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from sglang_omni.config.schema import (
-    ModelGroup,
-    PipelineConfig,
-    SchedulerConfig,
-    StageConfig,
-)
+from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.utils.imports import import_string
 
 # Kwargs owned by placement and process construction. They are injected from
@@ -66,19 +61,19 @@ def resolve_stage_factory_kwargs(
 def resolve_stage_typed_kwargs(stage_cfg: StageConfig) -> dict[str, Any]:
     """Return the stage's set group values, keyed by factory kwarg.
 
-    ``model.*`` and ``scheduler.*`` entries pass through under their own
-    names -- declared fields when set, and free-form keys always, because
-    writing one is itself the intent. The set keys of ``engine.*`` travel
-    together as one ``server_args_overrides`` mapping.
+    ``factory.*`` entries pass through under their own names -- declared
+    fields when set, and free-form keys always, because writing one is
+    itself the intent. The set keys of ``engine.*`` travel together as one
+    ``server_args_overrides`` mapping.
     """
 
     out: dict[str, Any] = {}
-    for group in (stage_cfg.model, stage_cfg.scheduler):
-        for name in type(group).model_fields:
-            value = getattr(group, name)
-            if value is not None:
-                out[name] = value
-        out.update(group.model_extra or {})
+    group = stage_cfg.factory
+    for name in type(group).model_fields:
+        value = getattr(group, name)
+        if value is not None:
+            out[name] = value
+    out.update(group.model_extra or {})
     if stage_cfg.engine is not None:
         server_args_overrides = stage_cfg.engine.overrides()
         if server_args_overrides:
@@ -87,20 +82,11 @@ def resolve_stage_typed_kwargs(stage_cfg: StageConfig) -> dict[str, Any]:
 
 
 def typed_stage_kwarg_path(name: str) -> str:
-    """The stage-config path that produced a typed factory kwarg.
-
-    Free-form keys cannot be attributed to one group from the name alone
-    (the flat kwarg dict is all a worker process carries), so they name
-    both candidate groups.
-    """
+    """The stage-config path that produced a typed factory kwarg."""
 
     if name == "server_args_overrides":
         return "engine"
-    if name in SchedulerConfig.model_fields:
-        return f"scheduler.{name}"
-    if name in ModelGroup.model_fields:
-        return f"model.{name}"
-    return f"model.{name} / scheduler.{name}"
+    return f"factory.{name}"
 
 
 def apply_typed_stage_kwargs(
@@ -193,7 +179,7 @@ def resolve_stage_factory_args(
     asks for them.
     """
 
-    factory = import_string(stage_cfg.factory)
+    factory = import_string(stage_cfg.factory_path)
     args = apply_typed_stage_kwargs(
         factory,
         resolve_stage_factory_kwargs(stage_cfg, global_cfg),

@@ -7,7 +7,7 @@ from typing import ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -34,21 +34,21 @@ class VoxtralTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
             next=GENERATION_STAGE,
         ),
         EngineStageConfig(
             name=GENERATION_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_generation_executor",
-            model=ModelGroup(max_new_tokens=4096),
+            factory_path=f"{_PKG}.stages.create_generation_executor",
+            factory=FactoryArgs(max_new_tokens=4096),
             gpu=0,
             next=VOCODER_STAGE,
         ),
         StageConfig(
             name=VOCODER_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
             gpu=0,
             terminal=True,
         ),

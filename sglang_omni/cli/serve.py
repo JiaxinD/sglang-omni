@@ -337,7 +337,7 @@ def serve(
     Per-stage settings are dotted flags mirroring the YAML ``stages:``
     mapping, with the ``stages.`` prefix implied:
     ``--thinker.engine.mem_fraction_static 0.6``,
-    ``--vocoder.scheduler.max_concurrency 8``, ``--talker_ar.gpu 1``,
+    ``--vocoder.factory.max_concurrency 8``, ``--talker_ar.gpu 1``,
     ``--thinker.process thinker``.
     """
     logging.basicConfig(

@@ -32,20 +32,20 @@ class DotsTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
             next="reference_encode",
         ),
         StageConfig(
             name="reference_encode",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_reference_encode_executor",
+            factory_path=f"{_PKG}.stages.create_reference_encode_executor",
             gpu=0,
             next="latent_engine",
         ),
         EngineStageConfig(
             name="latent_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_latent_engine_executor",
+            factory_path=f"{_PKG}.stages.create_sglang_latent_engine_executor",
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -53,7 +53,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="vocoder",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
+            factory_path=f"{_PKG}.stages.create_vocoder_executor",
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,

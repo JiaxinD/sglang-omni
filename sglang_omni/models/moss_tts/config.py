@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -38,12 +38,13 @@ class MossTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="preprocessing",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-# Keep the standalone reference encoder off GPU. MOSS-TTS loads a
+factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            # Keep the standalone reference encoder off GPU. MOSS-TTS loads a
             # second audio-tokenizer instance for vocoding, so colocating both
             # FP32 codec copies leaves no credible runtime margin on 32 GB.
-            model=ModelGroup(device="cpu", dtype="float32"),
-            scheduler=SchedulerConfig(
+factory=FactoryArgs(
+                device="cpu",
+                dtype="float32",
                 ref_audio_cache=True,
                 ref_audio_cache_max_items=_REF_AUDIO_CACHE_MAX_ITEMS,
                 ref_audio_cache_max_bytes=_REF_AUDIO_CACHE_MAX_BYTES,
@@ -54,8 +55,8 @@ class MossTTSPipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="tts_engine",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -63,8 +64,8 @@ class MossTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name="vocoder",
             process="pipeline",
-            factory=f"{_PKG}.stages.create_vocoder_executor",
-model=ModelGroup(dtype="float32", compute_dtype="bfloat16"),
+factory_path=f"{_PKG}.stages.create_vocoder_executor",
+            factory=FactoryArgs(dtype="float32", compute_dtype="bfloat16"),
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,

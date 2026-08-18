@@ -102,8 +102,8 @@ def test_runner_specs_wire_routes_overrides_aggregation_and_streams(tmp_path) ->
             stage("preprocess", next=["thinker", "aggregate"]),
             stage(
                 "thinker",
-                factory=fake_factory_path("make_scheduler_accepting_model_path"),
-                model={"extra": "rt"},
+                factory_path=fake_factory_path("make_scheduler_accepting_model_path"),
+                factory={"extra": "rt"},
                 gpu=0,
                 next="aggregate",
                 route_fn=fake_factory_path("identity_route"),
@@ -175,7 +175,7 @@ def test_runner_specs_defer_factory_signature_import_to_child(
         stages=[
             stage(
                 "thinker",
-                factory=fake_factory_path("runtime_factory"),
+                factory_path=fake_factory_path("runtime_factory"),
                 gpu=1,
                 terminal=True,
             ),
@@ -452,7 +452,7 @@ def test_mp_runner_preserves_tp_rank_and_visible_device_contracts(tmp_path) -> N
         stages=[
             stage(
                 "thinker",
-                factory=fake_factory_path("make_scheduler_accepting_gpu_id"),
+                factory_path=fake_factory_path("make_scheduler_accepting_gpu_id"),
                 gpu=[1, 3],
                 tp_size=2,
                 terminal=True,

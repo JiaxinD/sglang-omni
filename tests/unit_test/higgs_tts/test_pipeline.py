@@ -2378,7 +2378,7 @@ def test_higgs_bounds_preprocessing_without_global_omp_default() -> None:
         stage for stage in config.stages if stage.name == "preprocessing"
     )
 
-    assert preprocessing.scheduler.max_concurrency == 2
+    assert preprocessing.factory.max_concurrency == 2
     assert "OMP_NUM_THREADS" not in config.env_defaults
     assert int(preprocessing.env["OMP_NUM_THREADS"]) >= 1
     assert int(preprocessing.env["OMP_NUM_THREADS"]) <= 8

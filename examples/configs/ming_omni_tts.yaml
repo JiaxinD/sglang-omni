@@ -4,34 +4,32 @@ name: ming-omni-tts
 stages:
   preprocessing:
     process: preprocessing
-    factory: sglang_omni.models.ming_tts.stages.create_preprocessing_executor
-    model:
+    factory_path: sglang_omni.models.ming_tts.stages.create_preprocessing_executor
+    factory:
       context_length: 8192
       max_decode_steps_cap: 256
-    scheduler:
       max_concurrency: 1
     next: reference_encode
 
   reference_encode:
     process: ming_tts_aux
-    factory: sglang_omni.models.ming_tts.stages.create_reference_encode_executor
+    factory_path: sglang_omni.models.ming_tts.stages.create_reference_encode_executor
     gpu: 0
     gpu_memory_fraction: 0.08
-    model:
+    factory:
       dtype: bfloat16
       context_length: 8192
-    scheduler:
       max_concurrency: 1
     next: tts_engine
 
   tts_engine:
     process: tts_engine
-    factory: sglang_omni.models.ming_tts.stages.create_sglang_tts_engine_executor
+    factory_path: sglang_omni.models.ming_tts.stages.create_sglang_tts_engine_executor
     gpu: 0
     tp_size: 1
     gpu_memory_fraction: 0.72
     stream_to: [audio_decode]
-    model:
+    factory:
       dtype: bfloat16
       context_length: 8192
     engine:
@@ -51,15 +49,14 @@ stages:
 
   audio_decode:
     process: ming_tts_aux
-    factory: sglang_omni.models.ming_tts.stages.create_audio_decode_executor
+    factory_path: sglang_omni.models.ming_tts.stages.create_audio_decode_executor
     gpu: 0
     gpu_memory_fraction: 0.12
-    model:
+    factory:
       dtype: bfloat16
       decode_mode: chunked
       initial_chunk_patches: 2
       steady_chunk_patches: 4
-    scheduler:
       max_batch_size: 1
       max_batch_wait_ms: 0
     terminal: true

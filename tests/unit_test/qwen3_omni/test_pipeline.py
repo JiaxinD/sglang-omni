@@ -797,13 +797,13 @@ def test_qwen_encoder_mem_reserve_routes_as_scheduler_group_value() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
     merged = ConfigManager(config).merge_config(
-        [("thinker.scheduler.encoder_mem_reserve", "0.15")]
+        [("thinker.factory.encoder_mem_reserve", "0.15")]
     )
 
     thinker_args = resolve_stage_factory_args(_stage(merged, "thinker"), merged)
     assert thinker_args["encoder_mem_reserve"] == 0.15
     assert "encoder_mem_reserve" not in thinker_args.get("server_args_overrides", {})
-    assert _stage(merged, "talker_ar").scheduler.encoder_mem_reserve is None
+    assert _stage(merged, "talker_ar").factory.encoder_mem_reserve is None
 
 
 @pytest.mark.parametrize(

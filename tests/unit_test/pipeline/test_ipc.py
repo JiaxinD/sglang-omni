@@ -66,7 +66,7 @@ def _make_config(base_path: Path) -> PipelineConfig:
             StageConfig(
                 name="preprocessing",
                 process="pipeline",
-                factory=f"{__name__}.noop_factory",
+                factory_path=f"{__name__}.noop_factory",
                 terminal=True,
             )
         ],
@@ -291,7 +291,7 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
             StageConfig(
                 name="preprocessing",
                 process="pipeline",
-                factory=f"{__name__}.failing_factory",
+                factory_path=f"{__name__}.failing_factory",
                 terminal=True,
             )
         ],

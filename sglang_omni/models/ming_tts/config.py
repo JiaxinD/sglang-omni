@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -183,25 +183,25 @@ class MingTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            factory_args={
-                "max_decode_steps_cap": MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP
-            },
+factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(
+                max_decode_steps_cap=MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP,
+            ),
             next=REFERENCE_ENCODE_STAGE,
         ),
         StageConfig(
             name=REFERENCE_ENCODE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_reference_encode_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_reference_encode_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             next=TTS_ENGINE_STAGE,
         ),
         EngineStageConfig(
             name=TTS_ENGINE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            model=ModelGroup(dtype="bfloat16"),
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FactoryArgs(dtype="bfloat16"),
             gpu=0,
             next=AUDIO_DECODE_STAGE,
             stream_to=[AUDIO_DECODE_STAGE],
@@ -209,14 +209,12 @@ class MingTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name=AUDIO_DECODE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_audio_decode_executor",
-model=ModelGroup(
+factory_path=f"{_PKG}.stages.create_audio_decode_executor",
+            factory=FactoryArgs(
                 dtype="bfloat16",
                 decode_mode="chunked",
                 initial_chunk_patches=MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES,
                 steady_chunk_patches=MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES,
-            ),
-            scheduler=SchedulerConfig(
                 max_batch_size=MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE,
                 max_batch_wait_ms=MING_TTS_AUDIO_DECODE_MAX_BATCH_WAIT_MS,
             ),

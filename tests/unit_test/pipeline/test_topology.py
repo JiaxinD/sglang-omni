@@ -35,7 +35,7 @@ def _stage(
 ) -> StageConfig:
     return StageConfig(
         name=name,
-        factory=_FACTORY,
+        factory_path=_FACTORY,
         gpu=gpu,
         process=process,
         tp_size=tp_size,

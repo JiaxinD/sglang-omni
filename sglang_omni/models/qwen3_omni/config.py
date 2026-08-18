@@ -9,10 +9,9 @@ from pydantic import Field
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     PlacementConfig,
-    SchedulerConfig,
     StageConfig,
 )
 from sglang_omni.platforms import current_platform
@@ -44,8 +43,8 @@ def _preprocessing_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name="preprocessing",
         process=process,
-        factory=f"{_PKG}.stages.create_preprocessing_executor",
-        model=ModelGroup(max_seq_len=8192),
+        factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+        factory=FactoryArgs(max_seq_len=8192),
         next=["image_encoder", "audio_encoder", "mm_aggregate"],
         route_fn=f"{_PKG}.request_builders.resolve_preprocessing_next_stages",
         project_payload={
@@ -66,7 +65,7 @@ def _image_encoder_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name="image_encoder",
         process=process,
-        factory=f"{_PKG}.stages.create_image_encoder_executor",
+        factory_path=f"{_PKG}.stages.create_image_encoder_executor",
         gpu=gpu,
         next="mm_aggregate",
         project_payload={
@@ -79,8 +78,8 @@ def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name="audio_encoder",
         process=process,
-        factory=f"{_PKG}.stages.create_audio_encoder_executor",
-        model=ModelGroup(enable_layer_cuda_graph=True),
+        factory_path=f"{_PKG}.stages.create_audio_encoder_executor",
+        factory=FactoryArgs(enable_layer_cuda_graph=True),
         gpu=gpu,
         next="mm_aggregate",
         disable_direct_cuda_ipc_payload=True,
@@ -99,7 +98,7 @@ def _aggregate_stage(
         return StageConfig(
             name="mm_aggregate",
             process=process,
-            factory=f"{_PKG}.stages.create_aggregate_executor",
+            factory_path=f"{_PKG}.stages.create_aggregate_executor",
             gpu=gpu,
             wait_for=["preprocessing", "image_encoder", "audio_encoder"],
             wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
@@ -116,7 +115,7 @@ def _aggregate_stage(
     return StageConfig(
         name="mm_aggregate",
         process=process,
-        factory=f"{_PKG}.stages.create_aggregate_executor",
+        factory_path=f"{_PKG}.stages.create_aggregate_executor",
         gpu=gpu,
         wait_for=["preprocessing", "image_encoder", "audio_encoder"],
         wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
@@ -131,9 +130,8 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
     return EngineStageConfig(
         name="thinker",
         process=process,
-        factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        model=ModelGroup(max_seq_len=8192),
-        scheduler=SchedulerConfig(enable_async_decode=True),
+        factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
+        factory=FactoryArgs(max_seq_len=8192, enable_async_decode=True),
         gpu=gpu,
         next="decode",
         stream_to=["talker_ar", "decode"] if speech_enabled else ["decode"],
@@ -157,7 +155,7 @@ def _decode_stage(*, process: str) -> StageConfig:
     return StageConfig(
         name="decode",
         process=process,
-        factory=f"{_PKG}.stages.create_decode_executor",
+        factory_path=f"{_PKG}.stages.create_decode_executor",
         terminal=True,
         can_accept_stream_before_payload=True,
     )
@@ -172,7 +170,7 @@ def _talker_stage(
     return EngineStageConfig(
         name="talker_ar",
         process=process,
-        factory=f"{_PKG}.stages.create_talker_ar_executor_from_config",
+        factory_path=f"{_PKG}.stages.create_talker_ar_executor_from_config",
         # Note (Xuesong): max_seq_len must exceed talker_max_new_tokens (4096)
         # + prefill, else req_to_token_pool OOBs and crashes talker_ar.
         # Note (Chenyang): bumped 8192 → 32768 because the V1 talker
@@ -180,8 +178,8 @@ def _talker_stage(
         # embeddings, and a 30-frame video prompt is ~22K positions,
         # which overflows 8192 and triggers a FusedAddRMSNorm illegal
         # memory access in the talker forward.
-        model=ModelGroup(max_seq_len=32768),
-        scheduler=SchedulerConfig(
+        factory=FactoryArgs(
+            max_seq_len=32768,
             enable_partial_start=enable_partial_start,
             partial_start_min_chunks=5,
         ),
@@ -199,7 +197,7 @@ def _code2wav_stage(*, gpu: int, process: str) -> StageConfig:
     return StageConfig(
         name="code2wav",
         process=process,
-        factory=f"{_PKG}.components.code2wav_scheduler.create_code2wav_scheduler",
+        factory_path=f"{_PKG}.components.code2wav_scheduler.create_code2wav_scheduler",
         gpu=gpu,
         gpu_memory_fraction=0.02,
         terminal=True,

@@ -186,7 +186,7 @@ def test_hard_custom_all_reduce_disable_is_not_topology_relaxed(
         stages=[
             EngineStageConfig(
                 name="thinker",
-                factory="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
+                factory_path="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
                 gpu=[0, 1],
                 tp_size=2,
                 process="thinker",
@@ -240,7 +240,7 @@ def test_topology_gated_custom_all_reduce_reuses_topology_decision(
         stages=[
             EngineStageConfig(
                 name="thinker",
-                factory="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
+                factory_path="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
                 gpu=[0, 1],
                 tp_size=2,
                 process="thinker",
@@ -248,7 +248,7 @@ def test_topology_gated_custom_all_reduce_reuses_topology_decision(
             ),
             EngineStageConfig(
                 name="encoder",
-                factory="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
+                factory_path="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
                 gpu=[0, 1],
                 tp_size=2,
                 process="encoder",

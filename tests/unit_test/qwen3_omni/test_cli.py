@@ -26,7 +26,7 @@ class _DummyManager:
                 StageConfig(
                     name="stage",
                     process="pipeline",
-                    factory="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
+                    factory_path="tests.unit_test.fixtures.pipeline_fakes.dummy_factory",
                     terminal=True,
                 )
             ],
@@ -267,12 +267,12 @@ def test_qwen_encoder_mem_reserve_dotted_flag_targets_thinker(config_cls):
     config = config_cls(model_path="dummy")
 
     merged = ConfigManager(config).merge_config(
-        [("thinker.scheduler.encoder_mem_reserve", "0.05")]
+        [("thinker.factory.encoder_mem_reserve", "0.05")]
     )
 
-    assert _stage(merged, "thinker").scheduler.encoder_mem_reserve == 0.05
+    assert _stage(merged, "thinker").factory.encoder_mem_reserve == 0.05
     if isinstance(merged, Qwen3OmniSpeechPipelineConfig):
-        assert _stage(merged, "talker_ar").scheduler.encoder_mem_reserve is None
+        assert _stage(merged, "talker_ar").factory.encoder_mem_reserve is None
 
 
 def test_dotted_gpu_flags_move_stages(monkeypatch):
@@ -335,13 +335,13 @@ def test_partial_start_dotted_flag_can_disable_and_enable():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
     disabled = ConfigManager(config).merge_config(
-        [("talker_ar.scheduler.enable_partial_start", "false")]
+        [("talker_ar.factory.enable_partial_start", "false")]
     )
     talker = _stage(disabled, "talker_ar")
     assert resolve_stage_factory_args(talker, disabled)["enable_partial_start"] is False
 
     enabled = ConfigManager(config).merge_config(
-        [("talker_ar.scheduler.enable_partial_start", "true")]
+        [("talker_ar.factory.enable_partial_start", "true")]
     )
     talker = _stage(enabled, "talker_ar")
     assert resolve_stage_factory_args(talker, enabled)["enable_partial_start"] is True
@@ -351,7 +351,7 @@ def test_partial_start_dotted_flag_rejects_a_non_boolean():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
     with pytest.raises(Exception, match="bool"):
         ConfigManager(config).merge_config(
-            [("talker_ar.scheduler.enable_partial_start", "bogus")]
+            [("talker_ar.factory.enable_partial_start", "bogus")]
         )
 
 
@@ -359,5 +359,5 @@ def test_partial_start_flag_on_a_missing_stage_names_the_real_ones():
     config = Qwen3OmniPipelineConfig(model_path="dummy")
     with pytest.raises(Exception, match="thinker"):
         ConfigManager(config).merge_config(
-            [("talker_ar.scheduler.enable_partial_start", "true")]
+            [("talker_ar.factory.enable_partial_start", "true")]
         )

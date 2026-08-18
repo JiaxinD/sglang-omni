@@ -25,7 +25,7 @@ def _stage(
     return StageConfig(
         name=name,
         process="pipeline",
-        factory=_FACTORY,
+        factory_path=_FACTORY,
         gpu=gpu,
         tp_size=tp_size,
         gpu_memory_fraction=fraction,

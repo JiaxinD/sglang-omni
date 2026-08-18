@@ -7,7 +7,7 @@ from typing import ClassVar
 
 from sglang_omni.config import (
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     StageConfig,
 )
@@ -36,30 +36,30 @@ class LLaDA2UniPipelineConfig(PipelineConfig):
         StageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_preprocessing_executor",
-            model=ModelGroup(max_seq_len=8192),
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory=FactoryArgs(max_seq_len=8192),
             next=IMAGE_STAGE,
         ),
         StageConfig(
             name=IMAGE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_image_encoder_executor",
-            model=ModelGroup(device="cuda"),
+            factory_path=f"{_PKG}.stages.create_image_encoder_executor",
+            factory=FactoryArgs(device="cuda"),
             gpu=0,
             next=THINKER_STAGE,
         ),
         EngineStageConfig(
             name=THINKER_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_sglang_dllm_thinker_executor_from_config",
-            model=ModelGroup(max_seq_len=8192),
+            factory_path=f"{_PKG}.stages.create_sglang_dllm_thinker_executor_from_config",
+            factory=FactoryArgs(max_seq_len=8192),
             gpu=0,
             next=DECODE_STAGE,
         ),
         StageConfig(
             name=DECODE_STAGE,
             process="pipeline",
-            factory=f"{_PKG}.stages.create_decode_executor",
+            factory_path=f"{_PKG}.stages.create_decode_executor",
             terminal=True,
         ),
     ]

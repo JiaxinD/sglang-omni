@@ -6,7 +6,7 @@ import pytest
 from sglang_omni.config import (
     EngineArgs,
     EngineStageConfig,
-    ModelGroup,
+    FactoryArgs,
     PipelineConfig,
     PlacementConfig,
     StageConfig,
@@ -19,7 +19,7 @@ def _stage(**kwargs) -> StageConfig:
     data = {
         "name": "stage",
         "process": "pipeline",
-        "factory": _FACTORY,
+        "factory_path": _FACTORY,
         "terminal": True,
     }
     data.update(kwargs)
@@ -34,7 +34,7 @@ def _engine_stage(**kwargs) -> EngineStageConfig:
     data = {
         "name": "stage",
         "process": "pipeline",
-        "factory": _FACTORY,
+        "factory_path": _FACTORY,
         "terminal": True,
     }
     data.update(kwargs)
@@ -45,15 +45,14 @@ def test_stage_accepts_typed_values_in_every_consumer_group() -> None:
     stage = _engine_stage(
         gpu_memory_fraction=0.25,
         engine={"mem_fraction_static": 0.7},
-        scheduler={"max_concurrency": 4},
-        model={"max_seq_len": 8192, "video_fps": 2.0},
+        factory={"max_concurrency": 4, "max_seq_len": 8192, "video_fps": 2.0},
     )
 
     assert stage.gpu_memory_fraction == 0.25
     assert stage.engine.mem_fraction_static == 0.7
-    assert stage.scheduler.max_concurrency == 4
-    assert stage.model.max_seq_len == 8192
-    assert stage.model.video_fps == 2.0
+    assert stage.factory.max_concurrency == 4
+    assert stage.factory.max_seq_len == 8192
+    assert stage.factory.video_fps == 2.0
 
 
 def test_invalid_gpu_memory_fraction_raises() -> None:
@@ -68,9 +67,9 @@ def test_invalid_engine_mem_fraction_static_raises() -> None:
 
 def test_invalid_model_group_values_raise() -> None:
     with pytest.raises(ValueError, match="max_seq_len"):
-        ModelGroup(max_seq_len=0)
+        FactoryArgs(max_seq_len=0)
     with pytest.raises(ValueError, match="video_fps"):
-        ModelGroup(video_fps=-1.0)
+        FactoryArgs(video_fps=-1.0)
 
 
 def test_the_engine_block_is_refused_off_engine_stages() -> None:
@@ -83,12 +82,12 @@ def test_undeclared_group_keys_pass_through_to_the_consumer() -> None:
     schema keeps unknown keys instead of guessing at their legality."""
     stage = _engine_stage(
         engine={"disable_radix_cache": True},
-        scheduler={"made_up_knob": 7},
-        model={"lookahead": 9},
+        factory={"made_up_knob": 7},
+        factory={"lookahead": 9},
     )
 
     assert stage.engine.overrides()["disable_radix_cache"] is True
-    assert stage.scheduler.model_extra["made_up_knob"] == 7
+    assert stage.factory.model_extra["made_up_knob"] == 7
     assert stage.model.model_extra["lookahead"] == 9
 
 
