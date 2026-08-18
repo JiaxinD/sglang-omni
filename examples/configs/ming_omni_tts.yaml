@@ -54,7 +54,6 @@ stages:
     gpu_memory_fraction: 0.12
     factory:
       dtype: bfloat16
-      decode_mode: chunked
       initial_chunk_patches: 2
       steady_chunk_patches: 4
       max_batch_size: 1

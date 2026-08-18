@@ -82,13 +82,12 @@ def test_undeclared_group_keys_pass_through_to_the_consumer() -> None:
     schema keeps unknown keys instead of guessing at their legality."""
     stage = _engine_stage(
         engine={"disable_radix_cache": True},
-        factory={"made_up_knob": 7},
-        factory={"lookahead": 9},
+        factory={"made_up_knob": 7, "lookahead": 9},
     )
 
     assert stage.engine.overrides()["disable_radix_cache"] is True
     assert stage.factory.model_extra["made_up_knob"] == 7
-    assert stage.model.model_extra["lookahead"] == 9
+    assert stage.factory.model_extra["lookahead"] == 9
 
 
 def test_stage_rejects_terminal_with_next() -> None:

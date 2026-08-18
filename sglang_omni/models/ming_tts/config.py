@@ -183,7 +183,7 @@ class MingTTSPipelineConfig(PipelineConfig):
         StageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
-factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            factory_path=f"{_PKG}.stages.create_preprocessing_executor",
             factory=FactoryArgs(
                 max_decode_steps_cap=MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP,
             ),
@@ -209,10 +209,9 @@ factory_path=f"{_PKG}.stages.create_preprocessing_executor",
         StageConfig(
             name=AUDIO_DECODE_STAGE,
             process="pipeline",
-factory_path=f"{_PKG}.stages.create_audio_decode_executor",
+            factory_path=f"{_PKG}.stages.create_audio_decode_executor",
             factory=FactoryArgs(
                 dtype="bfloat16",
-                decode_mode="chunked",
                 initial_chunk_patches=MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES,
                 steady_chunk_patches=MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES,
                 max_batch_size=MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE,
@@ -230,64 +229,51 @@ factory_path=f"{_PKG}.stages.create_audio_decode_executor",
         preprocessing = stages[PREPROCESSING_STAGE]
         audio_decode = stages[AUDIO_DECODE_STAGE]
 
-        preprocessing_overrides = self.runtime_overrides.get(PREPROCESSING_STAGE, {})
-        if "max_decode_steps_cap" in preprocessing_overrides:
-            raise ValueError(
-                "Ming-Omni-TTS max_decode_steps_cap is owned by "
-                "preprocessing.factory_args, not runtime_overrides"
-            )
-        max_decode_steps_cap = preprocessing.factory_args.setdefault(
-            "max_decode_steps_cap", MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP
-        )
-        if max_decode_steps_cap is not None and (
+        max_decode_steps_cap = preprocessing.factory.max_decode_steps_cap
+        if max_decode_steps_cap is None:
+            max_decode_steps_cap = MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP
+        if (
             isinstance(max_decode_steps_cap, bool)
             or not isinstance(max_decode_steps_cap, int)
             or max_decode_steps_cap <= 0
         ):
             raise ValueError(
-                "Ming-Omni-TTS preprocessing.factory_args.max_decode_steps_cap "
+                "Ming-Omni-TTS preprocessing factory.max_decode_steps_cap "
                 "must be a positive integer or null"
             )
 
-        audio_decode_overrides = self.runtime_overrides.get(AUDIO_DECODE_STAGE, {})
-        for field_name in ("initial_chunk_patches", "steady_chunk_patches"):
-            if field_name in audio_decode_overrides:
-                raise ValueError(
-                    f"Ming-Omni-TTS {field_name} is owned by "
-                    "audio_decode.factory_args, not runtime_overrides"
-                )
-        initial_chunk_patches = audio_decode.factory_args.setdefault(
+        decode_extra = audio_decode.factory.model_extra or {}
+        initial_chunk_patches = decode_extra.get(
             "initial_chunk_patches", MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES
         )
-        steady_chunk_patches = audio_decode.factory_args.setdefault(
+        steady_chunk_patches = decode_extra.get(
             "steady_chunk_patches", MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES
         )
         validate_ming_tts_audio_decode_cadence_config(
             initial_chunk_patches=initial_chunk_patches,
             steady_chunk_patches=steady_chunk_patches,
         )
-        if "decode_mode" in audio_decode.factory_args or (
-            "decode_mode" in audio_decode_overrides
-        ):
+        if "decode_mode" in decode_extra:
             raise ValueError(
                 "Ming-Omni-TTS audio_decode no longer supports 'decode_mode'. "
-                "Non-streaming requests always use full-sequence AudioVAE decode; "
-                "streaming requests use incremental decode. Remove 'decode_mode' "
-                "from audio_decode factory_args/runtime_overrides."
+                "Non-streaming requests always use full-sequence AudioVAE "
+                "decode; streaming requests use incremental decode. Remove "
+                "'decode_mode' from the audio_decode factory group."
             )
+        max_batch_wait_ms = audio_decode.factory.max_batch_wait_ms
+        if max_batch_wait_ms is None:
+            max_batch_wait_ms = MING_TTS_AUDIO_DECODE_MAX_BATCH_WAIT_MS
+        elif float(max_batch_wait_ms).is_integer():
+            # The factory group declares the wait as a float; the batch
+            # contract below is written against whole milliseconds.
+            max_batch_wait_ms = int(max_batch_wait_ms)
         validate_ming_tts_audio_decode_batch_config(
-            max_batch_size=audio_decode_overrides.get(
-                "max_batch_size",
-                audio_decode.factory_args.get(
-                    "max_batch_size", MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE
-                ),
+            max_batch_size=(
+                audio_decode.factory.max_batch_size
+                if audio_decode.factory.max_batch_size is not None
+                else MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE
             ),
-            max_batch_wait_ms=audio_decode_overrides.get(
-                "max_batch_wait_ms",
-                audio_decode.factory_args.get(
-                    "max_batch_wait_ms", MING_TTS_AUDIO_DECODE_MAX_BATCH_WAIT_MS
-                ),
-            ),
+            max_batch_wait_ms=max_batch_wait_ms,
         )
 
         for stage in self.stages:

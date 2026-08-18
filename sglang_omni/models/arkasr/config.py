@@ -31,7 +31,7 @@ class ArkasrPipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="asr",
             process="asr",
-factory_path=f"{_PKG}.stages.create_sglang_arkasr_executor",
+            factory_path=f"{_PKG}.stages.create_sglang_arkasr_executor",
             factory=FactoryArgs(
                 device="cuda:0",
                 max_new_tokens=256,

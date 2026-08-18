@@ -19,6 +19,7 @@ from sglang_omni.utils.cpu import bounded_intraop_threads
 
 _PKG = "sglang_omni.models.moss_transcribe_diarize"
 _REQUEST_BUILD_MAX_WORKERS = 8
+_ENCODER_MAX_BATCH_SIZE = 2
 _ENCODER_CACHE_SIZE_BYTES = 4 * 1024**3
 _MAX_PIPELINE_INTRAOP_THREADS = 8
 
@@ -39,7 +40,7 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
         EngineStageConfig(
             name="asr",
             process="asr",
-factory_path=f"{_PKG}.stages.create_sglang_moss_transcribe_diarize_executor",
+            factory_path=f"{_PKG}.stages.create_sglang_moss_transcribe_diarize_executor",
             factory=FactoryArgs(
                 device="cuda:0",
                 encoder_cache_size_bytes=4 * 1024**3,

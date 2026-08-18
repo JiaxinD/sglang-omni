@@ -71,18 +71,22 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
         ),
     ]
 
-    def model_post_init(self, __context: Any = None) -> None:
-        super().model_post_init(__context)
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
         if not self.enable_deterministic_inference:
-            return
-
-        self.runtime_overrides.setdefault("preprocessing", {})["max_concurrency"] = 1
-        tts_engine = self.runtime_overrides.setdefault("tts_engine", {})
-        server_args = tts_engine.setdefault("server_args_overrides", {})
-        server_args["enable_deterministic_inference"] = True
-        vocoder = self.runtime_overrides.setdefault("vocoder", {})
-        vocoder["enable_deterministic_inference"] = True
-        vocoder["initial_cuda_graph"] = False
+            return {}
+        # note (0xtoward): deterministic inference serializes preprocessing
+        # and vocoder decoding and disables the initial vocoder CUDA graph;
+        # applied at launch so an explicit factory.* value still wins.
+        if stage_name == "preprocessing":
+            return {"max_concurrency": 1}
+        if stage_name == "tts_engine":
+            return {"server_args_overrides": {"enable_deterministic_inference": True}}
+        if stage_name == "vocoder":
+            return {
+                "enable_deterministic_inference": True,
+                "initial_cuda_graph": False,
+            }
+        return {}
 
     def requires_uploaded_voice_for_named_voice(self) -> bool:
         return _is_qwen3_tts_base_model(self.model_path)

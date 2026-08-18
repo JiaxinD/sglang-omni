@@ -64,6 +64,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
         super().model_post_init(__context)
         if any(stage.tp_size != 1 for stage in self.stages):
             raise ValueError("dots.tts currently supports tp_size=1 only")
+
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
         if stage_name == "vocoder":
             # note (guozhihao-224): stream_slots must match backbone
