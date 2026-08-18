@@ -5,7 +5,14 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineArgs,
+    EngineStageConfig,
+    ModelGroup,
+    PipelineConfig,
+    SchedulerConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.arkasr"
 
@@ -15,29 +22,35 @@ class ArkasrPipelineConfig(PipelineConfig):
 
     architecture: ClassVar[str] = "ArkasrForConditionalGeneration"
 
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "asr": EngineStageConfig,
+    }
+
     model_path: str
     entry_stage: str = "asr"
     stages: list[StageConfig] = [
-        StageConfig(
+        EngineStageConfig(
             name="asr",
             process="asr",
             factory=f"{_PKG}.stages.create_sglang_arkasr_executor",
-            factory_args={
-                "device": "cuda:0",
-                "max_running_requests": 32,
-                "encoder_max_batch_size": 8,
-                "max_new_tokens": 256,
-                "request_build_max_workers": 2,
-                "request_build_max_pending": 16,
-                "enable_pre_lm_encoder": True,
-                "pre_lm_cache_max_entries": 4096,
-                "pre_lm_cache_size_bytes": 2 * 1024**3,
+            model=ModelGroup(
+                device="cuda:0",
+                max_new_tokens=256,
+                encoder_max_batch_size=8,
+                enable_pre_lm_encoder=True,
+                pre_lm_cache_max_entries=4096,
+                pre_lm_cache_size_bytes=2 * 1024**3,
                 # Note (Akazaakane): One drained group maps to exactly one
                 # encoder microbatch at the matching encoder_max_batch_size.
-                "pre_lm_max_batch_size": 8,
-                "pre_lm_max_batch_wait_ms": 0,
-                "pre_lm_max_pending": 32,
-            },
+                pre_lm_max_batch_size=8,
+                pre_lm_max_batch_wait_ms=0,
+                pre_lm_max_pending=32,
+            ),
+            engine=EngineArgs(max_running_requests=32),
+            scheduler=SchedulerConfig(
+                request_build_max_workers=2,
+                request_build_max_pending=16,
+            ),
             gpu=0,
             terminal=True,
         )

@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    ModelGroup,
+    PipelineConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.ming_tts"
 
@@ -168,37 +173,9 @@ class MingTTSPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "BailingMMNativeForConditionalGeneration"
     requires_model_capabilities: ClassVar[bool] = True
 
-    @classmethod
-    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": TTS_ENGINE_STAGE}
-
-    @classmethod
-    def talker_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": TTS_ENGINE_STAGE}
-
-    @classmethod
-    def generation_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"generation": TTS_ENGINE_STAGE}
-
-    @classmethod
-    def isolation_role_to_stage(cls) -> dict[str, str]:
-        return {"vocoder": AUDIO_DECODE_STAGE}
-
-    @classmethod
-    def process_safe_edges(cls) -> frozenset[tuple[str, str]]:
-        return frozenset({(TTS_ENGINE_STAGE, AUDIO_DECODE_STAGE)})
-
-    @classmethod
-    def process_edge_resources(
-        cls,
-    ) -> dict[tuple[str, str], dict[str, float]]:
-        return {
-            (TTS_ENGINE_STAGE, AUDIO_DECODE_STAGE): {
-                REFERENCE_ENCODE_STAGE: 0.08,
-                TTS_ENGINE_STAGE: 0.72,
-                AUDIO_DECODE_STAGE: 0.12,
-            }
-        }
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        TTS_ENGINE_STAGE: EngineStageConfig,
+    }
 
     model_path: str
     entry_stage: str = PREPROCESSING_STAGE
@@ -216,15 +193,15 @@ class MingTTSPipelineConfig(PipelineConfig):
             name=REFERENCE_ENCODE_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_reference_encode_executor",
-            factory_args={"dtype": "bfloat16"},
+            model=ModelGroup(dtype="bfloat16"),
             gpu=0,
             next=TTS_ENGINE_STAGE,
         ),
-        StageConfig(
+        EngineStageConfig(
             name=TTS_ENGINE_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            factory_args={"dtype": "bfloat16"},
+            model=ModelGroup(dtype="bfloat16"),
             gpu=0,
             next=AUDIO_DECODE_STAGE,
             stream_to=[AUDIO_DECODE_STAGE],
@@ -233,13 +210,16 @@ class MingTTSPipelineConfig(PipelineConfig):
             name=AUDIO_DECODE_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_audio_decode_executor",
-            factory_args={
-                "dtype": "bfloat16",
-                "initial_chunk_patches": MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES,
-                "steady_chunk_patches": MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES,
-                "max_batch_size": MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE,
-                "max_batch_wait_ms": MING_TTS_AUDIO_DECODE_MAX_BATCH_WAIT_MS,
-            },
+model=ModelGroup(
+                dtype="bfloat16",
+                decode_mode="chunked",
+                initial_chunk_patches=MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES,
+                steady_chunk_patches=MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES,
+            ),
+            scheduler=SchedulerConfig(
+                max_batch_size=MING_TTS_AUDIO_DECODE_MAX_BATCH_SIZE,
+                max_batch_wait_ms=MING_TTS_AUDIO_DECODE_MAX_BATCH_WAIT_MS,
+            ),
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,

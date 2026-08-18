@@ -6,7 +6,12 @@ from __future__ import annotations
 import re
 from typing import Any, ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    ModelGroup,
+    PipelineConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.qwen3_tts"
 _QWEN3_TTS_CUSTOM_VARIANT_MARKERS = (
@@ -23,9 +28,9 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Qwen3TTSForConditionalGeneration"
     requires_model_capabilities: ClassVar[bool] = True
 
-    @classmethod
-    def generation_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"generation": "tts_engine"}
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "tts_engine": EngineStageConfig,
+    }
 
     @classmethod
     def generation_admission_defaults(cls) -> dict[str, Any]:
@@ -33,34 +38,6 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
 
         defaults = Qwen3TtsEngineBuilder().generation_defaults(dtype="bfloat16")
         return {k: defaults[k] for k in ("max_running_requests", "max_queued_requests")}
-
-    @classmethod
-    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def talker_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def process_safe_edges(cls) -> frozenset[tuple[str, str]]:
-        # Note (Akazaakane): preprocessing -> tts_engine is excluded because
-        # preprocessing stores prepared requests in the module-level
-        # _PREPROCESSING_CONTEXT/_PREPARED_REQUESTS registries that the AR engine
-        # builder reads in-process. The vocoder loads its own speech tokenizer and
-        # reads audio_codes from the payload.
-        return frozenset({("tts_engine", "vocoder")})
-
-    @classmethod
-    def process_edge_resources(
-        cls,
-    ) -> dict[tuple[str, str], dict[str, float]]:
-        return {
-            ("tts_engine", "vocoder"): {
-                "tts_engine": 0.85,
-                "vocoder": 0.10,
-            }
-        }
 
     model_path: str
     # note (0xtoward): Keep deterministic inference opt-in because it serializes
@@ -74,11 +51,11 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
             factory=f"{_PKG}.stages.create_preprocessing_executor",
             next="tts_engine",
         ),
-        StageConfig(
+        EngineStageConfig(
             name="tts_engine",
             process="pipeline",
             factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            factory_args={"dtype": "bfloat16"},
+            model=ModelGroup(dtype="bfloat16"),
             gpu=0,
             next="vocoder",
             stream_to=["vocoder"],
@@ -87,7 +64,7 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
             name="vocoder",
             process="pipeline",
             factory=f"{_PKG}.stages.create_vocoder_executor",
-            factory_args={"dtype": "bfloat16"},
+            model=ModelGroup(dtype="bfloat16"),
             gpu=0,
             terminal=True,
             can_accept_stream_before_payload=True,

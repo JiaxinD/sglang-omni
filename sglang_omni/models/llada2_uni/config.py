@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    ModelGroup,
+    PipelineConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.llada2_uni"
 
@@ -22,9 +27,9 @@ class LLaDA2UniPipelineConfig(PipelineConfig):
 
     architecture: ClassVar[str] = "LLaDA2MoeModelLM"
 
-    @classmethod
-    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
-        return {THINKER_STAGE: THINKER_STAGE}
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        THINKER_STAGE: EngineStageConfig,
+    }
 
     model_path: str
     stages: list[StageConfig] = [
@@ -32,23 +37,22 @@ class LLaDA2UniPipelineConfig(PipelineConfig):
             name=PREPROCESSING_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_preprocessing_executor",
-            factory_args={"thinker_max_seq_len": 8192},
-            runtime_arg_map={"max_seq_len": "thinker_max_seq_len"},
+            model=ModelGroup(max_seq_len=8192),
             next=IMAGE_STAGE,
         ),
         StageConfig(
             name=IMAGE_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_image_encoder_executor",
-            factory_args={"device": "cuda", "dtype": None},
+            model=ModelGroup(device="cuda"),
             gpu=0,
             next=THINKER_STAGE,
         ),
-        StageConfig(
+        EngineStageConfig(
             name=THINKER_STAGE,
             process="pipeline",
             factory=f"{_PKG}.stages.create_sglang_dllm_thinker_executor_from_config",
-            factory_args={"thinker_max_seq_len": 8192},
+            model=ModelGroup(max_seq_len=8192),
             gpu=0,
             next=DECODE_STAGE,
         ),

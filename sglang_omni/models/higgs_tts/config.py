@@ -6,10 +6,11 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from sglang_omni.config import (
+    EngineStageConfig,
+    ModelGroup,
     PipelineConfig,
+    SchedulerConfig,
     StageConfig,
-    StageResourceConfig,
-    StageRuntimeConfig,
 )
 from sglang_omni.utils.cpu import bounded_intraop_threads
 
@@ -29,30 +30,9 @@ class HiggsTtsPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "HiggsMultimodalQwen3ForConditionalGeneration"
     requires_model_capabilities: ClassVar[bool] = True
 
-    @classmethod
-    def generation_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"generation": "tts_engine"}
-
-    @classmethod
-    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def talker_sglang_role_to_stage(cls) -> dict[str, str]:
-        return {"talker": "tts_engine"}
-
-    @classmethod
-    def process_safe_edges(cls) -> frozenset[tuple[str, str]]:
-        # Note (Akazaakane): every handoff travels as HiggsTtsState in the payload and
-        # the stages only share process-local caches, which re-fill on a miss. No
-        # resource contract is needed because all three GPU stages declare fractions.
-        return frozenset(
-            {
-                ("preprocessing", "audio_encoder"),
-                ("audio_encoder", "tts_engine"),
-                ("tts_engine", "vocoder"),
-            }
-        )
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "tts_engine": EngineStageConfig,
+    }
 
     model_path: str
     stages: list[StageConfig] = [
@@ -60,33 +40,26 @@ class HiggsTtsPipelineConfig(PipelineConfig):
             name="preprocessing",
             process="tts_frontend",
             factory=f"{_PKG}.stages.create_preprocessing_executor",
-            factory_args={"max_concurrency": _PREPROCESS_MAX_WORKERS},
+            scheduler=SchedulerConfig(max_concurrency=_PREPROCESS_MAX_WORKERS),
             next="audio_encoder",
         ),
         StageConfig(
             name="audio_encoder",
             process="tts_frontend",
             factory=f"{_PKG}.stages.create_audio_encoder_executor",
-            factory_args={"device": "cuda"},
+            model=ModelGroup(device="cuda"),
             gpu=0,
-            runtime=StageRuntimeConfig(
-                resources=StageResourceConfig(total_gpu_memory_fraction=0.03)
-            ),
+            gpu_memory_fraction=0.03,
             next="tts_engine",
         ),
-        StageConfig(
+        EngineStageConfig(
             name="tts_engine",
             process="pipeline",
             factory=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            factory_args={
-                "device": "cuda",
-                "max_new_tokens": 2048,
-                "enable_async_decode": True,
-            },
+            model=ModelGroup(device="cuda", max_new_tokens=2048),
+            scheduler=SchedulerConfig(enable_async_decode=True),
             gpu=0,
-            runtime=StageRuntimeConfig(
-                resources=StageResourceConfig(total_gpu_memory_fraction=0.85),
-            ),
+            gpu_memory_fraction=0.85,
             next="vocoder",
             stream_to=["vocoder"],
         ),
@@ -97,23 +70,25 @@ class HiggsTtsPipelineConfig(PipelineConfig):
             # serving concurrency and prevents decode/vocoder overlap.
             process="pipeline",
             factory=f"{_PKG}.stages.create_vocoder_executor",
-            factory_args={
-                "device": "cuda",
+            model=ModelGroup(device="cuda"),
+            gpu=0,
+            gpu_memory_fraction=0.10,
+            terminal=True,
+            can_accept_stream_before_payload=True,
+        ),
+    ]
+
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
+        if stage_name == "vocoder":
+            return {
                 "compile_decode": False,
                 # Before the steady cursor is established, a decode window is
                 # bounded by the default 75-row stride plus its 75-row
                 # follow-up. Capture that complete finite domain so terminal
                 # flushes cannot silently fall back to eager execution.
                 "decode_cuda_graph_frame_counts": tuple(range(1, 151)),
-            },
-            gpu=0,
-            runtime=StageRuntimeConfig(
-                resources=StageResourceConfig(total_gpu_memory_fraction=0.10),
-            ),
-            terminal=True,
-            can_accept_stream_before_payload=True,
-        ),
-    ]
+            }
+        return {}
 
     def model_post_init(self, __context: Any = None) -> None:
         super().model_post_init(__context)
@@ -129,29 +104,6 @@ class HiggsTtsPipelineConfig(PipelineConfig):
                     )
                 ),
             )
-        vocoder = stages["vocoder"]
-        tts_engine = stages["tts_engine"]
-        vocoder_overrides = self.runtime_overrides.get("vocoder", {})
-        tts_engine_overrides = self.runtime_overrides.get("tts_engine", {})
-        missing = object()
-        for key in (
-            "stream_stride",
-            "stream_followup_stride",
-            "initial_chunk_frames",
-        ):
-            value = vocoder_overrides.get(key, vocoder.factory_args.get(key, missing))
-            if value is missing:
-                if key in tts_engine.factory_args or key in tts_engine_overrides:
-                    raise ValueError(
-                        f"Higgs TTS {key!r} must be configured on the vocoder stage"
-                    )
-                continue
-            if key in tts_engine_overrides and tts_engine_overrides[key] != value:
-                raise ValueError(
-                    f"Higgs TTS {key!r} runtime overrides must match between "
-                    "the tts_engine and vocoder stages"
-                )
-            tts_engine.factory_args[key] = value
 
     def requires_uploaded_voice_for_named_voice(self) -> bool:
         return True
