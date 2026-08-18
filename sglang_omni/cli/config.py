@@ -7,16 +7,17 @@ from typing import Annotated, Any, NamedTuple, Optional
 import typer
 import yaml
 
-from sglang_omni.config.compat import canonicalize_dotted_key, sources_from_config_file
+from sglang_omni.config.compat import canonicalize_dotted_key
 from sglang_omni.config.manager import ConfigManager, resolve_config_cls_for_model_path
 from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.path import ConfigPath, ConfigPathError
 from sglang_omni.config.resolver import ConfigResolver, ResolvedConfig, diff_configs
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import (
+    dump_user_config,
     patches_from_dotted_cli,
     patches_from_model_path_flag,
-    patches_from_set_cli,
+    sources_from_config_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,6 @@ config_app = typer.Typer(help="Inspect, resolve and export the pipeline configur
 _MODEL_PATH_HELP = "The Hugging Face model ID or the path to the model directory."
 _CONFIG_HELP = "Path to a pipeline config file, as accepted by `sgl-omni serve`."
 _TEXT_ONLY_HELP = "Use the thinker-only pipeline, as `sgl-omni serve --text-only` does."
-_SET_HELP = (
-    "Set one configuration path, e.g. "
-    "--set stages.thinker.runtime.max_seq_len=8192. Repeat to set several."
-)
 
 
 def _dump_yaml(data: Any) -> str:
@@ -54,7 +51,7 @@ def view(
     """View the model's pipeline configuration."""
     config_cls = resolve_config_cls_for_model_path(model_path)
     config = config_cls(model_path=model_path)
-    print(_dump_yaml(config.model_dump(mode="json")))
+    print(_dump_yaml(dump_user_config(config)))
 
 
 @config_app.command()
@@ -80,7 +77,7 @@ def export(
         output_path = f"./config_{config.name}.yaml"
 
     with open(output_path, "w") as f:
-        f.write(_dump_yaml(config.model_dump(mode="json")))
+        f.write(_dump_yaml(dump_user_config(config)))
     print(f"Pipeline config exported to {output_path}")
 
 
@@ -112,7 +109,6 @@ def _resolve_sources(
     config_file: str | None,
     text_only: bool,
     argv: list[str],
-    set_values: list[str] | None = None,
 ) -> Resolution:
     """Build the configuration ``sgl-omni serve`` would build from this input.
 
@@ -143,36 +139,14 @@ def _resolve_sources(
         patches = patches.merge(
             patches_from_dotted_cli(extra_args, baseline, origin="command line")
         )
-        patches = patches.merge(patches_from_set_cli(set_values or [], baseline))
         return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
     except (ConfigPathError, ValueError) as exc:
         # An unknown path, a path the schema will not let a user write, two
-        # sources disagreeing at one precedence, a malformed ``--set`` or
-        # dotted argument, a config file that does not parse: all of these are
-        # things the user typed, and all of them carry a message written to be
-        # read. A traceback would bury it.
+        # sources disagreeing at one precedence, a malformed dotted argument,
+        # a config file that does not parse: all of these are things the user
+        # typed, and all of them carry a message written to be read. A
+        # traceback would bury it.
         raise typer.BadParameter(str(exc)) from exc
-
-
-def _report_sources(resolution: Resolution) -> None:
-    """Write the deprecation notices to stderr.
-
-    stderr, so that ``config resolve > pipeline.yaml`` yields a usable file.
-    Deduplicated on path and text: a broadcast alias produces one patch per
-    stage, and printing the same sentence once per stage teaches people to skim
-    past it.
-    """
-    seen: set[tuple[str, str]] = set()
-    for patch in resolution.resolved.patches.deprecations():
-        notice = (patch.key, patch.deprecated)
-        if notice in seen:
-            continue
-        seen.add(notice)
-        typer.secho(
-            f"deprecated: {patch.key} <- {patch.source.describe()}: {patch.deprecated}",
-            err=True,
-            fg=typer.colors.YELLOW,
-        )
 
 
 @config_app.command(
@@ -185,10 +159,6 @@ def resolve(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
-    set_values: Annotated[
-        Optional[list[str]],
-        typer.Option("--set", metavar="PATH=VALUE", help=_SET_HELP),
-    ] = None,
     show: Annotated[
         ResolveOutput,
         typer.Option(
@@ -202,23 +172,22 @@ def resolve(
 ) -> None:
     """Show the configuration a `serve` command with these arguments would use.
 
-    Takes the same arguments as `sgl-omni serve`, including dotted overrides:
+    Takes the same arguments as `sgl-omni serve`, including dotted overrides
+    (the stages. prefix is implied, exactly as on serve):
 
         sgl-omni config resolve --model-path Qwen/Qwen3-Omni \\
-            --stages.thinker.tp_size 4 --show diff
+            --thinker.tp_size 4 --show diff
     """
     resolution = _resolve_sources(
         model_path=model_path,
         config_file=config,
         text_only=text_only,
         argv=ctx.args,
-        set_values=set_values,
     )
-    _report_sources(resolution)
     provenance = resolution.resolved.provenance
 
     if show is ResolveOutput.config:
-        print(_dump_yaml(resolution.resolved.config.model_dump(mode="json")))
+        print(_dump_yaml(dump_user_config(resolution.resolved.config)))
         return
 
     if show is ResolveOutput.diff:
@@ -256,9 +225,10 @@ def explain(
     path: Optional[str] = typer.Argument(
         None,
         help=(
-            "Canonical config path, e.g. stages.thinker.runtime.max_seq_len. "
-            "Omit to list every path a source touched. Pass it before any "
-            "dotted override so it is not mistaken for one."
+            "Config path, canonical (stages.thinker.model.max_seq_len) or "
+            "CLI-spelled (thinker.model.max_seq_len). Omit to list every "
+            "path a source touched. Pass it before any dotted override so "
+            "it is not mistaken for one."
         ),
     ),
     model_path: Annotated[str | None, typer.Option(help=_MODEL_PATH_HELP)] = None,
@@ -266,24 +236,18 @@ def explain(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
-    set_values: Annotated[
-        Optional[list[str]],
-        typer.Option("--set", metavar="PATH=VALUE", help=_SET_HELP),
-    ] = None,
 ) -> None:
     """Say where one configuration value came from, and what it overrode.
 
-        sgl-omni config explain stages.thinker.runtime.max_seq_len \\
-            --config omni.yaml --stages.thinker.runtime.max_seq_len 8192
+        sgl-omni config explain stages.thinker.model.max_seq_len \\
+            --config omni.yaml --thinker.model.max_seq_len 8192
     """
     resolution = _resolve_sources(
         model_path=model_path,
         config_file=config,
         text_only=text_only,
         argv=ctx.args,
-        set_values=set_values,
     )
-    _report_sources(resolution)
     provenance = resolution.resolved.provenance
 
     if path is None:
@@ -298,13 +262,11 @@ def explain(
         return
 
     try:
-        canonical, deprecation = canonicalize_dotted_key(path, resolution.baseline)
+        canonical = canonicalize_dotted_key(path, resolution.baseline)
         compiled = ConfigPath.parse(canonical, type(resolution.baseline))
     except ConfigPathError as exc:
         # Carries `did you mean:` suggestions, which a traceback would bury.
         raise typer.BadParameter(str(exc)) from exc
-    if deprecation:
-        typer.secho(f"deprecated: {deprecation}", err=True, fg=typer.colors.YELLOW)
 
     if provenance.touched(compiled.raw):
         print(provenance.explain(compiled.raw))
