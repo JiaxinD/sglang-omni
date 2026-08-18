@@ -5,7 +5,7 @@ The resolver records one :class:`ProvenanceEntry` per contributing patch, plus
 the baseline the patches were applied on top of. That is what makes
 ``sgl-omni config explain <path>`` answerable::
 
-    stages.thinker.runtime.sglang_server_args.mem_fraction_static = 0.8
+    stages.thinker.engine.mem_fraction_static = 0.8
       0.87  <- model default (Qwen3OmniConfig)
       0.70  <- yaml file (configs/omni.yaml)            [superseded]
       0.80  <- cli flag (--thinker-mem-fraction-static) [winner]
@@ -57,10 +57,6 @@ class ProvenanceEntry:
     def source(self) -> ConfigSource:
         return self.patch.source
 
-    @property
-    def deprecated(self) -> str:
-        return self.patch.deprecated
-
     def render(self, resolved: Any = _UNSET) -> str:
         marker = "[winner]" if self.winning else "[superseded]"
         line = f"{self.value!r}  <- {self.source.describe()}  {marker}"
@@ -68,8 +64,6 @@ class ProvenanceEntry:
             # The model's own validation rewrote the value after this patch
             # won; showing only what the source said would claim it stuck.
             line += f" (resolved to {resolved!r})"
-        if self.deprecated:
-            line += f"\n      deprecated: {self.deprecated}"
         return line
 
 

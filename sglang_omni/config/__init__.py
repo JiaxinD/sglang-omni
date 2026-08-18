@@ -8,21 +8,18 @@ from sglang_omni.config.placement import (
     resolve_gpu_stage_names,
     resolve_stage_gpu_ids,
 )
-from sglang_omni.config.process_overrides import (
-    apply_stage_process_overrides,
-    parse_stage_process_assignment,
-)
 from sglang_omni.config.runtime import resolve_stage_factory_args
 from sglang_omni.config.schema import (
     AudioChunkingConfig,
     CommConfig,
     EndpointsConfig,
+    EngineArgs,
+    EngineStageConfig,
+    ModelGroup,
     PipelineConfig,
     PlacementConfig,
-    SGLangServerArgsConfig,
+    SchedulerConfig,
     StageConfig,
-    StageResourceConfig,
-    StageRuntimeConfig,
 )
 from sglang_omni.config.topology import (
     ProcessGroupPlacement,
@@ -42,8 +39,6 @@ __all__ = [
     "build_stage_placement_plan",
     "resolve_gpu_stage_names",
     "resolve_stage_gpu_ids",
-    "apply_stage_process_overrides",
-    "parse_stage_process_assignment",
     "resolve_stage_factory_args",
     "ProcessGroupPlacement",
     "ProcessTopologyPlan",
@@ -51,9 +46,10 @@ __all__ = [
     "AudioChunkingConfig",
     "PipelineConfig",
     "StageConfig",
-    "StageResourceConfig",
-    "SGLangServerArgsConfig",
-    "StageRuntimeConfig",
+    "EngineStageConfig",
+    "EngineArgs",
+    "SchedulerConfig",
+    "ModelGroup",
     "PlacementConfig",
     "CommConfig",
     "EndpointsConfig",

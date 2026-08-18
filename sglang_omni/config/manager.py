@@ -1,14 +1,12 @@
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from transformers import AutoConfig
 
-from sglang_omni.config.compat import sources_from_config_file
-from sglang_omni.config.deprecation import warn_deprecations
 from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.config.sources import patches_from_dotted_cli, patches_from_set_cli
+from sglang_omni.config.sources import patches_from_dotted_cli, sources_from_config_file
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.utils import (
     architecture_from_hf_config,
@@ -69,9 +67,7 @@ class ConfigManager:
                 raise ValueError(f"Invalid argument: {arg}")
 
             if cur_key is not None and cur_value is not None:
-                # remove the -- in front of the key
-                formatted_key = cur_key.lstrip("-").replace("-", "_")
-                extra_args.append((formatted_key, cur_value))
+                extra_args.append((_normalize_flag_key(cur_key), cur_value))
                 cur_key, cur_value = None, None
         if cur_key is not None and cur_value is None:
             raise ValueError(f"Missing value for argument: {cur_key}")
@@ -81,30 +77,24 @@ class ConfigManager:
         self,
         extra_args: Mapping[str, Any] | Iterable[tuple[str, Any]],
         *,
-        set_values: Sequence[str] = (),
         extra_patches: ConfigPatchSet | None = None,
     ) -> PipelineConfig:
         """Merge the configuration and the extra arguments.
 
-        The dotted keys and any ``--set PATH=VALUE`` arguments are translated
-        into canonical patches and applied by
+        The dotted keys are translated into canonical patches and applied by
         :class:`~sglang_omni.config.resolver.ConfigResolver`, which is the only
-        code that writes into a configuration. Legacy spellings -- positional
-        stage indices, paths the schema would rather people stopped using --
-        are accepted and reported, never silently dropped.
+        code that writes into a configuration.
 
         ``extra_patches`` carries patches a caller has already translated --
-        the typed CLI flags in ``sgl-omni serve``, for instance. Everything is
-        resolved together, in one patch set, so that writing the same path
-        two ways is refused (or settled by declared specificity) rather than
-        by the order the translations happen to run in.
+        the ``--model-path`` flag in ``sgl-omni serve``, for instance.
+        Everything is resolved together, in one patch set, so that writing the
+        same path two ways is refused (or settled by declared specificity)
+        rather than by the order the translations happen to run in.
         """
         patches = patches_from_dotted_cli(extra_args, self.config)
-        patches = patches.merge(patches_from_set_cli(set_values, self.config))
         if extra_patches is not None:
             patches = patches.merge(extra_patches)
         resolved = ConfigResolver(self.config).resolve(patches)
-        warn_deprecations(patches, context="command line")
         return resolved.config
 
     @staticmethod
@@ -132,15 +122,26 @@ class ConfigManager:
         """
         Load the configuration from the file path.
 
-        The file's override blocks -- ``stage_overrides`` and ``set:`` -- are
-        folded into the configuration that comes back, so callers holding a
-        ``ConfigManager`` see one settled config rather than a config plus a
-        pile of pending overrides. ``sgl-omni config explain`` wants the
-        opposite and calls ``sources_from_config_file`` directly.
+        The file's ``stages:`` mapping entries are folded into the
+        configuration that comes back, so callers holding a ``ConfigManager``
+        see one settled config rather than a config plus a pile of pending
+        overrides. ``sgl-omni config explain`` wants the opposite and calls
+        ``sources_from_config_file`` directly.
         """
         config, patches = sources_from_config_file(file_path)
         if not patches:
             return ConfigManager(config)
         resolved = ConfigResolver(config).resolve(patches)
-        warn_deprecations(patches, context=str(file_path))
         return ConfigManager(resolved.config)
+
+
+def _normalize_flag_key(key: str) -> str:
+    """Strip the leading dashes and normalize the flag's first segment.
+
+    Only the first dotted segment gets its dashes rewritten to underscores:
+    later segments can be document keys -- ``--stages.thinker.env.MY-FLAG``
+    names an env var whose spelling must survive verbatim.
+    """
+    key = key.lstrip("-")
+    head, separator, rest = key.partition(".")
+    return head.replace("-", "_") + separator + rest

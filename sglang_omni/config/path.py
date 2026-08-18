@@ -1,26 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Canonical configuration paths compiled from the typed pipeline schema.
 
-Today four independent implementations know how to address a configuration
-value: the dotted-path walker in :mod:`sglang_omni.config.manager`, the
-stage-name deep merge for ``stage_overrides``, the factory-kwarg merge in
-:mod:`sglang_omni.config.runtime`, and a dozen hand-written CLI helpers in
-``cli/serve.py``. This module is the single addressing primitive meant to
-replace all four.
-
 A :class:`ConfigPath` is *compiled against the typed schema*, not evaluated
-against a dict. That buys three things the current walker cannot offer:
+against a dict. That buys three things a dict walker cannot offer:
 
 * an illegal path fails at parse time with nearby legal paths, instead of
   raising ``KeyError`` deep inside a ``model_dump()`` copy;
 * every path knows its declared type, so a CLI string can be coerced by
   pydantic rather than by ``int()``/``float()`` guessing;
-* every path knows whether it is part of the public surface, so internal
-  wiring such as ``factory_args`` can be refused up front.
+* every path knows whether it is part of the public surface, so derived
+  values such as ``config_cls`` can be refused up front.
 
-Stages are addressed **by name** (``stages.thinker.runtime.max_seq_len``).
-Positional indices are deliberately not accepted here; the V1 compatibility
-layer is the only place allowed to translate ``stages.4.…`` into a name.
+Stages are addressed **by name** (``stages.thinker.model.max_seq_len``) and
+compile against their *own* stage type: the root config class declares a
+``StageConfig`` subclass per stage name, so a model-specific ``model.*``
+field exists only on the stage that declares it, and ``engine.*`` exists
+only on stages whose type drives an SGLang engine. Positional indices are
+not accepted anywhere.
 """
 
 from __future__ import annotations
@@ -34,7 +30,7 @@ from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
 
-from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.schema import PipelineConfig, StageConfig
 
 __all__ = [
     "ConfigPath",
@@ -43,7 +39,6 @@ __all__ = [
     "Segment",
     "SegmentKind",
     "coerce_scalar_text",
-    "example_leaf_paths",
     "iter_schema_paths",
 ]
 
@@ -71,10 +66,7 @@ class PathVisibility(str, Enum):
     """Whether a path may be written by a user-facing configuration source."""
 
     PUBLIC = "public"
-    IDENTITY = "identity"
-    DERIVED = "derived"
     INTERNAL = "internal"
-    DEPRECATED = "deprecated"
 
 
 _NONE_SENTINEL = "none"
@@ -83,42 +75,69 @@ _NONE_SENTINEL = "none"
 
 # Ordered specific -> general; the first matching pattern wins. ``*`` matches
 # exactly one segment, ``**`` matches zero or more trailing segments.
-#
-# Nothing here is refused outright. Every path the V1 chain let a user write
-# stays writable (see :meth:`ConfigPath.is_writable`); paths we want to stop
-# advertising are marked DEPRECATED, which keeps them out of ``is_public()``,
-# out of path suggestions and out of ``iter_schema_paths`` while still carrying
-# a reason that surfaces as a warning.
+# Paths that no longer exist are not listed here: an unknown field fails at
+# parse time with nearby legal paths.
 _VISIBILITY_RULES: tuple[tuple[str, PathVisibility, str], ...] = (
     (
         "config_cls",
-        PathVisibility.DEPRECATED,
+        PathVisibility.INTERNAL,
         "derived from the config class name in PipelineConfig.model_post_init; "
         "setting it by hand has no effect on which class is used",
     ),
     (
+        "stages",
+        PathVisibility.INTERNAL,
+        "stages are configured per name (stages.<name>.<field>); the "
+        "collection cannot be created or replaced wholesale from a "
+        "user-facing source",
+    ),
+    (
+        "entry_stage",
+        PathVisibility.INTERNAL,
+        "the entry stage is part of the stage topology and is declared by "
+        "the model's config class, not set from a user-facing source",
+    ),
+    (
         "stages.*.name",
-        PathVisibility.DEPRECATED,
-        "a stage name is its address: renaming it from the command line leaves "
-        "every other patch pointing at the old name. Rename it in the document",
-    ),
-    (
-        "stages.*.factory_args.**",
-        PathVisibility.DEPRECATED,
-        "factory kwargs are owned by the model config; prefer the typed runtime "
-        "fields. Still writable because shipped models expose knobs here",
-    ),
-    (
-        "stages.*.runtime_arg_map.**",
-        PathVisibility.DEPRECATED,
-        "runtime_arg_map is wiring owned by the model config author",
-    ),
-    (
-        "runtime_overrides.**",
-        PathVisibility.DEPRECATED,
-        "untyped SGLang escape hatch; prefer the typed runtime fields",
+        PathVisibility.INTERNAL,
+        "a stage name is its address; the config class declares it and every "
+        "user-facing source addresses the stage by that name",
     ),
 )
+
+
+# Removed configuration surfaces, kept only as error guidance: writing one of
+# these names fails like any other unknown field, but the message says where
+# the setting lives now instead of offering a fuzzy-match suggestion.
+_REMOVED_FIELD_GUIDANCE: dict[str, str] = {
+    "factory_args": (
+        "factory_args was removed: user-tunable knobs live in the stage's "
+        "model./scheduler./engine. groups, and constructor wiring in "
+        "PipelineConfig.stage_factory_kwargs()"
+    ),
+    "runtime": (
+        "the runtime group was removed: resources.total_gpu_memory_fraction "
+        "is now the stage-level gpu_memory_fraction, sglang_server_args is "
+        "now engine.*, scheduler tuning is scheduler.*, and the remaining "
+        "fields moved to model.*"
+    ),
+    "runtime_arg_map": (
+        "runtime_arg_map was removed: stage factories take canonical "
+        "parameter names, so no per-stage translation table exists"
+    ),
+    "runtime_overrides": (
+        "runtime_overrides was removed: write stages.<name>.engine.*, "
+        "stages.<name>.scheduler.* or stages.<name>.model.* instead"
+    ),
+    "stage_overrides": (
+        "stage_overrides was removed: per-stage settings are written under "
+        "the stages: mapping (stages.<name>.<field>)"
+    ),
+    "set": (
+        "the set: block was removed: write each setting at its own path in "
+        "the document, e.g. under the stages: mapping"
+    ),
+}
 
 
 class ConfigPathError(ValueError):
@@ -185,7 +204,26 @@ class ConfigPath:
         current: Any = root
         for index, part in enumerate(parts):
             prefix = ".".join(parts[:index])
-            segments.append(_descend(current, part, raw=raw, prefix=prefix))
+            segment = _descend(current, part, raw=raw, prefix=prefix)
+            if (
+                segment.kind is SegmentKind.NAMED_ITEM
+                and index == 1
+                and parts[0] == "stages"
+                and isinstance(root, type)
+                and issubclass(root, PipelineConfig)
+            ):
+                # Per-stage-type compilation: the root config class declares
+                # which StageConfig subclass each stage name uses, so the
+                # remaining segments resolve against that stage's own fields
+                # (engine marker, model-specific model.* fields) rather than
+                # the generic base type.
+                segment = Segment(
+                    raw=segment.raw,
+                    kind=segment.kind,
+                    annotation=root.stage_config_cls(part),
+                    container=segment.container,
+                )
+            segments.append(segment)
             current = segments[-1].annotation
 
         return cls(raw=raw, root=root, segments=tuple(segments))
@@ -244,25 +282,12 @@ class ConfigPath:
         return PathVisibility.PUBLIC, ""
 
     def is_public(self) -> bool:
-        """True when this path is part of the recommended surface.
-
-        Stricter than :meth:`is_writable`: a deprecated path is still writable
-        but should not be advertised, e.g. by completion or ``config explain``.
-        """
+        """True when a user-facing source may write this path."""
         return self.visibility is PathVisibility.PUBLIC
-
-    def is_writable(self) -> bool:
-        """True when a user-facing source is allowed to write this path.
-
-        Deprecated paths are writable. Refusing them would break configurations
-        that work today, which is what a deprecation period exists to avoid;
-        they carry :attr:`visibility_reason` as a warning instead.
-        """
-        return self.visibility in (PathVisibility.PUBLIC, PathVisibility.DEPRECATED)
 
     def require_writable(self) -> None:
         """Raise unless this path may be written by a user-facing source."""
-        if self.is_writable():
+        if self.is_public():
             return
         raise ConfigPathError(
             f"Config path {self.raw!r} is {self.visibility.value} and cannot be "
@@ -346,12 +371,39 @@ def _descend(container: Any, part: str, *, raw: str, prefix: str) -> Segment:
 
     if _is_model(core):
         fields = core.model_fields
+        if part == "engine" and _is_non_engine_stage(core):
+            raise ConfigPathError(
+                f"{_join_prefix(prefix)} is not an engine stage: the engine "
+                "block only exists on stages whose factory drives an SGLang "
+                "engine, so there is nothing for engine settings to reach here",
+                raw=raw,
+                resolved_prefix=prefix,
+            )
         if part in fields:
             return Segment(
                 raw=part,
                 kind=SegmentKind.FIELD,
                 annotation=fields[part].annotation,
                 container=core,
+            )
+        if core.model_config.get("extra") == "allow":
+            # An extra-allow model accepts keys beyond its declared fields
+            # (the free ServerArgs tail of ``engine``). No schema information
+            # remains below such a key.
+            return Segment(
+                raw=part,
+                kind=SegmentKind.FREEFORM,
+                annotation=Any,
+                container=core,
+            )
+        guidance = _REMOVED_FIELD_GUIDANCE.get(part)
+        if guidance is not None and issubclass(core, (PipelineConfig, StageConfig)):
+            raise ConfigPathError(
+                f"{core.__name__} has no field {part!r}"
+                + (f" at {prefix!r}" if prefix else "")
+                + f": {guidance}",
+                raw=raw,
+                resolved_prefix=prefix,
             )
         raise ConfigPathError(
             f"{core.__name__} has no field {part!r}"
@@ -411,7 +463,14 @@ def _descend(container: Any, part: str, *, raw: str, prefix: str) -> Segment:
 
 
 def _unwrap_optional(annotation: Any) -> Any:
-    """Strip ``| None`` from a union, leaving unions of real types untouched."""
+    """Strip ``Annotated`` metadata and ``| None`` from a declared type.
+
+    Unions of real types are left untouched. ``Annotated`` shows up through
+    ``SerializeAsAny[StageConfig]`` on the stages list; the wrapper only
+    changes serialization, not what the path addresses.
+    """
+    if get_origin(annotation) is typing.Annotated:
+        annotation = get_args(annotation)[0]
     origin = get_origin(annotation)
     if origin is typing.Union or origin is types.UnionType:
         args = [arg for arg in get_args(annotation) if arg is not type(None)]
@@ -455,6 +514,15 @@ def _mapping_value_type(annotation: Any) -> Any | None:
 
 def _is_plain_sequence(annotation: Any) -> bool:
     return get_origin(annotation) in (list, tuple, set, frozenset)
+
+
+def _is_non_engine_stage(annotation: Any) -> bool:
+    return (
+        isinstance(annotation, type)
+        and get_origin(annotation) is None
+        and issubclass(annotation, StageConfig)
+        and not annotation.engine_stage
+    )
 
 
 def _is_traversable(annotation: Any) -> bool:
@@ -598,50 +666,6 @@ def coerce_scalar_text(value: Any) -> Any:
         return float(value)
     except ValueError:
         return value
-
-
-def example_leaf_paths(path: ConfigPath, limit: int = 3) -> tuple[str, ...]:
-    """A few public leaf paths below a container path, for error messages.
-
-    Keys that come from the document rather than the schema -- stage names,
-    free mapping keys -- are rendered as a ``KEY`` placeholder.
-    """
-    out: list[str] = []
-
-    def walk(annotation: Any, prefix: str, depth: int) -> None:
-        if len(out) >= limit or depth > _MAX_SCHEMA_DEPTH:
-            return
-        core = _unwrap_optional(annotation)
-
-        if _is_model(core):
-            for name, field in core.model_fields.items():
-                if len(out) >= limit:
-                    return
-                child(field.annotation, f"{prefix}.{name}", depth + 1)
-            return
-
-        item = _named_collection_item(core)
-        if item is not None:
-            walk(item, f"{prefix}.KEY", depth + 1)
-            return
-
-        value_type = _mapping_value_type(core)
-        if value_type is not None:
-            child(value_type, f"{prefix}.KEY", depth + 1)
-
-    def child(annotation: Any, candidate: str, depth: int) -> None:
-        core = _unwrap_optional(annotation)
-        if _is_traversable(core) and core is not Any:
-            walk(annotation, candidate, depth)
-            return
-        try:
-            if ConfigPath.parse(candidate, path.root).is_public():
-                out.append(candidate)
-        except ConfigPathError:  # pragma: no cover - placeholder never binds
-            pass
-
-    walk(path.value_type, path.raw, 0)
-    return tuple(out)
 
 
 def iter_schema_paths(

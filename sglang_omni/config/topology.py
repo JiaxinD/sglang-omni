@@ -243,7 +243,7 @@ def _validate_gpu_process_colocation(
                 if gpu_id is None:
                     continue
                 gpu_processes[gpu_id].add(group.name)
-                if stage.runtime.resources.total_gpu_memory_fraction is None:
+                if stage.gpu_memory_fraction is None:
                     missing_fraction[gpu_id].add(stage.name)
 
     for stage in stages:
@@ -255,7 +255,7 @@ def _validate_gpu_process_colocation(
             gpu_processes[gpu_id].add(
                 topology_plan.tp_stage_to_processes[stage.name][rank]
             )
-            if stage.runtime.resources.total_gpu_memory_fraction is None:
+            if stage.gpu_memory_fraction is None:
                 missing_fraction[gpu_id].add(stage.name)
 
     require = config.placement.require_memory_fraction_for_colocation
@@ -267,7 +267,7 @@ def _validate_gpu_process_colocation(
         if require and missing:
             raise ValueError(
                 f"GPU {gpu_id} is shared by multiple process groups without "
-                "runtime.resources.total_gpu_memory_fraction: "
+                "gpu_memory_fraction: "
                 f"{', '.join(missing)}"
             )
         total = gpu_placement.gpus[gpu_id].total_gpu_memory_fraction

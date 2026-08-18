@@ -52,62 +52,43 @@ __all__ = [
 class Layer(IntEnum):
     """Cross-source precedence. Higher wins."""
 
-    FRAMEWORK = 0
-    """Schema defaults declared in ``config/schema.py``."""
-
-    MODEL_DEFAULT = 10
+    MODEL_DEFAULT = 0
     """The model's Python pipeline definition in ``models/*/config.py``."""
 
-    PROFILE = 20
-    """A named variant or shipped profile selected by the user."""
-
-    USER_FILE = 30
+    USER_FILE = 10
     """The user's YAML document."""
 
-    ROUTER = 40
-    """Per-worker patches injected by ``sgl-omni-router``."""
-
-    CLI = 50
-    """Command line flags and ``--set``."""
+    CLI = 20
+    """Command line flags and dotted overrides."""
 
 
 class Specificity(IntEnum):
     """Precedence *within* one layer. Higher wins."""
 
     BROADCAST = 0
-    """An alias that fans out to several stages, e.g. ``--mem-fraction-static``."""
+    """A flag that fans out to several stages, e.g. ``--mem-fraction-static``."""
 
     ROLE = 10
-    """An alias naming one role, e.g. ``--talker-mem-fraction-static``."""
+    """A ``shared:`` selector entry expanded onto its matched stages."""
 
     EXPLICIT = 20
-    """A path the user wrote out in full, e.g. ``--set stages.talker.…``."""
+    """A path the user wrote out in full, e.g. ``--thinker.tp_size``."""
 
 
 class SourceKind(str, Enum):
     """Where a patch came from."""
 
-    FRAMEWORK_DEFAULT = "framework_default"
     MODEL_DEFAULT = "model_default"
-    PROFILE = "profile"
     YAML_FILE = "yaml_file"
-    YAML_STAGE_OVERRIDES = "yaml_stage_overrides"
-    ROUTER = "router"
     CLI_FLAG = "cli_flag"
     CLI_DOTTED = "cli_dotted"
-    CLI_SET = "cli_set"
 
 
 _DEFAULT_LAYER: dict[SourceKind, Layer] = {
-    SourceKind.FRAMEWORK_DEFAULT: Layer.FRAMEWORK,
     SourceKind.MODEL_DEFAULT: Layer.MODEL_DEFAULT,
-    SourceKind.PROFILE: Layer.PROFILE,
     SourceKind.YAML_FILE: Layer.USER_FILE,
-    SourceKind.YAML_STAGE_OVERRIDES: Layer.USER_FILE,
-    SourceKind.ROUTER: Layer.ROUTER,
     SourceKind.CLI_FLAG: Layer.CLI,
     SourceKind.CLI_DOTTED: Layer.CLI,
-    SourceKind.CLI_SET: Layer.CLI,
 }
 
 
@@ -120,7 +101,7 @@ class ConfigSource:
     """File path, flag name, worker id — whatever names this source instance."""
 
     detail: str = ""
-    """Optional extra shown in ``config explain``, e.g. a deprecation note."""
+    """Optional extra shown in ``config explain``, e.g. a shared-entry label."""
 
     @property
     def layer(self) -> Layer:
@@ -148,8 +129,6 @@ class ConfigPatch:
     source: ConfigSource
     layer: Layer
     specificity: Specificity = Specificity.EXPLICIT
-    deprecated: str = ""
-    """Non-empty when the source syntax is on its way out; surfaced as a warning."""
 
     @classmethod
     def create(
@@ -161,28 +140,23 @@ class ConfigPatch:
         root: type[BaseModel] = PipelineConfig,
         layer: Layer | None = None,
         specificity: Specificity = Specificity.EXPLICIT,
-        deprecated: str = "",
         coerce: bool = True,
     ) -> "ConfigPatch":
         """Build a patch, compiling ``path`` and coercing ``value`` to its type.
 
         Raises :class:`~sglang_omni.config.path.ConfigPathError` when the path
-        is unknown or is not writable by a user-facing source. A path that is
-        merely deprecated is accepted, and carries its reason forward as a
-        deprecation notice alongside any the caller supplied.
+        is unknown or is not writable by a user-facing source.
         """
         compiled = (
             path if isinstance(path, ConfigPath) else ConfigPath.parse(path, root)
         )
         compiled.require_writable()
-        notices = [note for note in (deprecated, compiled.visibility_reason) if note]
         return cls(
             path=compiled,
             value=compiled.coerce(value) if coerce else value,
             source=source,
             layer=source.layer if layer is None else layer,
             specificity=specificity,
-            deprecated="; ".join(notices),
         )
 
     @property
@@ -293,6 +267,3 @@ class ConfigPatchSet:
             for first, second in conflicts
         ]
         raise DuplicatePatchError("\n\n".join(blocks), raw=conflicts[0][0].path.raw)
-
-    def deprecations(self) -> list[ConfigPatch]:
-        return [patch for patch in self.patches if patch.deprecated]
