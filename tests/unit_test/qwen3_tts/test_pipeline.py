@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import torch
 
-from sglang_omni.config.runtime import resolve_stage_static_factory_args
+from sglang_omni.config.runtime import resolve_stage_factory_kwargs
 from sglang_omni.models.qwen3_omni.pending_text_queue import PendingTextTensorQueue
 from sglang_omni.models.qwen3_tts import request_builders as qwen3_request_builders
 from sglang_omni.models.qwen3_tts import stages as qwen3_stages
@@ -243,13 +243,11 @@ def test_qwen3_tts_config_and_registry_contracts() -> None:
     assert config.terminal_stages == ["vocoder"]
     assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
     assert "device" not in config.stages[1].factory_args
-    assert "device" not in config.stages[2].factory_args
+    assert config.stages[2].factory.device is None
     assert {stage.process for stage in config.stages} == {"pipeline"}
     assert config.stages[1].stream_to == ["vocoder"]
     assert config.stages[2].can_accept_stream_before_payload is True
-    assert Qwen3TTSPipelineConfig.talker_sglang_role_to_stage() == {
-        "talker": "tts_engine"
-    }
+    assert Qwen3TTSPipelineConfig.stage_config_cls("tts_engine").engine_stage
     assert (
         PIPELINE_CONFIG_REGISTRY.get_config("Qwen3TTSForConditionalGeneration")
         is Qwen3TTSPipelineConfig
@@ -264,9 +262,9 @@ def test_qwen3_tts_deterministic_inference_configures_pipeline() -> None:
     )
     stages = {stage.name: stage for stage in config.stages}
 
-    preprocessing = resolve_stage_static_factory_args(stages["preprocessing"], config)
-    tts_engine = resolve_stage_static_factory_args(stages["tts_engine"], config)
-    vocoder = resolve_stage_static_factory_args(stages["vocoder"], config)
+    preprocessing = resolve_stage_factory_kwargs(stages["preprocessing"], config)
+    tts_engine = resolve_stage_factory_kwargs(stages["tts_engine"], config)
+    vocoder = resolve_stage_factory_kwargs(stages["vocoder"], config)
 
     assert preprocessing["max_concurrency"] == 1
     assert tts_engine["server_args_overrides"]["enable_deterministic_inference"]

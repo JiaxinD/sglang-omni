@@ -44,19 +44,20 @@ logger = logging.getLogger(__name__)
 
 def resolve_coordinator_max_in_flight(config: PipelineConfig) -> int | None:
     """Return generation running+queued capacity, if both bounds are known."""
-    stage_name = type(config).generation_sglang_role_to_stage().get("generation")
-    stage = next((item for item in config.stages if item.name == stage_name), None)
+    config_cls = type(config)
+    stage = next(
+        (
+            item
+            for item in config.stages
+            if config_cls.stage_config_cls(item.name).engine_stage
+        ),
+        None,
+    )
     if stage is None:
         return None
     values = {
-        **type(config).generation_admission_defaults(),
-        **dict((stage.factory_args or {}).get("server_args_overrides") or {}),
-        **dict(
-            (config.runtime_overrides.get(stage.name) or {}).get(
-                "server_args_overrides"
-            )
-            or {}
-        ),
+        **config_cls.generation_admission_defaults(),
+        **(stage.engine.overrides() if stage.engine is not None else {}),
     }
     try:
         running = int(values["max_running_requests"])

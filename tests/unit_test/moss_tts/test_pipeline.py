@@ -124,12 +124,7 @@ def test_moss_tts_config_and_registry_contracts() -> None:
         PIPELINE_CONFIG_REGISTRY.get_config("MossTTSDelayModel")
         is MossTTSPipelineConfig
     )
-    assert MossTTSPipelineConfig.mem_fraction_role_to_stage() == {
-        "talker": "tts_engine"
-    }
-    assert MossTTSPipelineConfig.talker_sglang_role_to_stage() == {
-        "talker": "tts_engine"
-    }
+    assert MossTTSPipelineConfig.stage_config_cls("tts_engine").engine_stage
     preprocessing = next(
         stage for stage in config.stages if stage.name == "preprocessing"
     )

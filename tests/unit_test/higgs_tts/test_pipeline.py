@@ -2320,13 +2320,9 @@ def test_higgs_audio_codec_encode_batch_input_normalisation() -> None:
         ), f"input format {i} produced different codes than encode_reference"
 
 
-def test_higgs_mem_fraction_role_to_stage_targets_tts_engine() -> None:
-    assert HiggsTtsPipelineConfig.mem_fraction_role_to_stage() == {
-        "talker": "tts_engine"
-    }
-    assert HiggsTtsPipelineConfig.talker_sglang_role_to_stage() == {
-        "talker": "tts_engine"
-    }
+def test_higgs_engine_stage_is_the_tts_engine() -> None:
+    assert HiggsTtsPipelineConfig.stage_config_cls("tts_engine").engine_stage
+    assert not HiggsTtsPipelineConfig.stage_config_cls("vocoder").engine_stage
 
 
 def _resolve_mem_fraction_flag(config, value):

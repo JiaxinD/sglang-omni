@@ -75,23 +75,25 @@ def test_registry_matches_weight_share_policies():
 
 def test_every_validated_config_class_has_a_drivable_topology():
     for name, cls in VALIDATED_CONFIG_CLASSES.items():
-        stage = cls.generation_sglang_role_to_stage().get("generation")
-        assert stage, f"{name} declares no generation stage"
-        union = {
-            *cls.mem_fraction_role_to_stage().values(),
-            *cls.talker_sglang_role_to_stage().values(),
-            *cls.generation_sglang_role_to_stage().values(),
-        }
-        assert union == {stage}, f"{name} is not a single-SGLang-engine pipeline"
+        config = cls(model_path="dummy")
+        engine_stages = [
+            stage.name
+            for stage in config.stages
+            if cls.stage_config_cls(stage.name).engine_stage
+        ]
+        assert (
+            len(engine_stages) == 1
+        ), f"{name} is not a single-SGLang-engine pipeline: {engine_stages}"
 
 
 def test_every_shipped_example_config_resolves_with_sharing(tmp_path):
     yamls = sorted((MPS_DP_DIR / "configs").glob("*.yaml"))
     assert yamls, "no example configs shipped"
     for yaml_path in yamls:
-        value = mps_dp_config.resolve_max_total_tokens(
+        stage_name, value = mps_dp_config.resolve_max_total_tokens(
             yaml_path, require_single_sglang_engine=True, weight_share=True
         )
+        assert stage_name
         assert (
             isinstance(value, int) and value > 0
         ), f"{yaml_path.name} does not pin a positive max_total_tokens"
@@ -102,7 +104,7 @@ def test_every_shipped_example_config_resolves_with_sharing(tmp_path):
 )
 def test_pipelines_without_generation_stage_fail_at_any_n(tmp_path, config_cls):
     yaml_path = _write_yaml(tmp_path, config_cls)
-    with pytest.raises(ValueError, match="does not declare a generation stage"):
+    with pytest.raises(ValueError, match="does not declare an SGLang engine stage"):
         mps_dp_config.resolve_max_total_tokens(yaml_path)
 
 
@@ -169,7 +171,7 @@ class TestLaunchFailsClosedBeforeResources:
         yaml_path = _write_yaml(tmp_path, "LLaDA2UniPipelineConfig")
         proc, state_root = self._run(tmp_path, yaml_path)
         assert proc.returncode != 0
-        assert "does not declare a generation stage" in proc.stdout + proc.stderr
+        assert "does not declare an SGLang engine stage" in proc.stdout + proc.stderr
         assert not state_root.exists()
 
     def test_unvalidated_weight_share_leaves_no_state(self, tmp_path):

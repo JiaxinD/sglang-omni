@@ -89,12 +89,7 @@ def test_moss_transcribe_diarize_config_uses_single_batched_stage() -> None:
         )
         is MossTranscribeDiarizePipelineConfig
     )
-    assert MossTranscribeDiarizePipelineConfig.mem_fraction_role_to_stage() == {
-        "asr": "asr"
-    }
-    assert MossTranscribeDiarizePipelineConfig.generation_sglang_role_to_stage() == {
-        "generation": "asr"
-    }
+    assert MossTranscribeDiarizePipelineConfig.stage_config_cls("asr").engine_stage
 
 
 def test_moss_transcribe_diarize_prefill_backend_policy() -> None:
