@@ -120,29 +120,17 @@ _REMOVED_FIELD_GUIDANCE: dict[str, str] = {
         "is now the stage-level gpu_memory_fraction, sglang_server_args is "
         "now engine.* and the remaining fields moved to factory.*"
     ),
-    "scheduler": (
-        "the scheduler group was folded into factory.*: every key is a "
-        "constructor kwarg for the stage factory"
-    ),
-    "model": (
-        "the model group was folded into factory.*: every key is a "
-        "constructor kwarg for the stage factory"
-    ),
     "runtime_arg_map": (
         "runtime_arg_map was removed: stage factories take canonical "
         "parameter names, so no per-stage translation table exists"
     ),
     "runtime_overrides": (
-        "runtime_overrides was removed: write stages.<name>.engine.*, "
-        "stages.<name>.engine.* or stages.<name>.factory.* instead"
+        "runtime_overrides was removed: write stages.<name>.engine.* or "
+        "stages.<name>.factory.* instead"
     ),
     "stage_overrides": (
         "stage_overrides was removed: per-stage settings are written under "
         "the stages: mapping (stages.<name>.<field>)"
-    ),
-    "set": (
-        "the set: block was removed: write each setting at its own path in "
-        "the document, e.g. under the stages: mapping"
     ),
 }
 

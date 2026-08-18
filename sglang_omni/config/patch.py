@@ -249,7 +249,7 @@ class ConfigPatchSet:
         """Refuse a path two equally-ranked sources disagree about.
 
         Deliberately an error rather than a rule. Nothing about
-        ``--stages.thinker.tp_size 4 --set stages.thinker.tp_size=8`` says which
+        ``--thinker.tp_size 4 --thinker.tp_size 8`` says which
         one the user meant, and any tie-break this code invented -- argument
         order, flag length, alphabetical -- would be a rule people had to learn
         in order to predict what their own command line does.

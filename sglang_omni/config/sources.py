@@ -66,10 +66,6 @@ _REMOVED_TOP_LEVEL_BLOCKS: dict[str, str] = {
         "the stage_overrides block was removed; write the same settings "
         "under the stages: mapping, e.g. stages.<name>.gpu_memory_fraction"
     ),
-    "set": (
-        "the set: block was removed; write each setting at its own place in "
-        "the document, e.g. under the stages: mapping"
-    ),
     "runtime_overrides": (
         "runtime_overrides was removed; write stages.<name>.engine.* or "
         "stages.<name>.factory.* instead"
