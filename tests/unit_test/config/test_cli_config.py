@@ -336,6 +336,49 @@ class TestModelPathWithConfig:
         assert "cli flag (--model-path)  [winner]" in result.stdout
 
 
+class TestBroadcastFlagOnConfigCommands:
+    """config resolve/explain accept the broadcast flag exactly as serve does,
+    so a launch can be rehearsed with the same argument list."""
+
+    def test_resolve_applies_the_broadcast(self, runner, plain_config_file, stage):
+        result = runner.invoke(
+            config_app,
+            [
+                "resolve",
+                "--config",
+                str(plain_config_file),
+                "--mem-fraction-static",
+                "0.5",
+            ],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        printed = yaml.safe_load(result.stdout)
+        assert printed["stages"][stage]["engine"]["mem_fraction_static"] == 0.5
+
+    def test_explain_shows_the_dotted_path_beating_the_broadcast(
+        self, runner, plain_config_file, stage, fraction
+    ):
+        result = runner.invoke(
+            config_app,
+            [
+                "explain",
+                fraction,
+                "--config",
+                str(plain_config_file),
+                "--mem-fraction-static",
+                "0.5",
+                f"--{stage}.engine.mem_fraction_static",
+                "0.6",
+            ],
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        assert f"{fraction} = 0.6" in result.stdout
+        assert "cli flag (--mem-fraction-static)  [superseded]" in result.stdout
+        assert "cli dotted (command line)  [winner]" in result.stdout
+
+
 class TestBroadcastFlags:
     """The three convenience flags fan out as patches, below explicit paths."""
 

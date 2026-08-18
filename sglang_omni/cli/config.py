@@ -27,6 +27,10 @@ config_app = typer.Typer(help="Inspect, resolve and export the pipeline configur
 _MODEL_PATH_HELP = "The Hugging Face model ID or the path to the model directory."
 _CONFIG_HELP = "Path to a pipeline config file, as accepted by `sgl-omni serve`."
 _TEXT_ONLY_HELP = "Use the thinker-only pipeline, as `sgl-omni serve --text-only` does."
+_MEM_FRACTION_HELP = (
+    "Set engine.mem_fraction_static on every SGLang engine stage, as "
+    "`sgl-omni serve --mem-fraction-static` does."
+)
 
 
 def _dump_yaml(data: Any) -> str:
@@ -108,6 +112,7 @@ def _resolve_sources(
     model_path: str | None,
     config_file: str | None,
     text_only: bool,
+    mem_fraction_static: float | None,
     argv: list[str],
 ) -> Resolution:
     """Build the configuration ``sgl-omni serve`` would build from this input.
@@ -117,6 +122,10 @@ def _resolve_sources(
     difference is that a launch throws the provenance away and this keeps it,
     which is what lets these commands answer *which source set this value*.
     """
+    # Local import: serve owns the broadcast flag's fan-out; importing it here
+    # keeps the two commands building identical patch sets.
+    from sglang_omni.cli.serve import patches_from_broadcast_flags
+
     if config_file is None and model_path is None:
         raise typer.BadParameter("--model-path is required unless --config is set")
 
@@ -135,6 +144,11 @@ def _resolve_sources(
             )
             baseline, patches = manager.config, ConfigPatchSet()
 
+        patches = patches.merge(
+            patches_from_broadcast_flags(
+                baseline, mem_fraction_static=mem_fraction_static
+            )
+        )
         extra_args = ConfigManager(baseline).parse_extra_args(list(argv))
         patches = patches.merge(
             patches_from_dotted_cli(extra_args, baseline, origin="command line")
@@ -159,6 +173,9 @@ def resolve(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
+    mem_fraction_static: Annotated[
+        float | None, typer.Option("--mem-fraction-static", help=_MEM_FRACTION_HELP)
+    ] = None,
     show: Annotated[
         ResolveOutput,
         typer.Option(
@@ -182,6 +199,7 @@ def resolve(
         model_path=model_path,
         config_file=config,
         text_only=text_only,
+        mem_fraction_static=mem_fraction_static,
         argv=ctx.args,
     )
     provenance = resolution.resolved.provenance
@@ -236,6 +254,9 @@ def explain(
     text_only: Annotated[
         bool, typer.Option("--text-only", help=_TEXT_ONLY_HELP)
     ] = False,
+    mem_fraction_static: Annotated[
+        float | None, typer.Option("--mem-fraction-static", help=_MEM_FRACTION_HELP)
+    ] = None,
 ) -> None:
     """Say where one configuration value came from, and what it overrode.
 
@@ -246,6 +267,7 @@ def explain(
         model_path=model_path,
         config_file=config,
         text_only=text_only,
+        mem_fraction_static=mem_fraction_static,
         argv=ctx.args,
     )
     provenance = resolution.resolved.provenance
