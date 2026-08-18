@@ -109,8 +109,8 @@ Serve the model:
 sgl-omni serve \
   --model-path OpenMOSS-Team/MOSS-Transcribe-Diarize \
   --port 8000 \
-  --max-running-requests 16 \
-  --cuda-graph-max-bs 16 \
+  --asr.engine.max_running_requests 16 \
+  --asr.engine.cuda_graph_max_bs 16 \
   --mem-fraction-static 0.80
 ```
 
@@ -192,8 +192,8 @@ Thanks to the Moss team for providing the benchmark datasets, we prepare movies8
 python -m benchmarks.eval.benchmark_asr_transcribe_diarize \
   --dataset movies800times \
   --concurrency 16 \
-  --max-running-requests 16 \
-  --cuda-graph-max-bs 16 \
+  --asr.engine.max_running_requests 16 \
+  --asr.engine.cuda_graph_max_bs 16 \
   --mem-fraction-static 0.80 \
   --output-dir results/moss_transcribe_diarize_movies800times
 
@@ -210,8 +210,8 @@ python -m benchmarks.eval.benchmark_asr_transcribe_diarize \
 python -m benchmarks.eval.benchmark_asr_transcribe_diarize \
   --dataset aishell4_long \
   --concurrency 16 \
-  --max-running-requests 16 \
-  --cuda-graph-max-bs 16 \
+  --asr.engine.max_running_requests 16 \
+  --asr.engine.cuda_graph_max_bs 16 \
   --mem-fraction-static 0.80 \
   --max-new-tokens 65536 \
   --request-timeout-s 1800 \
@@ -221,8 +221,8 @@ python -m benchmarks.eval.benchmark_asr_transcribe_diarize \
 python -m benchmarks.eval.benchmark_asr_transcribe_diarize \
   --dataset googletime \
   --concurrency 16 \
-  --max-running-requests 16 \
-  --cuda-graph-max-bs 16 \
+  --asr.engine.max_running_requests 16 \
+  --asr.engine.cuda_graph_max_bs 16 \
   --mem-fraction-static 0.80 \
   --max-new-tokens 65536 \
   --request-timeout-s 1800 \

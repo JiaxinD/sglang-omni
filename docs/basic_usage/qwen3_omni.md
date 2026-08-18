@@ -178,17 +178,18 @@ Exact-shape CUDA Graph replay is enabled by default for Qwen3-Omni Code2Wav.
 The default stage config supplies a 2% typed GPU memory budget; colocated
 example configs override it with their hardware-specific budget.
 
-To disable replay, add this runtime override to the YAML config:
+To disable replay, set it on the stage in the YAML config:
 
 ```yaml
-runtime_overrides:
+stages:
   code2wav:
-    enable_cuda_graph: false
+    model:
+      enable_cuda_graph: false
 ```
 
 When replay is enabled, a custom Code2Wav stage must define
-`runtime.resources.total_gpu_memory_fraction`; startup rejects a missing typed
-budget before loading the model.
+`gpu_memory_fraction`; startup rejects a missing typed budget before loading
+the model.
 
 The feature derives the exact `B=1` threshold windows from
 `stream_chunk_size` and `left_context_size`; the defaults capture
@@ -248,8 +249,8 @@ Use per-stage flags when the thinker and talker need different budgets:
 sgl-omni serve \
   --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
   --port 8008 \
-  --thinker-mem-fraction-static 0.88 \
-  --talker-mem-fraction-static 0.88
+  --thinker.engine.mem_fraction_static 0.88 \
+  --talker_ar.engine.mem_fraction_static 0.88
 ```
 
 The speech server launcher exposes the same per-stage controls:
@@ -266,9 +267,9 @@ python examples/run_omni.py qwen3-speech-server \
   --talker-mem-fraction-static 0.88
 ```
 
-`--mem-fraction-static` applies to both Qwen AR stages. Per-stage flags override
-the global value for that stage. Values must be greater than `0` and less than
-`1`.
+`--mem-fraction-static` applies to every SGLang engine stage. A dotted
+per-stage path overrides the global value for that stage. Values must be
+greater than `0` and less than `1`.
 
 The thinker admits up to 64 running requests by default. Use the
 thinker-specific flag to lower or raise that limit in either text-only or
@@ -277,17 +278,16 @@ speech mode:
 ```bash
 sgl-omni serve \
   --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-  --thinker-max-running-requests 16
+  --thinker.engine.max_running_requests 16
 ```
 
-`--max-running-requests` continues to target the generation stage, which is the
-talker in the Qwen3-Omni speech pipeline. To configure the thinker through a
-pipeline YAML file instead, use the stage runtime override:
+To configure the thinker through a pipeline YAML file instead, set the same
+path under the stage entry:
 
 ```yaml
-runtime_overrides:
+stages:
   thinker:
-    server_args_overrides:
+    engine:
       max_running_requests: 16
 ```
 

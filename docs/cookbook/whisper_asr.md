@@ -29,9 +29,10 @@ config_cls: WhisperASRPipelineConfig
 name: whisper
 model_path: openai/whisper-large-v3-turbo
 
-runtime_overrides:
+stages:
   asr:
-    enable_encoder_cuda_graph: false
+    model:
+      enable_encoder_cuda_graph: false
 ```
 
 The graph is captured after SGLang's generation graphs. With pre-LM off, raise `max_prefill_tokens` before configuring larger LM-side buckets (12/16). Each request uses the smallest captured bucket that fits its batch. Requests larger than every captured bucket, with a different feature shape, or without a successful capture run eagerly. Startup and first-replay logs identify the captured and executed buckets.
