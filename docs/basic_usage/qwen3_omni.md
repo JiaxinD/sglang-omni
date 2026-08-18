@@ -297,8 +297,8 @@ At concurrency 8, the talker is the heaviest speech stage: it holds its GPU
 at about 86% median utilization. Give it a GPU of its own. The code2wav
 vocoder is light by comparison (9–13% median utilization) and shares the
 thinker's GPU by default. That default holds only when the thinker stays on
-its own default GPU — a `--thinker-gpus` override moves the thinker alone,
-not code2wav, so pass `--code2wav-gpu` explicitly too if you relocate the
+its own default GPU — a `--thinker.gpu` override moves the thinker alone,
+not code2wav, so pass `--code2wav.gpu` explicitly too if you relocate the
 thinker.
 
 This is the default topology for `sgl-omni serve` without GPU overrides:
@@ -306,7 +306,7 @@ thinker alone, talker alone, code2wav on the thinker's GPU. When code2wav
 shares the thinker's GPU, the thinker's auto-sized KV pool shrinks to make
 room for it — about 4.3 GiB smaller, measured on H200, since the vocoder
 itself needs roughly 1.4–1.6 GiB. That adjustment only happens for the
-auto-sized budget: an explicitly pinned `--thinker-mem-fraction-static`
+auto-sized budget: an explicitly pinned `--thinker.engine.mem_fraction_static`
 gets no automatic carve-out, so a tightly pinned fraction should leave
 headroom for code2wav.
 
