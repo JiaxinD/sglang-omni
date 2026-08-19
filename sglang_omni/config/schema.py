@@ -262,6 +262,22 @@ class StageConfig(BaseModel):
     def model_post_init(self, __context: Any = None) -> None:
         if self.tp_size < 1:
             raise ValueError(f"Stage {self.name!r} must have tp_size >= 1")
+        if isinstance(self.gpu, int) and self.tp_size > 1:
+            raise ValueError(
+                f"Stage {self.name!r}: TP placement requires a list of "
+                f"{self.tp_size} unique GPU ids, got scalar gpu={self.gpu}"
+            )
+        if isinstance(self.gpu, list):
+            if len(self.gpu) != self.tp_size:
+                raise ValueError(
+                    f"Stage {self.name!r}: gpu has {len(self.gpu)} entries "
+                    f"but tp_size={self.tp_size}"
+                )
+            if len(set(self.gpu)) != len(self.gpu):
+                raise ValueError(
+                    f"Stage {self.name!r}: TP placement requires unique GPU "
+                    f"ids, got {list(self.gpu)}"
+                )
         if self.process is not None:
             self.process = self.process.strip()
             if not self.process:
@@ -544,13 +560,6 @@ class PipelineConfig(BaseModel):
             if s.stream_done_to_fn is not None and not s.stream_to:
                 raise ValueError(
                     f"Stage {s.name!r} cannot set stream_done_to_fn without stream_to"
-                )
-            if s.tp_size < 1:
-                raise ValueError(f"Stage {s.name!r} must have tp_size >= 1")
-            if isinstance(s.gpu, list) and len(s.gpu) != s.tp_size:
-                raise ValueError(
-                    f"Stage {s.name!r}: gpu has {len(s.gpu)} entries "
-                    f"but tp_size={s.tp_size}"
                 )
             if s.wait_for:
                 if not s.merge_fn:

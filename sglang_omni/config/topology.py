@@ -63,7 +63,6 @@ def _build_process_groups(
     gpu_placement: StagePlacementPlan,
 ) -> list[ProcessGroupPlacement]:
     non_tp_stages = [stage for stage in stages if stage.tp_size == 1]
-    _validate_non_tp_processes(non_tp_stages)
 
     components = _resolve_non_tp_process_components(config, non_tp_stages)
     used_names: set[str] = set()
@@ -78,15 +77,6 @@ def _build_process_groups(
             )
         )
     return groups
-
-
-def _validate_non_tp_processes(stages: list[StageConfig]) -> None:
-    for stage in stages:
-        if stage.process is None:
-            raise ValueError(
-                f"Stage {stage.name!r} must declare process; non-TP stage "
-                "process groups are explicit"
-            )
 
 
 def _resolve_non_tp_process_components(

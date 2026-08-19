@@ -75,14 +75,6 @@ def _print_merged_config(pipeline_config: PipelineConfig) -> None:
     print("=" * 50)
 
 
-def _validate_mem_fraction_static(flag_name: str, value: float | None) -> float | None:
-    if value is None:
-        return None
-    if not 0.0 < value < 1.0:
-        raise typer.BadParameter(f"{flag_name} must be > 0 and < 1, got {value}")
-    return float(value)
-
-
 def _validate_allowed_local_media_path(value: str | None) -> str | None:
     if value is None:
         return None
@@ -130,14 +122,12 @@ def patches_from_broadcast_flags(
     one stage still outranks it -- and ``sgl-omni config explain`` can name
     the flag that set a value.
 
-    Validation (range, no engine stage) raises ``typer.BadParameter`` before
-    any patch is built, so an error cannot leave a half-written config.
+    The value's range is the schema's rule (``engine.mem_fraction_static``
+    refuses anything outside (0, 1) at resolution); only the broadcast's own
+    precondition -- an engine stage to fan out to -- is checked here.
     """
     patches = ConfigPatchSet()
 
-    mem_fraction_static = _validate_mem_fraction_static(
-        "--mem-fraction-static", mem_fraction_static
-    )
     if mem_fraction_static is None:
         return patches
     engine_stages = _engine_stage_names(pipeline_config)

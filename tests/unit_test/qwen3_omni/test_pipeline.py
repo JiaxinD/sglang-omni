@@ -761,11 +761,11 @@ def test_qwen_broadcast_rejects_invalid_mem_fraction_without_partial_write() -> 
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
     original = config.model_dump()
 
-    with pytest.raises(typer.BadParameter, match="must be > 0 and < 1"):
-        patches_from_broadcast_flags(
-            config,
-            mem_fraction_static=1.0,
-        )
+    # Range is the schema's rule: the flag builds patches, and resolution
+    # refuses the out-of-range value without touching the source config.
+    patches = patches_from_broadcast_flags(config, mem_fraction_static=1.0)
+    with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+        ConfigManager(config).merge_config([], extra_patches=patches)
 
     assert config.model_dump() == original
 

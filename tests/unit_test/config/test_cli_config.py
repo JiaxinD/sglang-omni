@@ -330,7 +330,7 @@ class TestTensorParallelDerivation:
         data = {
             "config_cls": "MingOmniPipelineConfig",
             "model_path": "dummy",
-            "stages": {"thinker": {"tp_size": 2}},
+            "stages": {"thinker": {"tp_size": 2, "gpu": [0, 1]}},
         }
         path = tmp_path / "ming.yaml"
         path.write_text(yaml.safe_dump(data, sort_keys=False))
@@ -486,13 +486,11 @@ class TestBroadcastFlags:
         assert merged.stage_named(stage).engine.mem_fraction_static == 0.6
 
     def test_an_out_of_range_fraction_is_refused(self, base_config):
-        import typer
-
-        with pytest.raises(typer.BadParameter, match="> 0 and < 1"):
-            patches_from_broadcast_flags(
-                base_config,
-                mem_fraction_static=1.5,
-            )
+        # Range is the schema's rule: the flag builds patches, and resolution
+        # refuses the out-of-range value with the schema's message.
+        patches = patches_from_broadcast_flags(base_config, mem_fraction_static=1.5)
+        with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+            ConfigManager(base_config).merge_config([], extra_patches=patches)
 
     def test_without_the_flag_no_patch_is_built(self, base_config):
         patches = patches_from_broadcast_flags(
