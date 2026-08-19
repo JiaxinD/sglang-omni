@@ -126,7 +126,8 @@ def _aggregate_stage(
 
 
 def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConfig:
-    # note (jiaxin deng): async decode defaults on; --decode-mode sync overrides it.
+    # note (jiaxin deng): async decode defaults on;
+    # --thinker.factory.enable_async_decode false overrides it.
     return EngineStageConfig(
         name="thinker",
         process=process,

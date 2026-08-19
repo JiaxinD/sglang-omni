@@ -16,12 +16,12 @@ Precedence is ``(layer, specificity, path depth, insertion order)``:
 * **layer** separates sources. A CLI value beats a YAML value because
   ``Layer.CLI > Layer.USER_FILE``, not because of the order helpers happen to
   run in ``cli/serve.py``.
-* **specificity** separates aliases *within* one source. ``--mem-fraction-static``
-  broadcasts to several stages, ``--talker-mem-fraction-static`` names one role;
-  both are legal at once and the per-role value must win.
+* **specificity** separates spellings *within* one source. ``--mem-fraction-static``
+  broadcasts to every engine stage, ``--thinker.engine.mem_fraction_static``
+  names one stage; both are legal at once and the explicit path must win.
 * **path depth** makes a container patch apply before a patch nested inside it,
-  so ``stages.thinker.runtime`` never clobbers a sibling
-  ``stages.thinker.runtime.max_seq_len``.
+  so ``stages.thinker.env`` never clobbers a sibling
+  ``stages.thinker.env.OMP_NUM_THREADS``.
 * **insertion order** is the final tie-break, and only ever applies to patches
   that a duplicate check has already accepted.
 """
