@@ -59,13 +59,13 @@ def test_ming_tts_example_config_uses_supported_audio_decode_contract() -> None:
     assert isinstance(config, MingTTSPipelineConfig)
 
     audio_decode = config.stage_named(AUDIO_DECODE_STAGE)
-    extra = audio_decode.factory.model_extra or {}
+    factory = audio_decode.factory
 
-    assert "decode_mode" not in extra
-    assert extra["initial_chunk_patches"] == MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES
-    assert extra["steady_chunk_patches"] == MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES
-    assert audio_decode.factory.max_batch_size == 1
-    assert audio_decode.factory.max_batch_wait_ms == 0
+    assert "decode_mode" not in (factory.model_extra or {})
+    assert factory.initial_chunk_patches == MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES
+    assert factory.steady_chunk_patches == MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES
+    assert factory.max_batch_size == 1
+    assert factory.max_batch_wait_ms == 0
 
 
 def test_ming_tts_missing_initial_cadence_uses_default() -> None:
@@ -73,29 +73,34 @@ def test_ming_tts_missing_initial_cadence_uses_default() -> None:
     _audio_decode_stage(raw)["factory"].pop("initial_chunk_patches")
 
     config = MingTTSPipelineConfig.model_validate(raw)
-    extra = config.stage_named(AUDIO_DECODE_STAGE).factory.model_extra or {}
+    factory = config.stage_named(AUDIO_DECODE_STAGE).factory
 
-    assert "initial_chunk_patches" not in extra
-    # The default applies at the consumer; validation accepts the omission.
+    assert factory.initial_chunk_patches is None
+    # None means unset: the default applies at the consumer.
 
 
 @pytest.mark.parametrize("field", ["initial_chunk_patches", "steady_chunk_patches"])
-@pytest.mark.parametrize("value", [True, 1.5, "2", 0, -1])
+@pytest.mark.parametrize("value", [1.5, 0, -1])
 def test_ming_tts_rejects_invalid_cadence(field: str, value: Any) -> None:
+    """The positive-integer rule is a static declaration on the typed group."""
     raw = MingTTSPipelineConfig(model_path="fake-model").model_dump()
     _audio_decode_stage(raw)["factory"][field] = value
 
-    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+    with pytest.raises(ValueError, match=field):
         MingTTSPipelineConfig.model_validate(raw)
 
 
 @pytest.mark.parametrize("field", ["initial_chunk_patches", "steady_chunk_patches"])
-def test_ming_tts_rejects_invalid_cadence_via_dotted_override(field: str) -> None:
-    """The same rule holds when the write arrives through the merge."""
+@pytest.mark.parametrize("text", ["0", "true", "1.5"])
+def test_ming_tts_rejects_invalid_cadence_via_dotted_override(
+    field: str, text: str
+) -> None:
+    """The same rule holds when the write arrives through the merge; a
+    boolean is refused by the lossless conversion rule on the way in."""
     config = MingTTSPipelineConfig(model_path="fake-model")
-    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+    with pytest.raises(ValueError, match=field):
         ConfigManager(config).merge_config(
-            [(f"{AUDIO_DECODE_STAGE}.factory.{field}", "0")]
+            [(f"{AUDIO_DECODE_STAGE}.factory.{field}", text)]
         )
 
 
@@ -106,10 +111,10 @@ def test_ming_tts_accepts_initial_cadence_larger_than_steady() -> None:
     factory["steady_chunk_patches"] = 2
 
     config = MingTTSPipelineConfig.model_validate(raw)
-    extra = config.stage_named(AUDIO_DECODE_STAGE).factory.model_extra or {}
+    factory = config.stage_named(AUDIO_DECODE_STAGE).factory
 
-    assert extra["initial_chunk_patches"] == 4
-    assert extra["steady_chunk_patches"] == 2
+    assert factory.initial_chunk_patches == 4
+    assert factory.steady_chunk_patches == 2
 
 
 def test_ming_tts_rejects_legacy_audio_decode_mode() -> None:

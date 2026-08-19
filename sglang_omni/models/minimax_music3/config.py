@@ -32,6 +32,21 @@ def _visible_gpu_count() -> int:
     return torch.cuda.device_count()
 
 
+class DitDavFactoryArgs(FactoryArgs):
+    """Acoustic DIT/DAV constructor knobs, typed like the shared ones."""
+
+    dit_steps: int | None = Field(default=None, ge=1)
+    dit_cfg_scale: float | None = None
+    attention_backend: str | None = None
+    cache_dit: bool | None = None
+    compile_acoustic: bool | None = None
+    breakable_cuda_graph: bool | None = None
+
+
+class DitDavStageConfig(StageConfig):
+    factory: DitDavFactoryArgs = Field(default_factory=DitDavFactoryArgs)
+
+
 def _stages(*, acoustic_gpu: int) -> list[StageConfig]:
     return [
         StageConfig(
@@ -49,11 +64,11 @@ def _stages(*, acoustic_gpu: int) -> list[StageConfig]:
             next="dit_dav",
             stream_to=["dit_dav"],
         ),
-        StageConfig(
+        DitDavStageConfig(
             name="dit_dav",
             process="minimax_music3_dit_dav",
             factory_path=f"{_PKG}.stages.create_dit_dav_executor",
-            factory=FactoryArgs(
+            factory=DitDavFactoryArgs(
                 dtype="float32",
                 dit_steps=DEFAULT_DIT_STEPS,
                 dit_cfg_scale=DEFAULT_DIT_CFG_SCALE,
@@ -89,6 +104,7 @@ class MiniMaxMusic3PipelineConfig(PipelineConfig):
 
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "minimax_music3_ar": EngineStageConfig,
+        "dit_dav": DitDavStageConfig,
     }
 
     stages: list[StageConfig] = Field(

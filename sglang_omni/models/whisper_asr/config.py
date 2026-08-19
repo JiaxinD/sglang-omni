@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import Field
+
 from sglang_omni.config import (
     AudioChunkingConfig,
     EngineArgs,
@@ -19,6 +21,21 @@ _PKG = "sglang_omni.models.whisper_asr"
 WHISPER_MAX_INPUT_SECONDS = 30
 
 
+class WhisperASRFactoryArgs(FactoryArgs):
+    """Whisper's own constructor knobs, typed like the shared ones."""
+
+    enable_encoder_cuda_graph: bool | None = None
+    enable_pre_lm_encoder: bool | None = None
+    pre_lm_cache_max_entries: int | None = Field(default=None, ge=1)
+    pre_lm_cache_size_bytes: int | None = Field(default=None, ge=1)
+    pre_lm_max_batch_size: int | None = Field(default=None, ge=1)
+    pre_lm_max_batch_wait_ms: int | None = Field(default=None, ge=0)
+
+
+class WhisperASRStageConfig(EngineStageConfig):
+    factory: WhisperASRFactoryArgs = Field(default_factory=WhisperASRFactoryArgs)
+
+
 class WhisperASRPipelineConfig(PipelineConfig):
     """Single-stage batched ASR pipeline for Whisper checkpoints."""
 
@@ -31,7 +48,7 @@ class WhisperASRPipelineConfig(PipelineConfig):
     )
 
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
-        "asr": EngineStageConfig,
+        "asr": WhisperASRStageConfig,
     }
 
     def supports_audio_translation(self) -> bool:
@@ -41,12 +58,12 @@ class WhisperASRPipelineConfig(PipelineConfig):
     model_path: str
     entry_stage: str = "asr"
     stages: list[StageConfig] = [
-        EngineStageConfig(
+        WhisperASRStageConfig(
             name="asr",
             process="asr",
             factory_path=f"{_PKG}.stages.create_sglang_whisper_asr_executor",
             engine=EngineArgs(max_running_requests=64),
-            factory=FactoryArgs(
+            factory=WhisperASRFactoryArgs(
                 device="cuda:0",
                 # The encoder CUDA-graph replay is a documented tuning knob for
                 # this pipeline; disable it when profiling eager encoder

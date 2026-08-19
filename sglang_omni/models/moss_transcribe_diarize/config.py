@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from pydantic import Field
+
 from sglang_omni.config import (
     EngineArgs,
     EngineStageConfig,
@@ -24,6 +26,17 @@ _ENCODER_CACHE_SIZE_BYTES = 4 * 1024**3
 _MAX_PIPELINE_INTRAOP_THREADS = 8
 
 
+class MossTDFactoryArgs(FactoryArgs):
+    """MOSS-TD's own constructor knobs, typed like the shared ones."""
+
+    encoder_cache_size_bytes: int | None = Field(default=None, ge=0)
+    encoder_max_batch_size: int | None = Field(default=None, ge=1)
+
+
+class MossTDStageConfig(EngineStageConfig):
+    factory: MossTDFactoryArgs = Field(default_factory=MossTDFactoryArgs)
+
+
 class MossTranscribeDiarizePipelineConfig(PipelineConfig):
     """Single-stage batched ASR/diarization pipeline for MOSS-TD checkpoints."""
 
@@ -31,17 +44,17 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
     requires_model_capabilities: ClassVar[bool] = True
 
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
-        "asr": EngineStageConfig,
+        "asr": MossTDStageConfig,
     }
 
     model_path: str
     entry_stage: str = "asr"
     stages: list[StageConfig] = [
-        EngineStageConfig(
+        MossTDStageConfig(
             name="asr",
             process="asr",
             factory_path=f"{_PKG}.stages.create_sglang_moss_transcribe_diarize_executor",
-            factory=FactoryArgs(
+            factory=MossTDFactoryArgs(
                 device="cuda:0",
                 encoder_cache_size_bytes=4 * 1024**3,
                 encoder_max_batch_size=_ENCODER_MAX_BATCH_SIZE,

@@ -216,7 +216,7 @@ def test_whisper_asr_config_uses_single_batched_stage() -> None:
     assert stage.engine.max_running_requests == 64
     factory = stage.factory
     assert factory.device == "cuda:0"
-    assert factory.model_extra["enable_encoder_cuda_graph"] is True
+    assert factory.enable_encoder_cuda_graph is True
     assert factory.request_build_max_workers == 8
     assert factory.enable_async_decode is True
     assert factory.async_decode_min_batch_size == 2
@@ -226,12 +226,12 @@ def test_whisper_asr_config_uses_single_batched_stage() -> None:
     assert factory.prefill_coalesce_when_idle is True
     assert factory.prefill_coalesce_requires_pending_builds is True
     assert factory.prefill_coalesce_after_builds_during_decode is False
-    assert factory.model_extra["enable_pre_lm_encoder"] is True
-    assert factory.model_extra["pre_lm_cache_max_entries"] == 1024
+    assert factory.enable_pre_lm_encoder is True
+    assert factory.pre_lm_cache_max_entries == 1024
     # None: the byte budget is derived from the entry count.
-    assert factory.model_extra["pre_lm_cache_size_bytes"] is None
-    assert factory.model_extra["pre_lm_max_batch_size"] == 8
-    assert factory.model_extra["pre_lm_max_batch_wait_ms"] == 0
+    assert factory.pre_lm_cache_size_bytes is None
+    assert factory.pre_lm_max_batch_size == 8
+    assert factory.pre_lm_max_batch_wait_ms == 0
     assert (factory.model_extra or {}).get("max_prefill_tokens") is None
     assert (
         PIPELINE_CONFIG_REGISTRY.get_config("WhisperForConditionalGeneration")

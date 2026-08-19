@@ -179,18 +179,13 @@ def test_minimax_music3_explicit_placements_ignore_the_machine(
         assert dual_stages["minimax_music3_ar"].factory.max_concurrency == 16
         assert dual_stages["dit_dav"].gpu == 1
         assert dual_stages["dit_dav"].factory.dtype == "float32"
-        assert (
-            dual_stages["dit_dav"].factory.model_extra["breakable_cuda_graph"] is False
-        )
+        assert dual_stages["dit_dav"].factory.breakable_cuda_graph is False
         assert dual.placement.require_memory_fraction_for_colocation
         assert single_stages["minimax_music3_ar"].gpu == 0
         assert single_stages["minimax_music3_ar"].factory.max_concurrency == 16
         assert single_stages["dit_dav"].gpu == 0
         assert single_stages["dit_dav"].factory.dtype == "float32"
-        assert (
-            single_stages["dit_dav"].factory.model_extra["breakable_cuda_graph"]
-            is False
-        )
+        assert single_stages["dit_dav"].factory.breakable_cuda_graph is False
         assert not single.placement.require_memory_fraction_for_colocation
 
 
@@ -225,7 +220,7 @@ def test_minimax_music3_default_follows_the_visible_gpus(
     assert stages["minimax_music3_ar"].gpu == 0
     assert stages["dit_dav"].gpu == acoustic_gpu
     assert stages["dit_dav"].factory.dtype == acoustic_dtype
-    assert stages["dit_dav"].factory.model_extra["compile_acoustic"] is True
+    assert stages["dit_dav"].factory.compile_acoustic is True
     assert config.placement.require_memory_fraction_for_colocation is colocation_check
     assert MiniMaxMusic3PipelineConfig.stage_config_cls(
         "minimax_music3_ar"

@@ -33,7 +33,7 @@ def test_streaming_thinker_fans_out_to_decode_and_segmenter():
     decode = _stage(config, DECODE_STAGE)
     assert thinker.next == [DECODE_STAGE, SEGMENTER_STAGE]
     assert thinker.stream_to == [DECODE_STAGE, SEGMENTER_STAGE]
-    assert thinker.factory.model_extra["enable_streaming_tts"] is True
+    assert thinker.factory.enable_streaming_tts is True
     assert decode.can_accept_stream_before_payload is True
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from pydantic import Field
+
 from sglang_omni.config import (
     EngineStageConfig,
     FactoryArgs,
@@ -162,6 +164,31 @@ def validate_ming_tts_audio_decode_cadence_config(
         )
 
 
+class MingTTSPreprocessingFactoryArgs(FactoryArgs):
+    """Preprocessing constructor knobs, typed like the shared ones."""
+
+    max_decode_steps_cap: int | None = Field(default=None, gt=0)
+
+
+class MingTTSPreprocessingStageConfig(StageConfig):
+    factory: MingTTSPreprocessingFactoryArgs = Field(
+        default_factory=MingTTSPreprocessingFactoryArgs
+    )
+
+
+class MingTTSAudioDecodeFactoryArgs(FactoryArgs):
+    """Audio-decode cadence knobs, typed like the shared ones."""
+
+    initial_chunk_patches: int | None = Field(default=None, gt=0)
+    steady_chunk_patches: int | None = Field(default=None, gt=0)
+
+
+class MingTTSAudioDecodeStageConfig(StageConfig):
+    factory: MingTTSAudioDecodeFactoryArgs = Field(
+        default_factory=MingTTSAudioDecodeFactoryArgs
+    )
+
+
 class MingTTSPipelineConfig(PipelineConfig):
     """Ming-Omni-TTS pipeline.
 
@@ -174,17 +201,19 @@ class MingTTSPipelineConfig(PipelineConfig):
     requires_model_capabilities: ClassVar[bool] = True
 
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        PREPROCESSING_STAGE: MingTTSPreprocessingStageConfig,
         TTS_ENGINE_STAGE: EngineStageConfig,
+        AUDIO_DECODE_STAGE: MingTTSAudioDecodeStageConfig,
     }
 
     model_path: str
     entry_stage: str = PREPROCESSING_STAGE
     stages: list[StageConfig] = [
-        StageConfig(
+        MingTTSPreprocessingStageConfig(
             name=PREPROCESSING_STAGE,
             process="pipeline",
             factory_path=f"{_PKG}.stages.create_preprocessing_executor",
-            factory=FactoryArgs(
+            factory=MingTTSPreprocessingFactoryArgs(
                 max_decode_steps_cap=MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP,
             ),
             next=REFERENCE_ENCODE_STAGE,
@@ -206,11 +235,11 @@ class MingTTSPipelineConfig(PipelineConfig):
             next=AUDIO_DECODE_STAGE,
             stream_to=[AUDIO_DECODE_STAGE],
         ),
-        StageConfig(
+        MingTTSAudioDecodeStageConfig(
             name=AUDIO_DECODE_STAGE,
             process="pipeline",
             factory_path=f"{_PKG}.stages.create_audio_decode_executor",
-            factory=FactoryArgs(
+            factory=MingTTSAudioDecodeFactoryArgs(
                 dtype="bfloat16",
                 initial_chunk_patches=MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES,
                 steady_chunk_patches=MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES,
@@ -229,30 +258,10 @@ class MingTTSPipelineConfig(PipelineConfig):
         preprocessing = stages[PREPROCESSING_STAGE]
         audio_decode = stages[AUDIO_DECODE_STAGE]
 
-        max_decode_steps_cap = preprocessing.factory.max_decode_steps_cap
-        if max_decode_steps_cap is None:
-            max_decode_steps_cap = MING_TTS_DEFAULT_MAX_DECODE_STEPS_CAP
-        if (
-            isinstance(max_decode_steps_cap, bool)
-            or not isinstance(max_decode_steps_cap, int)
-            or max_decode_steps_cap <= 0
-        ):
-            raise ValueError(
-                "Ming-Omni-TTS preprocessing factory.max_decode_steps_cap "
-                "must be a positive integer or null"
-            )
-
+        # The value rules (positive ints) are static Field declarations on
+        # the typed groups; only the model's cross-value contracts remain.
+        del preprocessing
         decode_extra = audio_decode.factory.model_extra or {}
-        initial_chunk_patches = decode_extra.get(
-            "initial_chunk_patches", MING_TTS_DEFAULT_INITIAL_CHUNK_PATCHES
-        )
-        steady_chunk_patches = decode_extra.get(
-            "steady_chunk_patches", MING_TTS_DEFAULT_STEADY_CHUNK_PATCHES
-        )
-        validate_ming_tts_audio_decode_cadence_config(
-            initial_chunk_patches=initial_chunk_patches,
-            steady_chunk_patches=steady_chunk_patches,
-        )
         if "decode_mode" in decode_extra:
             raise ValueError(
                 "Ming-Omni-TTS audio_decode no longer supports 'decode_mode'. "

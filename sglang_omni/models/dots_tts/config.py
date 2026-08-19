@@ -5,9 +5,26 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from sglang_omni.config import EngineStageConfig, PipelineConfig, StageConfig
+from pydantic import Field
+
+from sglang_omni.config import (
+    EngineStageConfig,
+    FactoryArgs,
+    PipelineConfig,
+    StageConfig,
+)
 
 _PKG = "sglang_omni.models.dots_tts"
+
+
+class DotsVocoderFactoryArgs(FactoryArgs):
+    """dots.tts vocoder constructor knobs, typed like the shared ones."""
+
+    stream_slots: int | None = Field(default=None, ge=1)
+
+
+class DotsVocoderStageConfig(StageConfig):
+    factory: DotsVocoderFactoryArgs = Field(default_factory=DotsVocoderFactoryArgs)
 
 
 class DotsTTSPipelineConfig(PipelineConfig):
@@ -25,6 +42,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
 
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "latent_engine": EngineStageConfig,
+        "vocoder": DotsVocoderStageConfig,
     }
 
     model_path: str
@@ -50,7 +68,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
             next="vocoder",
             stream_to=["vocoder"],
         ),
-        StageConfig(
+        DotsVocoderStageConfig(
             name="vocoder",
             process="pipeline",
             factory_path=f"{_PKG}.stages.create_vocoder_executor",
@@ -64,27 +82,32 @@ class DotsTTSPipelineConfig(PipelineConfig):
         super().model_post_init(__context)
         if any(stage.tp_size != 1 for stage in self.stages):
             raise ValueError("dots.tts currently supports tp_size=1 only")
+        # note (guozhihao-224): stream_slots must match backbone concurrency
+        # so a max_running_requests override cannot outrun vocoder admission
+        # after readiness. A pinned value that disagrees is refused here, on
+        # every rebuild; an unset value stays unset and is derived at launch
+        # (writing the derivation into the config would make it look pinned
+        # on the next merge).
+        stream_slots = self.stage_named("vocoder").factory.stream_slots
+        if stream_slots is not None:
+            derived = self._latent_max_running_requests(
+                self.stage_named("latent_engine")
+            )
+            if int(stream_slots) != derived:
+                raise ValueError(
+                    "dots.tts vocoder stream_slots "
+                    f"({int(stream_slots)}) must equal latent_engine "
+                    f"max_running_requests ({derived}); "
+                    "omit stream_slots to derive it from the latent engine"
+                )
 
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
         if stage_name == "vocoder":
-            # note (guozhihao-224): stream_slots must match backbone
-            # concurrency so a max_running_requests override cannot outrun
-            # vocoder admission after readiness. Derived at launch, after
-            # every configuration source has been resolved; an explicit
-            # vocoder stream_slots that disagrees is refused.
-            latent = self.stage_named("latent_engine")
-            max_running_requests = self._latent_max_running_requests(latent)
-            explicit = (self.stage_named("vocoder").factory.model_extra or {}).get(
-                "stream_slots"
-            )
-            if explicit is not None and int(explicit) != max_running_requests:
-                raise ValueError(
-                    "dots.tts vocoder stream_slots "
-                    f"({int(explicit)}) must equal latent_engine "
-                    f"max_running_requests ({max_running_requests}); "
-                    "omit stream_slots to derive it from the latent engine"
+            return {
+                "stream_slots": self._latent_max_running_requests(
+                    self.stage_named("latent_engine")
                 )
-            return {"stream_slots": max_running_requests}
+            }
         return {}
 
     @staticmethod
@@ -94,10 +117,6 @@ class DotsTTSPipelineConfig(PipelineConfig):
         if value is None:
             # Match DotsTTSEngineBuilder default when unset.
             return 16
-        if int(value) < 1:
-            raise ValueError(
-                f"dots.tts max_running_requests must be positive, got {value}"
-            )
         return int(value)
 
     def supports_uploaded_voice_references(self) -> bool:

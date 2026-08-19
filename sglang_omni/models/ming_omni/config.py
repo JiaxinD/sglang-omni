@@ -109,6 +109,25 @@ def _aggregate_stage(*, process: str) -> StageConfig:
     )
 
 
+class MingThinkerFactoryArgs(FactoryArgs):
+    """Thinker constructor knobs, typed like the shared ones."""
+
+    thinker_max_seq_len: int | None = Field(default=None, gt=0)
+    enable_streaming_tts: bool | None = None
+
+
+class MingThinkerStageConfig(EngineStageConfig):
+    factory: MingThinkerFactoryArgs = Field(default_factory=MingThinkerFactoryArgs)
+
+
+class MingTalkerFactoryArgs(FactoryArgs):
+    voice: str | None = Field(default=None, min_length=1)
+
+
+class MingTalkerStageConfig(StageConfig):
+    factory: MingTalkerFactoryArgs = Field(default_factory=MingTalkerFactoryArgs)
+
+
 def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConfig:
     project_payload = {
         DECODE_STAGE: f"{_PKG}.stages.project_thinker_to_decode",
@@ -116,11 +135,11 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
     if speech_enabled:
         project_payload[TALKER_STAGE] = f"{_PKG}.stages.project_thinker_to_talker"
 
-    return EngineStageConfig(
+    return MingThinkerStageConfig(
         name=THINKER_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory=FactoryArgs(thinker_max_seq_len=8192),
+        factory=MingThinkerFactoryArgs(thinker_max_seq_len=8192),
         gpu=gpu,
         next=[DECODE_STAGE, TALKER_STAGE] if speech_enabled else DECODE_STAGE,
         stream_to=[DECODE_STAGE],
@@ -135,11 +154,13 @@ def _streaming_thinker_stage(*, gpu: int, process: str) -> StageConfig:
     segmenter consumes TTS text chunks; decode needs stream_done to finalize
     stream=true requests.
     """
-    return StageConfig(
+    return MingThinkerStageConfig(
         name=THINKER_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory=FactoryArgs(thinker_max_seq_len=8192, enable_streaming_tts=True),
+        factory=MingThinkerFactoryArgs(
+            thinker_max_seq_len=8192, enable_streaming_tts=True
+        ),
         gpu=gpu,
         next=[DECODE_STAGE, SEGMENTER_STAGE],
         stream_to=[DECODE_STAGE, SEGMENTER_STAGE],
@@ -162,11 +183,11 @@ def _segmenter_stage(*, process: str) -> StageConfig:
 
 
 def _talker_stream_stage(*, gpu: int, process: str) -> StageConfig:
-    return StageConfig(
+    return MingTalkerStageConfig(
         name=TALKER_STREAM_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_streaming_talker_executor",
-        factory=FactoryArgs(device="cuda", voice="DB30"),
+        factory=MingTalkerFactoryArgs(device="cuda", voice="DB30"),
         gpu=gpu,
         terminal=True,
         can_accept_stream_before_payload=True,
@@ -184,11 +205,11 @@ def _decode_stage(*, process: str) -> StageConfig:
 
 
 def _talker_stage(*, gpu: int, process: str) -> StageConfig:
-    return StageConfig(
+    return MingTalkerStageConfig(
         name=TALKER_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_talker_executor",
-        factory=FactoryArgs(device="cuda", voice="DB30"),
+        factory=MingTalkerFactoryArgs(device="cuda", voice="DB30"),
         gpu=gpu,
         terminal=True,
     )
@@ -234,7 +255,9 @@ class _MingOmniBasePipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "BailingMM2NativeForConditionalGeneration"
     architecture_aliases: ClassVar[tuple[str, ...]] = ("BailingMoeV2ForCausalLM",)
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
-        THINKER_STAGE: EngineStageConfig,
+        THINKER_STAGE: MingThinkerStageConfig,
+        TALKER_STAGE: MingTalkerStageConfig,
+        TALKER_STREAM_STAGE: MingTalkerStageConfig,
     }
     tensor_parallel_disable_custom_all_reduce_stages: ClassVar[tuple[str, ...]] = (
         THINKER_STAGE,
