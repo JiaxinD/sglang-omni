@@ -75,9 +75,48 @@ parameter named. This only works because factories declare every parameter
 explicitly: never add a `**kwargs` catch-all to a stage factory, it turns
 both typos and silently-ignored settings into no-ops.
 
-Validation for a free-form key lives in its consumer, next to the code that
-reads it (see `DotsTTSStreamingVocoder` refusing an inconsistent
-`stream_slots`). The schema does not guess at keys it does not declare.
+### Validating a model-specific parameter
+
+A free-form key is not locked out of the mainstream validation pipeline.
+When the parameter has rules worth declaring — a range, an enum, eager
+validation — type it, exactly as a shared field would be: subclass the group,
+declare the field with its static constraints, and type the stage with it.
+
+```python
+class VocoderFactoryArgs(FactoryArgs):
+    stream_slots: int | None = Field(default=None, ge=1, le=64)
+
+class VocoderStageConfig(StageConfig):
+    factory: VocoderFactoryArgs = Field(default_factory=VocoderFactoryArgs)
+
+class MyPipelineConfig(PipelineConfig):
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "vocoder": VocoderStageConfig,
+    }
+```
+
+`stages.vocoder.factory.stream_slots` is now a typed path with identical
+treatment to a field declared on `FactoryArgs` itself, scoped to one stage:
+the static range is enforced at resolution, the lossless conversion rule
+applies to CLI text and YAML scalars, and `config explain` enumerates it.
+This is the same pattern `EngineStageConfig` uses, and the same principle as
+the shared groups: constraints are declarations on fields, not hand-written
+checks. (A subclass carrying real fields is not an empty shell.)
+
+The other two sites cover what a field declaration cannot express — both run
+at resolve time too, because the resolver rebuilds and re-validates the
+pipeline class on every merge:
+
+- **Cross-field and cross-stage rules** go in the pipeline class's
+  `model_post_init` — Ming-TTS validates its audio-decode cadence and batch
+  contract there, and Ming-Omni its GPU-collision rule.
+- **Rules that need the consumer's runtime state** stay in the consumer —
+  the dots vocoder refuses a `stream_slots` that disagrees with the latent
+  engine's admission limit, a relationship only known at launch.
+
+A parameter with no rules beyond "the factory accepts it" needs none of
+this; the signature default and the built-in unknown-kwarg refusal are
+enough.
 
 ## Case 2: a factory kwarg shared across models
 
@@ -193,10 +232,10 @@ Every rule has exactly one home, chosen by what the rule needs to see:
 
 | Rule needs | Site | Example |
 |---|---|---|
-| Only the value | Static `Field` constraint / `Literal` | `mem_fraction_static: Field(gt=0, lt=1)` |
+| Only the value | Static `Field` constraint / `Literal` — on the shared group, or a per-stage group subclass for one model | `mem_fraction_static: Field(gt=0, lt=1)`; `VocoderFactoryArgs.stream_slots` |
 | The right conversion | Nothing — lossless coercion is built in | bool refused on int fields |
 | Sibling fields on one object | `model_post_init` on that model | TP `gpu` list matches `tp_size` |
-| Several stages of one pipeline | The pipeline class's `model_post_init` | Ming GPU-collision check |
+| Several stages of one pipeline | The pipeline class's `model_post_init` | Ming GPU-collision check; Ming-TTS audio-decode contract |
 | The consumer's runtime state | The consumer, at the point of use | vocoder `stream_slots` vs. latent engine |
 | The factory's parameter list | Nothing — the signature check is built in | unknown `factory.*` key refused |
 

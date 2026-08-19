@@ -394,3 +394,66 @@ class TestManager:
         merged = manager.merge_config([("thinker.tp_size", "2")], extra_patches=extra)
         assert merged.model_path == "/models/flag"
         assert stage(merged, "thinker").tp_size == 2
+
+
+class TestPerStageTypedGroup:
+    """A model may subclass a group to type one stage's free-form keys.
+
+    The subclassed field becomes a typed path: static constraints enforce at
+    resolution and the lossless conversion rule applies -- identical
+    treatment to a field declared on the shared group, scoped to one stage."""
+
+    @staticmethod
+    def _pipeline_cls():
+        from typing import ClassVar
+
+        from pydantic import Field
+
+        from sglang_omni.config.schema import FactoryArgs, StageConfig
+
+        class VocoderFactoryArgs(FactoryArgs):
+            stream_slots: int | None = Field(default=None, ge=1, le=64)
+
+        class VocoderStageConfig(StageConfig):
+            factory: VocoderFactoryArgs = Field(default_factory=VocoderFactoryArgs)
+
+        class TypedGroupPipelineConfig(PipelineConfig):
+            stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+                "vocoder": VocoderStageConfig,
+            }
+            stages: list[StageConfig] = Field(
+                default_factory=lambda: [
+                    VocoderStageConfig(
+                        name="vocoder",
+                        process="p",
+                        factory_path="tests.fake:create_vocoder",
+                        terminal=True,
+                    )
+                ]
+            )
+
+        return TypedGroupPipelineConfig
+
+    def test_the_declared_range_is_enforced_at_resolution(self):
+        cls = self._pipeline_cls()
+        config = cls(model_path="dummy")
+        with pytest.raises(ValueError, match="stream_slots"):
+            ConfigManager(config).merge_config(
+                [("vocoder.factory.stream_slots", "128")]
+            )
+
+    def test_the_lossless_conversion_rule_applies(self):
+        cls = self._pipeline_cls()
+        config = cls(model_path="dummy")
+        with pytest.raises(ConfigPathError, match="got a boolean"):
+            ConfigManager(config).merge_config(
+                [("vocoder.factory.stream_slots", "true")]
+            )
+
+    def test_a_legal_value_lands_on_the_typed_field(self):
+        cls = self._pipeline_cls()
+        config = cls(model_path="dummy")
+        merged = ConfigManager(config).merge_config(
+            [("vocoder.factory.stream_slots", "8")]
+        )
+        assert merged.stage_named("vocoder").factory.stream_slots == 8

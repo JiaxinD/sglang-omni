@@ -603,6 +603,9 @@ def _is_traversable(annotation: Any) -> bool:
 
 
 def _type_name(annotation: Any) -> str:
+    # Constraint metadata is not part of the name a user reads.
+    if get_origin(annotation) is typing.Annotated:
+        return _type_name(get_args(annotation)[0])
     # Same 3.10 caveat as _is_model: ``list[int]`` passes ``isinstance(_, type)``
     # there and would render as a bare ``list``, losing its parameter.
     if isinstance(annotation, type) and get_origin(annotation) is None:
