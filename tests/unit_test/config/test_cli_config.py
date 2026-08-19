@@ -15,6 +15,8 @@ disk, which these tests have no weights for.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 import yaml
 from typer.testing import CliRunner
@@ -298,6 +300,79 @@ class TestExplain:
 
         assert result.exit_code == 0, output_of(result)
         assert f"{fraction} = 0.55  <- yaml file" in result.stdout
+
+    def test_a_top_level_file_value_names_the_file(self, runner, tmp_path, base_config):
+        """model_path written at the file's top level is the file's write,
+        not the model default."""
+        data = {
+            "config_cls": base_config.config_cls,
+            "model_path": "from/the/file",
+        }
+        path = tmp_path / "pipeline.yaml"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+        result = runner.invoke(
+            config_app, ["explain", "model_path", "--config", str(path)]
+        )
+
+        assert result.exit_code == 0, output_of(result)
+        assert "model_path = 'from/the/file'" in result.stdout
+        assert "yaml file" in result.stdout
+        assert "[winner]" in result.stdout
+
+
+class TestTensorParallelDerivation:
+    """The post-merge TP derivation: preview shows it, users outrank it."""
+
+    @pytest.fixture
+    def ming_config_file(self, tmp_path):
+        pytest.importorskip("sglang_omni.models.ming_omni.config")
+        data = {
+            "config_cls": "MingOmniPipelineConfig",
+            "model_path": "dummy",
+            "stages": {"thinker": {"tp_size": 2}},
+        }
+        path = tmp_path / "ming.yaml"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return path
+
+    def test_resolve_previews_the_derived_engine_override(
+        self, runner, ming_config_file
+    ):
+        with mock.patch(
+            "sglang_omni.cli.serve.should_disable_custom_all_reduce_for_gpus",
+            return_value=True,
+        ):
+            result = runner.invoke(
+                config_app,
+                ["resolve", "--config", str(ming_config_file), "--show", "config"],
+            )
+
+        assert result.exit_code == 0, output_of(result)
+        assert "disable_custom_all_reduce: true" in result.stdout
+
+    def test_an_explicit_engine_value_outranks_the_derivation(
+        self, runner, ming_config_file
+    ):
+        with mock.patch(
+            "sglang_omni.cli.serve.should_disable_custom_all_reduce_for_gpus",
+            return_value=True,
+        ):
+            result = runner.invoke(
+                config_app,
+                [
+                    "resolve",
+                    "--config",
+                    str(ming_config_file),
+                    "--thinker.engine.disable_custom_all_reduce",
+                    "false",
+                    "--show",
+                    "config",
+                ],
+            )
+
+        assert result.exit_code == 0, output_of(result)
+        assert "disable_custom_all_reduce: false" in result.stdout
 
 
 class TestModelPathWithConfig:

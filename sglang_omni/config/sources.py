@@ -45,7 +45,7 @@ from sglang_omni.config.patch import (
     SourceKind,
     Specificity,
 )
-from sglang_omni.config.path import ConfigPath, ConfigPathError
+from sglang_omni.config.path import ConfigPath, ConfigPathError, SegmentKind
 from sglang_omni.config.schema import PipelineConfig
 
 __all__ = [
@@ -112,10 +112,25 @@ def patches_from_dotted_cli(
                 f"line; write --{rest}",
                 raw=str(key),
             )
-        canonical = canonicalize_dotted_key(key, config)
+        canonical = canonicalize_dotted_key(str(key), config)
+        compiled = ConfigPath.parse(canonical, type(config))
+        if (
+            not compiled.is_leaf
+            and compiled.segments[-1].kind is not SegmentKind.FREEFORM
+        ):
+            # The CLI writes one leaf at a time. A whole group as one flag
+            # value would either replace the container (resetting siblings
+            # other sources set) or need its own merge semantics; the YAML
+            # ``stages:`` mapping is the surface for writing blocks. A
+            # free-form key is exempt: its type is open, so it *is* the leaf.
+            raise ConfigPathError(
+                f"--{key} addresses a settings group, not a single value; "
+                f"write one field below it, e.g. --{key}.<field> <value>",
+                raw=str(key),
+            )
         patchset.add(
             ConfigPatch.create(
-                canonical,
+                compiled,
                 value,
                 ConfigSource(SourceKind.CLI_DOTTED, origin),
                 root=type(config),
@@ -327,17 +342,32 @@ def sources_from_config_file(
     config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(data["config_cls"])
     stages_block = data.pop("stages", None)
     shared_block = data.pop("shared", None)
-    if stages_block is None and shared_block is None:
-        return config_cls(**data), ConfigPatchSet()
 
     config = config_cls(**data)
     patches = ConfigPatchSet()
+    source = ConfigSource(SourceKind.YAML_FILE, str(file_path))
+    # The top-level values become patches too -- they are already baked into
+    # the constructed config, but only a patch carries provenance, and without
+    # one `config explain` attributes a file's model_path to the model default.
+    for key, value in data.items():
+        if key == "config_cls":
+            # Selects which class to build; INTERNAL, not a writable path.
+            continue
+        if isinstance(value, dict) and not ConfigPath.parse(key, config_cls).is_leaf:
+            for leaf_path, leaf_value in _flatten(key, value, config_cls):
+                patches.add(
+                    ConfigPatch.create(leaf_path, leaf_value, source, root=config_cls)
+                )
+        else:
+            patches.add(ConfigPatch.create(key, value, source, root=config_cls))
     if stages_block is not None:
-        patches = patches_from_stages_mapping(
-            stages_block,
-            config_cls,
-            (stage.name for stage in config.stages),
-            origin=str(file_path),
+        patches = patches.merge(
+            patches_from_stages_mapping(
+                stages_block,
+                config_cls,
+                (stage.name for stage in config.stages),
+                origin=str(file_path),
+            )
         )
     if shared_block is not None:
         # Expanded against the settled stage list, so a selector can reach a

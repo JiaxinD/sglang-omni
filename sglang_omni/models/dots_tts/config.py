@@ -74,7 +74,7 @@ class DotsTTSPipelineConfig(PipelineConfig):
             # vocoder stream_slots that disagrees is refused.
             latent = self.stage_named("latent_engine")
             max_running_requests = self._latent_max_running_requests(latent)
-            explicit = (self.stage_named("vocoder").model.model_extra or {}).get(
+            explicit = (self.stage_named("vocoder").factory.model_extra or {}).get(
                 "stream_slots"
             )
             if explicit is not None and int(explicit) != max_running_requests:

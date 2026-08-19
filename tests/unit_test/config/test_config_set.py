@@ -10,7 +10,7 @@ prefix implied. What these tests pin down:
   conflict rules, same provenance;
 * the CLI coerces text by the declared type while YAML values keep their
   native types untouched;
-* the ``engine``/``scheduler``/``model`` groups accept keys beyond their
+* the ``engine``/``factory`` groups accept keys beyond their
   declared fields and pass them through untouched -- whether a key exists is
   the consuming module's call, not the parser's;
 * writing one path twice at the same precedence stays an error rather than
@@ -106,6 +106,20 @@ class TestDottedCli:
             patches_from_dotted_cli(
                 [("preprocessing.engine.mem_fraction_static", "0.5")],
                 pipeline_config,
+            )
+
+    def test_a_group_path_is_refused_with_leaf_guidance(self, pipeline_config):
+        """The CLI writes one leaf at a time; a whole group as one flag value
+        would replace the container and reset siblings other sources set."""
+        with pytest.raises(ConfigPathError, match="one field below"):
+            patches_from_dotted_cli(
+                [("thinker.factory", '{"device": "cpu"}')], pipeline_config
+            )
+
+    def test_a_group_path_is_refused_regardless_of_the_value(self, pipeline_config):
+        with pytest.raises(ConfigPathError, match="one field below"):
+            patches_from_dotted_cli(
+                [("thinker.engine", "not-a-mapping")], pipeline_config
             )
 
 

@@ -205,6 +205,10 @@ def apply_tensor_parallel_engine_overrides(
     cannot be a patch: the value does not exist until every source has been
     merged. Written through ``ConfigPath`` into a dump and re-validated, so
     the derivation goes through the same door as every other write.
+
+    A derivation only fills gaps: a key the merged configuration already sets
+    in the stage's engine block -- from the model default, the file, or a
+    dotted flag -- is left exactly as it was set.
     """
     config_cls = type(pipeline_config)
     topology_gated_custom_ar_stages = (
@@ -231,7 +235,10 @@ def apply_tensor_parallel_engine_overrides(
                 gpu_ids=gpu_ids,
                 should_disable=topology_gated_custom_ar_cache[gpu_ids],
             )
+        already_set = stage.engine.overrides() if stage.engine is not None else {}
         for key, value in updates.items():
+            if key in already_set:
+                continue
             writes[f"stages.{stage.name}.engine.{key}"] = value
 
     if not writes:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from enum import Enum
 from typing import Annotated, Any, NamedTuple, Optional
 
@@ -122,9 +123,13 @@ def _resolve_sources(
     difference is that a launch throws the provenance away and this keeps it,
     which is what lets these commands answer *which source set this value*.
     """
-    # Local import: serve owns the broadcast flag's fan-out; importing it here
-    # keeps the two commands building identical patch sets.
-    from sglang_omni.cli.serve import patches_from_broadcast_flags
+    # Local import: serve owns the broadcast flag's fan-out and the TP
+    # derivation; importing them here keeps the two commands building
+    # identical configurations.
+    from sglang_omni.cli.serve import (
+        apply_tensor_parallel_engine_overrides,
+        patches_from_broadcast_flags,
+    )
 
     if config_file is None and model_path is None:
         raise typer.BadParameter("--model-path is required unless --config is set")
@@ -153,7 +158,11 @@ def _resolve_sources(
         patches = patches.merge(
             patches_from_dotted_cli(extra_args, baseline, origin="command line")
         )
-        return Resolution(baseline, ConfigResolver(baseline).resolve(patches))
+        resolved = ConfigResolver(baseline).resolve(patches)
+        # The same post-merge derivation `serve` runs; it only fills engine
+        # keys no source set, so the previewed config is the launched one.
+        derived = apply_tensor_parallel_engine_overrides(resolved.config)
+        return Resolution(baseline, replace(resolved, config=derived))
     except (ConfigPathError, ValueError) as exc:
         # An unknown path, a path the schema will not let a user write, two
         # sources disagreeing at one precedence, a malformed dotted argument,
