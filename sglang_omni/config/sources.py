@@ -37,6 +37,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from sglang_omni.config.patch import (
     ConfigPatch,
@@ -330,7 +331,12 @@ def sources_from_config_file(
     from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 
     with open(file_path, "r") as f:
-        data = yaml.safe_load(f)
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"Config file {file_path!r} is not valid YAML: {exc}"
+            ) from exc
     if not isinstance(data, dict):
         raise ValueError(f"Config file {file_path!r} must contain a mapping")
 
@@ -339,20 +345,40 @@ def sources_from_config_file(
         if block in data:
             raise ValueError(f"Config file {file_path!r}: {guidance}")
 
+    if "config_cls" not in data:
+        raise ValueError(
+            f"Config file {file_path!r} must name its pipeline class in " "config_cls"
+        )
     config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(data["config_cls"])
     stages_block = data.pop("stages", None)
     shared_block = data.pop("shared", None)
+    overrides = {key: value for key, value in data.items() if key != "config_cls"}
 
-    config = config_cls(**data)
+    # The baseline is built from the class's own defaults plus only the keys
+    # construction requires (model_path, typically): every other file value
+    # is applied exactly once, as a patch. Baking them all would apply the
+    # file twice -- the baseline would already carry the value, so a diff
+    # against it shows nothing and provenance calls the same value both the
+    # model default and the file's write.
+    construction: dict[str, Any] = {}
+    while True:
+        try:
+            config = config_cls(**construction)
+            break
+        except ValidationError as exc:
+            missing = [
+                str(error["loc"][0])
+                for error in exc.errors()
+                if error["type"] == "missing" and str(error["loc"][0]) in overrides
+            ]
+            if not missing:
+                raise
+            for key in missing:
+                construction[key] = overrides[key]
+
     patches = ConfigPatchSet()
     source = ConfigSource(SourceKind.YAML_FILE, str(file_path))
-    # The top-level values become patches too -- they are already baked into
-    # the constructed config, but only a patch carries provenance, and without
-    # one `config explain` attributes a file's model_path to the model default.
-    for key, value in data.items():
-        if key == "config_cls":
-            # Selects which class to build; INTERNAL, not a writable path.
-            continue
+    for key, value in overrides.items():
         if isinstance(value, dict) and not ConfigPath.parse(key, config_cls).is_leaf:
             for leaf_path, leaf_value in _flatten(key, value, config_cls):
                 patches.add(

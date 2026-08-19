@@ -162,6 +162,13 @@ def _resolve_sources(
         # The same post-merge derivation `serve` runs; it only fills engine
         # keys no source set, so the previewed config is the launched one.
         derived = apply_tensor_parallel_engine_overrides(resolved.config)
+        # The derivation may fill a key a source explicitly cleared (an
+        # engine key set to none is unset again, and unset keys are the
+        # derivation's to fill). Re-record what the launched config holds so
+        # explain's headline reports it, with the winner's own input kept on
+        # its line and the rewrite noted.
+        for patch in resolved.patches.ordered():
+            resolved.provenance.record_resolved(patch.key, patch.path.read(derived))
         return Resolution(baseline, replace(resolved, config=derived))
     except (ConfigPathError, ValueError) as exc:
         # An unknown path, a path the schema will not let a user write, two
