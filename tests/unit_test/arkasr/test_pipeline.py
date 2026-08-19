@@ -57,7 +57,7 @@ def test_arkasr_config_registered():
     assert config.entry_stage == "asr"
     assert config.stages[0].name == "asr"
     assert config.stages[0].terminal
-    assert config.stages[0].factory_args["encoder_max_batch_size"] == 8
+    assert config.stages[0].factory.encoder_max_batch_size == 8
     assert (
         PIPELINE_CONFIG_REGISTRY.get_config("ArkasrForConditionalGeneration")
         is ArkasrPipelineConfig
@@ -90,18 +90,16 @@ def test_arkasr_pre_lm_group_matches_one_encoder_microbatch_by_default():
 
 
 def test_arkasr_pre_lm_encoder_knobs_are_stage_configurable():
-    factory_args = (
-        ArkasrPipelineConfig(model_path="AutoArk-AI/ARK-ASR-3B").stages[0].factory_args
-    )
+    factory = ArkasrPipelineConfig(model_path="AutoArk-AI/ARK-ASR-3B").stages[0].factory
 
-    assert factory_args["request_build_max_workers"] == 2
-    assert factory_args["request_build_max_pending"] == 16
-    assert factory_args["enable_pre_lm_encoder"] is True
-    assert factory_args["pre_lm_cache_max_entries"] == 4096
-    assert factory_args["pre_lm_cache_size_bytes"] == 2 * 1024**3
-    assert factory_args["pre_lm_max_batch_size"] == 8
-    assert factory_args["pre_lm_max_batch_wait_ms"] == 0
-    assert factory_args["pre_lm_max_pending"] == 32
+    assert factory.request_build_max_workers == 2
+    assert factory.request_build_max_pending == 16
+    assert factory.enable_pre_lm_encoder is True
+    assert factory.pre_lm_cache_max_entries == 4096
+    assert factory.pre_lm_cache_size_bytes == 2 * 1024**3
+    assert factory.pre_lm_max_batch_size == 8
+    assert factory.pre_lm_max_batch_wait_ms == 0
+    assert factory.pre_lm_max_pending == 32
 
 
 def test_arkasr_rejects_invalid_pre_lm_batch_size():

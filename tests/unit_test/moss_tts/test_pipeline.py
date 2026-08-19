@@ -129,13 +129,14 @@ def test_moss_tts_config_and_registry_contracts() -> None:
         stage for stage in config.stages if stage.name == "preprocessing"
     )
     vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
-    assert preprocessing.factory_args == {
+    assert preprocessing.factory.model_dump(exclude_none=True) == {
+        "device": "cpu",
         "dtype": "float32",
         "ref_audio_cache": True,
         "ref_audio_cache_max_items": 8192,
         "ref_audio_cache_max_bytes": 64 * 1024 * 1024,
     }
-    assert vocoder.factory_args == {
+    assert vocoder.factory.model_dump(exclude_none=True) == {
         "dtype": "float32",
         "compute_dtype": "bfloat16",
     }
@@ -221,12 +222,15 @@ def test_moss_tts_24gb_config_bounds_runtime_memory() -> None:
 
 
 def test_moss_tts_codec_runtime_overrides_take_precedence() -> None:
-    config = MossTTSPipelineConfig(
-        model_path="model",
-        runtime_overrides={
-            "preprocessing": {"device": "cuda:7", "dtype": "bfloat16"},
-            "vocoder": {"device": "cpu", "dtype": "float32"},
-        },
+    from sglang_omni.config.manager import ConfigManager
+
+    config = ConfigManager(MossTTSPipelineConfig(model_path="model")).merge_config(
+        [
+            ("preprocessing.factory.device", "cuda:7"),
+            ("preprocessing.factory.dtype", "bfloat16"),
+            ("vocoder.factory.device", "cpu"),
+            ("vocoder.factory.dtype", "float32"),
+        ]
     )
     stages = {stage.name: stage for stage in config.stages}
 
@@ -250,18 +254,18 @@ def test_moss_tts_config_merge_updates_reference_cache_factory_args() -> None:
     config = MossTTSPipelineConfig(model_path="model")
     merged = ConfigManager(config).merge_config(
         {
-            "stages.preprocessing.factory_args.ref_audio_cache": False,
-            "stages.preprocessing.factory_args.ref_audio_cache_max_items": 17,
-            "stages.preprocessing.factory_args.ref_audio_cache_max_bytes": 4096,
+            "preprocessing.factory.ref_audio_cache": False,
+            "preprocessing.factory.ref_audio_cache_max_items": 17,
+            "preprocessing.factory.ref_audio_cache_max_bytes": 4096,
         }
     )
     preprocessing = next(
         stage for stage in merged.stages if stage.name == "preprocessing"
     )
 
-    assert preprocessing.factory_args["ref_audio_cache"] is False
-    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
-    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+    assert preprocessing.factory.ref_audio_cache is False
+    assert preprocessing.factory.ref_audio_cache_max_items == 17
+    assert preprocessing.factory.ref_audio_cache_max_bytes == 4096
 
 
 def test_moss_tts_config_merge_updates_vocoder_factory_args() -> None:
@@ -270,19 +274,19 @@ def test_moss_tts_config_merge_updates_vocoder_factory_args() -> None:
     config = MossTTSPipelineConfig(model_path="model")
     merged = ConfigManager(config).merge_config(
         {
-            "stages.vocoder.factory_args.compute_dtype": "float32",
+            "vocoder.factory.compute_dtype": "float32",
         }
     )
     vocoder = next(stage for stage in merged.stages if stage.name == "vocoder")
 
-    assert vocoder.factory_args["compute_dtype"] == "float32"
+    assert vocoder.factory.compute_dtype == "float32"
 
     disabled = ConfigManager(config).merge_config(
-        {"stages.vocoder.factory_args.compute_dtype": None}
+        {"vocoder.factory.compute_dtype": None}
     )
     vocoder = next(stage for stage in disabled.stages if stage.name == "vocoder")
 
-    assert vocoder.factory_args["compute_dtype"] is None
+    assert vocoder.factory.compute_dtype is None
 
 
 @pytest.mark.parametrize(

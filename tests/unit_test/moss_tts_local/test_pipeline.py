@@ -436,26 +436,24 @@ def test_pipeline_stage_wiring():
         assert "moss_tts_local" in stage.factory_path
     assert stages["preprocessing"].process == "pipeline"
     assert stages["preprocessing"].gpu == 0
-    assert stages["preprocessing"].factory_args["device"] == "cuda:0"
-    assert stages["preprocessing"].factory_args["max_concurrency"] == 16
-    assert stages["preprocessing"].factory_args["ref_audio_cache"] is True
-    assert stages["preprocessing"].factory_args["ref_audio_cache_max_items"] == 8192
-    assert stages[
-        "preprocessing"
-    ].runtime.resources.total_gpu_memory_fraction == pytest.approx(0.15)
+    assert stages["preprocessing"].factory.device == "cuda:0"
+    assert stages["preprocessing"].factory.max_concurrency == 16
+    preprocessing_kwargs = config.stage_factory_kwargs("preprocessing")
+    assert preprocessing_kwargs["ref_audio_cache"] is True
+    assert preprocessing_kwargs["ref_audio_cache_max_items"] == 8192
+    assert stages["preprocessing"].gpu_memory_fraction == pytest.approx(0.15)
     assert config.supports_uploaded_voice_references() is True
     assert stages["tts_engine"].process == "pipeline"
     assert stages["tts_engine"].gpu == 0
-    tts_engine_runtime = stages["tts_engine"].runtime
-    assert tts_engine_runtime.resources.total_gpu_memory_fraction == pytest.approx(0.67)
-    assert tts_engine_runtime.sglang_server_args.mem_fraction_static is None
-    assert stages["tts_engine"].factory_args["codec_mem_reserve"] == pytest.approx(0.0)
+    assert stages["tts_engine"].gpu_memory_fraction == pytest.approx(0.67)
+    assert stages["tts_engine"].engine.mem_fraction_static is None
+    assert config.stage_factory_kwargs("tts_engine")[
+        "codec_mem_reserve"
+    ] == pytest.approx(0.0)
     assert stages["vocoder"].process == "vocoder"
     assert stages["vocoder"].gpu == 0
-    assert stages["vocoder"].factory_args["device"] == "cuda:0"
-    assert stages[
-        "vocoder"
-    ].runtime.resources.total_gpu_memory_fraction == pytest.approx(0.18)
+    assert stages["vocoder"].factory.device == "cuda:0"
+    assert stages["vocoder"].gpu_memory_fraction == pytest.approx(0.18)
 
     placement = build_stage_placement_plan(config)
     assert placement.stages["tts_engine"].gpu_ids == (0,)
@@ -472,26 +470,22 @@ def test_pipeline_stage_wiring():
         model_path="OpenMOSS-Team/moss-local-test"
     )
     colocated_stages = {stage.name: stage for stage in colocated.stages}
-    assert colocated_stages["preprocessing"].factory_args["device"] == "cuda:0"
+    assert colocated_stages["preprocessing"].factory.device == "cuda:0"
     assert (
-        colocated_stages["preprocessing"].factory_args["ref_audio_cache_max_items"]
+        colocated.stage_factory_kwargs("preprocessing")["ref_audio_cache_max_items"]
         == 8192
     )
-    assert colocated_stages["vocoder"].factory_args["device"] == "cuda:0"
+    assert colocated_stages["vocoder"].factory.device == "cuda:0"
 
     split = MossTTSLocalSplitPipelineConfig(model_path="OpenMOSS-Team/moss-local-test")
     split_stages = {stage.name: stage for stage in split.stages}
-    assert split_stages["preprocessing"].factory_args["device"] == "cuda:1"
+    assert split_stages["preprocessing"].factory.device == "cuda:1"
     assert split_stages["tts_engine"].gpu == 0
-    split_runtime = split_stages["tts_engine"].runtime
-    assert split_runtime.resources.total_gpu_memory_fraction is None
-    assert split_runtime.sglang_server_args.mem_fraction_static == pytest.approx(0.85)
-    assert (
-        split_stages["preprocessing"].runtime.resources.total_gpu_memory_fraction
-        is None
-    )
-    assert split_stages["vocoder"].runtime.resources.total_gpu_memory_fraction is None
-    assert split_stages["vocoder"].factory_args["device"] == "cuda:1"
+    assert split_stages["tts_engine"].gpu_memory_fraction is None
+    assert split_stages["tts_engine"].engine.mem_fraction_static == pytest.approx(0.85)
+    assert split_stages["preprocessing"].gpu_memory_fraction is None
+    assert split_stages["vocoder"].gpu_memory_fraction is None
+    assert split_stages["vocoder"].factory.device == "cuda:1"
     # The split variant carries no per-stage GPU budgets, so its vocoder stays in
     # the shared pipeline process; its declared topology must still validate.
     assert split_stages["vocoder"].process == "pipeline"
@@ -553,21 +547,25 @@ def test_pipeline_omp_default_uses_overridden_preprocessing_concurrency(
         _bounded_threads,
     )
 
-    config = config_module.MossTTSLocalPipelineConfig(
-        model_path="dummy",
-        runtime_overrides={"preprocessing": {"max_concurrency": 4}},
-    )
+    from sglang_omni.config.manager import ConfigManager
+
+    config = ConfigManager(
+        config_module.MossTTSLocalPipelineConfig(model_path="dummy")
+    ).merge_config([("preprocessing.factory.max_concurrency", "4")])
 
     assert seen_worker_counts == [4]
     assert config.env_defaults["OMP_NUM_THREADS"] == "4"
 
 
-def test_pipeline_rejects_none_preprocessing_concurrency() -> None:
-    with pytest.raises(ValueError, match="max_concurrency must be an integer"):
-        MossTTSLocalPipelineConfig(
-            model_path="dummy",
-            runtime_overrides={"preprocessing": {"max_concurrency": None}},
-        )
+def test_clearing_preprocessing_concurrency_falls_back_to_the_default() -> None:
+    """An unset max_concurrency means the model default, not an error."""
+    from sglang_omni.config.manager import ConfigManager
+
+    cleared = ConfigManager(
+        MossTTSLocalPipelineConfig(model_path="dummy")
+    ).merge_config([("preprocessing.factory.max_concurrency", "none")])
+    assert cleared.stage_named("preprocessing").factory.max_concurrency is None
+    assert "OMP_NUM_THREADS" in cleared.env_defaults
 
 
 def test_pipeline_without_preprocessing_does_not_set_omp_default() -> None:
@@ -593,15 +591,11 @@ def test_pipeline_config_injects_reference_cache_factory_args():
         ref_audio_cache_max_items=17,
         ref_audio_cache_max_bytes=4096,
     )
-    preprocessing = next(
-        stage
-        for stage in config.stages
-        if stage.factory.endswith("create_preprocessing_executor")
-    )
+    kwargs = config.stage_factory_kwargs("preprocessing")
 
-    assert preprocessing.factory_args["ref_audio_cache"] is False
-    assert preprocessing.factory_args["ref_audio_cache_max_items"] == 17
-    assert preprocessing.factory_args["ref_audio_cache_max_bytes"] == 4096
+    assert kwargs["ref_audio_cache"] is False
+    assert kwargs["ref_audio_cache_max_items"] == 17
+    assert kwargs["ref_audio_cache_max_bytes"] == 4096
 
 
 @pytest.mark.parametrize(

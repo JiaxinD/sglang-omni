@@ -39,9 +39,7 @@ def test_voxtral_tts_config_uses_current_stage_schema() -> None:
         "pipeline",
     ]
     assert [
-        stage.runtime.resources.total_gpu_memory_fraction
-        for stage in config.stages
-        if stage.gpu is not None
+        stage.gpu_memory_fraction for stage in config.stages if stage.gpu is not None
     ] == [None, None]
     build_process_topology_plan(config, build_stage_placement_plan(config))
     assert (

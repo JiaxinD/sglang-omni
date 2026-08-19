@@ -26,17 +26,13 @@ def test_fun_asr_config_uses_batched_stage_with_32_running_requests() -> None:
     assert [stage.name for stage in config.stages] == ["asr"]
     assert config.terminal_stages == ["asr"]
     assert config.gpu_placement == {"asr": 0}
-    assert config.stages[0].factory.endswith("create_sglang_fun_asr_executor")
-    assert config.stages[0].factory_args["device"] == "cuda:0"
-    assert config.stages[0].factory_args["max_running_requests"] == 32
-    assert config.stages[0].factory_args["max_new_tokens"] == 200
-    assert config.stages[0].factory_args["enable_pre_lm_encoder"] is True
-    assert config.stages[0].factory_args["pre_lm_cache_max_entries"] == 4096
-    assert config.stages[0].factory_args["pre_lm_cache_size_bytes"] == 2 * 1024**3
-    assert config.stages[0].factory_args["pre_lm_max_batch_size"] == 8
-    assert config.stages[0].factory_args["pre_lm_max_batch_wait_ms"] == 4
-    assert config.stages[0].factory_args["request_build_max_workers"] == 8
-    assert config.stages[0].factory_args["request_build_max_pending"] == 16
+    assert config.stages[0].factory_path.endswith("create_sglang_fun_asr_executor")
+    # Constructor defaults live on the factory signature (pinned below); the
+    # config declares no overrides of its own.
+    assert config.stages[0].factory.model_dump(exclude_none=True) == {}
+    assert not config.stages[0].factory.model_extra
+    assert type(config).stage_config_cls("asr").engine_stage
+    assert config.stage_factory_kwargs("asr") == {"enable_encoder_cuda_graph": True}
     assert (
         PIPELINE_CONFIG_REGISTRY.get_config("FunAsrNanoForConditionalGeneration")
         is FunASRPipelineConfig

@@ -99,7 +99,7 @@ def test_qwen3_asr_config_declares_the_batched_stage_settings() -> None:
     assert config.terminal_stages == ["asr"]
     assert config.gpu_placement == {"asr": 0}
     stage = config.stages[0]
-    assert stage.factory.endswith("create_sglang_qwen3_asr_executor")
+    assert stage.factory_path.endswith("create_sglang_qwen3_asr_executor")
     assert stage.factory.max_new_tokens == 128
     assert stage.engine.enable_torch_compile is True
     assert stage.engine.torch_compile_max_bs == 2

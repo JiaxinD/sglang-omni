@@ -233,16 +233,15 @@ def make_payload(
 
 def test_qwen3_tts_config_and_registry_contracts() -> None:
     config = Qwen3TTSPipelineConfig(model_path="model")
-    assert config.runtime_overrides == {}
     assert [stage.name for stage in config.stages] == [
         "preprocessing",
         "tts_engine",
         "vocoder",
     ]
-    assert config.stages[1].factory.endswith("create_sglang_tts_engine_executor")
+    assert config.stages[1].factory_path.endswith("create_sglang_tts_engine_executor")
     assert config.terminal_stages == ["vocoder"]
     assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
-    assert "device" not in config.stages[1].factory_args
+    assert config.stages[1].factory.device is None
     assert config.stages[2].factory.device is None
     assert {stage.process for stage in config.stages} == {"pipeline"}
     assert config.stages[1].stream_to == ["vocoder"]

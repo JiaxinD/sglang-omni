@@ -213,8 +213,8 @@ def test_unified_ming_offline_launcher_applies_tp_and_overrides(monkeypatch):
     assert thinker.tp_size == 2
     assert thinker.gpu == [0, 1]
     assert stages["talker"].gpu == 2
-    assert stages["talker"].factory_args["voice"] == "CUSTOM_VOICE"
-    assert thinker.factory_args["server_args_overrides"] == {
+    assert stages["talker"].factory.voice == "CUSTOM_VOICE"
+    assert thinker.engine.overrides() == {
         "disable_custom_all_reduce": True,
         "cpu_offload_gb": 4.0,
         "mem_fraction_static": 0.8,
@@ -240,7 +240,7 @@ def test_unified_ming_text_applies_thinker_max_seq_len():
     config = launcher.build_ming_text_config(args)
 
     thinker = next(stage for stage in config.stages if stage.name == "thinker")
-    assert thinker.factory_args["thinker_max_seq_len"] == 1234
+    assert thinker.factory.thinker_max_seq_len == 1234
 
 
 @pytest.mark.parametrize(
@@ -318,10 +318,7 @@ def test_tp2_config_contract(mock_launch_server):
 
     assert thinker.tp_size == 2
     assert thinker.gpu == [0, 1]
-    assert (
-        thinker.factory_args["server_args_overrides"]["disable_custom_all_reduce"]
-        is True
-    )
+    assert thinker.engine.overrides()["disable_custom_all_reduce"] is True
 
 
 def test_tp2_enables_custom_all_reduce_on_p2p_mesh(mock_launch_server):
@@ -335,10 +332,7 @@ def test_tp2_enables_custom_all_reduce_on_p2p_mesh(mock_launch_server):
 
     config = mock_launch_server.call_args[0][0]
     thinker = _stage(config, "thinker")
-    assert (
-        thinker.factory_args["server_args_overrides"]["disable_custom_all_reduce"]
-        is False
-    )
+    assert thinker.engine.overrides()["disable_custom_all_reduce"] is False
 
 
 def test_tp1_default_config_contract(mock_launch_server):
@@ -384,8 +378,8 @@ def test_mem_fractions_applied(mock_launch_server):
     thinker = _stage(config, "thinker")
     talker = _stage(config, "talker_ar")
 
-    assert thinker.factory_args["server_args_overrides"]["mem_fraction_static"] == 0.55
-    assert talker.factory_args["server_args_overrides"]["mem_fraction_static"] == 0.20
+    assert thinker.engine.overrides()["mem_fraction_static"] == 0.55
+    assert talker.engine.overrides()["mem_fraction_static"] == 0.20
 
 
 def test_talker_max_seq_len_applied(mock_launch_server):
@@ -395,7 +389,7 @@ def test_talker_max_seq_len_applied(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["talker_max_seq_len"] == 128
+    assert talker.factory.talker_max_seq_len == 128
 
 
 def test_partial_start_updates_talker_factory_args(mock_launch_server):
@@ -405,8 +399,8 @@ def test_partial_start_updates_talker_factory_args(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is True
-    assert talker.factory_args["partial_start_min_chunks"] == 7
+    assert talker.factory.enable_partial_start is True
+    assert talker.factory.partial_start_min_chunks == 7
 
 
 def test_partial_start_defaults_on(mock_launch_server):
@@ -416,7 +410,7 @@ def test_partial_start_defaults_on(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is True
+    assert talker.factory.enable_partial_start is True
 
 
 def test_partial_start_colocated_defaults_off(mock_launch_server):
@@ -426,7 +420,7 @@ def test_partial_start_colocated_defaults_off(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is False
+    assert talker.factory.enable_partial_start is False
 
 
 def test_partial_start_colocated_can_be_enabled(mock_launch_server):
@@ -436,7 +430,7 @@ def test_partial_start_colocated_can_be_enabled(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is True
+    assert talker.factory.enable_partial_start is True
 
 
 def test_partial_start_can_be_disabled(mock_launch_server):
@@ -446,7 +440,7 @@ def test_partial_start_can_be_disabled(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is False
+    assert talker.factory.enable_partial_start is False
 
 
 def test_partial_start_disabled_does_not_propagate_subfloor_min_chunks(
@@ -458,8 +452,8 @@ def test_partial_start_disabled_does_not_propagate_subfloor_min_chunks(
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory_args["enable_partial_start"] is False
-    assert talker.factory_args["partial_start_min_chunks"] >= MIN_PARTIAL_START_CHUNKS
+    assert talker.factory.enable_partial_start is False
+    assert talker.factory.partial_start_min_chunks >= MIN_PARTIAL_START_CHUNKS
 
 
 def test_partial_start_min_chunks_rejects_below_floor(mock_launch_server):

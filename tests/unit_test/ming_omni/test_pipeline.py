@@ -41,7 +41,7 @@ def test_ming_text_config_imports_and_uses_current_stage_schema() -> None:
     )
     assert stages["decode"].can_accept_stream_before_payload is True
     assert all(
-        stage.factory.startswith("sglang_omni.models.ming_omni.stages.create_")
+        stage.factory_path.startswith("sglang_omni.models.ming_omni.stages.create_")
         for stage in config.stages
     )
     assert all("executor" not in stage.model_dump() for stage in config.stages)
