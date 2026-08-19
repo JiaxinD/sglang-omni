@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class CommConfig(BaseModel):
@@ -47,32 +50,18 @@ class EngineArgs(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    mem_fraction_static: float | None = None
-    max_running_requests: int | None = None
-    max_total_tokens: int | None = None
-    cuda_graph_max_bs: int | None = None
+    mem_fraction_static: float | None = Field(default=None, gt=0, lt=1)
+    max_running_requests: int | None = Field(default=None, ge=1)
+    max_total_tokens: int | None = Field(default=None, ge=1)
+    cuda_graph_max_bs: int | None = Field(default=None, ge=1)
     disable_cuda_graph: bool | None = None
     enable_torch_compile: bool | None = None
-    torch_compile_max_bs: int | None = None
-    cpu_offload_gb: int | None = None
-    quantization: str | None = None
+    torch_compile_max_bs: int | None = Field(default=None, ge=1)
+    cpu_offload_gb: int | None = Field(default=None, ge=0)
+    quantization: str | None = Field(default=None, min_length=1)
     disable_custom_all_reduce: bool | None = None
 
     def model_post_init(self, __context: Any = None) -> None:
-        value = self.mem_fraction_static
-        if value is not None and not 0.0 < value < 1.0:
-            raise ValueError("engine.mem_fraction_static must be in (0, 1)")
-        for name in (
-            "max_running_requests",
-            "max_total_tokens",
-            "cuda_graph_max_bs",
-            "torch_compile_max_bs",
-        ):
-            count = getattr(self, name)
-            if count is not None and count < 1:
-                raise ValueError(f"engine.{name} must be >= 1")
-        if self.cpu_offload_gb is not None and self.cpu_offload_gb < 0:
-            raise ValueError("engine.cpu_offload_gb must be >= 0")
         if self.quantization is not None and not self.quantization.strip():
             raise ValueError("engine.quantization must not be empty")
 
@@ -106,57 +95,36 @@ class FactoryArgs(BaseModel):
     # --- model construction ---
     device: str | None = None
     dtype: str | None = None
-    max_seq_len: int | None = None
-    video_fps: float | None = None
-    max_new_tokens: int | None = None
-    context_length: int | None = None
+    max_seq_len: int | None = Field(default=None, gt=0)
+    video_fps: float | None = Field(default=None, gt=0)
+    max_new_tokens: int | None = Field(default=None, gt=0)
+    context_length: int | None = Field(default=None, gt=0)
 
     # --- executor / batching ---
-    max_concurrency: int | None = None
-    max_batch_size: int | None = None
-    max_batch_wait_ms: float | None = None
+    max_concurrency: int | None = Field(default=None, ge=1)
+    max_batch_size: int | None = Field(default=None, ge=1)
+    max_batch_wait_ms: float | None = Field(default=None, ge=0)
     enable_async_decode: bool | None = None
-    async_decode_min_batch_size: int | None = None
-    prefill_coalesce_requests: int | None = None
-    prefill_coalesce_wait_ms: float | None = None
+    async_decode_min_batch_size: int | None = Field(default=None, ge=1)
+    prefill_coalesce_requests: int | None = Field(default=None, ge=0)
+    prefill_coalesce_wait_ms: float | None = Field(default=None, gt=0)
     prefill_coalesce_when_idle: bool | None = None
     prefill_coalesce_requires_pending_builds: bool | None = None
     prefill_coalesce_after_builds_during_decode: bool | None = None
-    request_build_max_workers: int | None = None
-    request_build_max_pending: int | None = None
-    encoder_mem_reserve: float | None = None
+    request_build_max_workers: int | None = Field(default=None, ge=1)
+    request_build_max_pending: int | None = Field(default=None, ge=1)
+    encoder_mem_reserve: float | None = Field(default=None, ge=0, lt=1)
     enable_partial_start: bool | None = None
-    partial_start_min_chunks: int | None = None
+    partial_start_min_chunks: int | None = Field(default=None, ge=1)
 
     def model_post_init(self, __context: Any = None) -> None:
-        for name in (
-            "max_concurrency",
-            "max_batch_size",
-            "async_decode_min_batch_size",
-            "request_build_max_workers",
-            "request_build_max_pending",
-            "partial_start_min_chunks",
-        ):
-            count = getattr(self, name)
-            if count is not None and count < 1:
-                raise ValueError(f"factory.{name} must be >= 1")
-        for name in ("max_seq_len", "max_new_tokens", "context_length"):
-            count = getattr(self, name)
-            if count is not None and count <= 0:
-                raise ValueError(f"factory.{name} must be positive")
-        if self.video_fps is not None and self.video_fps <= 0:
-            raise ValueError("factory.video_fps must be positive")
-        if self.max_batch_wait_ms is not None and self.max_batch_wait_ms < 0:
-            raise ValueError("factory.max_batch_wait_ms must be >= 0")
-        requests = self.prefill_coalesce_requests
-        if requests is not None and requests < 0:
-            raise ValueError("factory.prefill_coalesce_requests must be >= 0")
-        wait_ms = self.prefill_coalesce_wait_ms
-        if wait_ms is not None and not wait_ms > 0:
-            raise ValueError("factory.prefill_coalesce_wait_ms must be > 0")
-        reserve = self.encoder_mem_reserve
-        if reserve is not None and not 0.0 <= reserve < 1.0:
-            raise ValueError("factory.encoder_mem_reserve must be in [0, 1)")
+        if self.prefill_coalesce_requests == 1:
+            logger.warning(
+                "prefill_coalesce_requests=1 disables coalescing: the "
+                "admission gate only engages at >= 2 (a batch of one has "
+                "nothing to coalesce with). Use 0 to disable explicitly, "
+                "or >= 2 to enable."
+            )
 
 
 class PlacementConfig(BaseModel):
@@ -164,15 +132,8 @@ class PlacementConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_total_gpu_memory_fraction_per_gpu: float = 1.0
+    max_total_gpu_memory_fraction_per_gpu: float = Field(default=1.0, gt=0, le=1)
     require_memory_fraction_for_colocation: bool = True
-
-    def model_post_init(self, __context: Any = None) -> None:
-        value = self.max_total_gpu_memory_fraction_per_gpu
-        if not 0.0 < value <= 1.0:
-            raise ValueError(
-                "placement.max_total_gpu_memory_fraction_per_gpu must be in (0, 1]"
-            )
 
 
 class StageConfig(BaseModel):
@@ -220,10 +181,12 @@ class StageConfig(BaseModel):
 
     # --- GPU / parallelism / process placement (parent-process consumers) ---
     gpu: int | list[int] | None = None
-    tp_size: int = 1
+    tp_size: int = Field(default=1, ge=1)
     process: str | None = None
     gpu_memory_fraction: float | None = Field(
         default=None,
+        gt=0,
+        le=1,
         description=(
             "Per-stage-rank budget as a fraction of total physical GPU memory. "
             "After TP expansion, each rank contributes this budget to its "
@@ -260,8 +223,6 @@ class StageConfig(BaseModel):
     comm: CommConfig | None = None
 
     def model_post_init(self, __context: Any = None) -> None:
-        if self.tp_size < 1:
-            raise ValueError(f"Stage {self.name!r} must have tp_size >= 1")
         if isinstance(self.gpu, int) and self.tp_size > 1:
             raise ValueError(
                 f"Stage {self.name!r}: TP placement requires a list of "
@@ -282,11 +243,6 @@ class StageConfig(BaseModel):
             self.process = self.process.strip()
             if not self.process:
                 raise ValueError(f"Stage {self.name!r} process must not be empty")
-        fraction = self.gpu_memory_fraction
-        if fraction is not None and not 0.0 < fraction <= 1.0:
-            raise ValueError(
-                f"Stage {self.name!r} gpu_memory_fraction must be in (0, 1]"
-            )
         if self.engine is not None and not type(self).engine_stage:
             raise ValueError(
                 f"Stage {self.name!r} is not an engine stage; the engine block "

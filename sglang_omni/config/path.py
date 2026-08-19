@@ -295,9 +295,19 @@ class ConfigPath:
     # ------------------------------------------------------------------
 
     def coerce(self, value: Any) -> Any:
-        """Convert a raw (usually textual) value into this path's declared type."""
+        """Convert a raw (usually textual) value into this path's declared type.
+
+        Numeric conversions only go the lossless way: an int fits a float
+        field and 0/1 fit a bool field, but a bool never fits a numeric field
+        (``true`` would silently become 1) and a float never fits an int
+        field (32.0 would be truncated into shape). A YAML scalar arrives
+        here natively typed; a CLI flag arrives as text and is parsed to a
+        scalar first, so both spellings answer to the same rule.
+        """
         annotation = self.value_type
         if not isinstance(value, str):
+            if annotation is not Any and annotation is not None:
+                self._refuse_lossy_scalar(value, annotation)
             return value
         # ``none`` is a sentinel, not a string, and has been one since the first
         # dotted-CLI implementation (``ConfigManager._convert_scalar``). It has
@@ -311,6 +321,23 @@ class ConfigPath:
             return None
         if annotation is Any or annotation is None:
             return coerce_scalar_text(value)
+        scalar = coerce_scalar_text(value)
+        if not isinstance(scalar, str) and _annotation_scalars(annotation) & {
+            int,
+            float,
+            bool,
+        }:
+            # The text reads as a number or boolean and the field is numeric
+            # or boolean: judge the parsed scalar, so "true" against an int
+            # field is a boolean (refused) rather than JSON the adapter would
+            # lax-coerce to 1.
+            self._refuse_lossy_scalar(scalar, annotation)
+            try:
+                return TypeAdapter(annotation).validate_python(scalar)
+            except Exception:
+                # Out-of-type in a way the schema explains better (rebuild
+                # validation names the path and the rule).
+                return scalar
         try:
             return TypeAdapter(annotation).validate_python(value)
         except Exception:
@@ -319,6 +346,21 @@ class ConfigPath:
             return TypeAdapter(annotation).validate_json(value)
         except Exception:
             return coerce_scalar_text(value)
+
+    def _refuse_lossy_scalar(self, value: Any, annotation: Any) -> None:
+        allowed = _annotation_scalars(annotation)
+        if bool in allowed:
+            return
+        if isinstance(value, bool):
+            raise ConfigPathError(
+                f"{self.raw} expects {_type_name(annotation)}, got a boolean",
+                raw=self.raw,
+            )
+        if isinstance(value, float) and int in allowed and float not in allowed:
+            raise ConfigPathError(
+                f"{self.raw} expects an integer, got a float ({value!r})",
+                raw=self.raw,
+            )
 
     def read(self, source: BaseModel | dict[str, Any]) -> Any:
         """Read the value at this path from a config instance or a dumped dict."""
@@ -375,10 +417,18 @@ def _descend(container: Any, part: str, *, raw: str, prefix: str) -> Segment:
                 resolved_prefix=prefix,
             )
         if part in fields:
+            annotation = fields[part].annotation
+            if fields[part].metadata:
+                # Field constraints (ge/gt/Literal/min_length) are declared
+                # statically on the schema; carrying them into the segment
+                # lets coerce's type adapter enforce them at conversion, the
+                # same rule the rebuild enforces at resolution.
+                params = (annotation, *fields[part].metadata)
+                annotation = typing.Annotated[params]
             return Segment(
                 raw=part,
                 kind=SegmentKind.FIELD,
-                annotation=fields[part].annotation,
+                annotation=annotation,
                 container=core,
             )
         if core.model_config.get("extra") == "allow":
@@ -455,6 +505,27 @@ def _descend(container: Any, part: str, *, raw: str, prefix: str) -> Segment:
         raw=raw,
         resolved_prefix=prefix,
     )
+
+
+def _annotation_scalars(annotation: Any) -> set[type]:
+    """The scalar base types a declared annotation admits, unions flattened."""
+    out: set[type] = set()
+    stack = [annotation]
+    while stack:
+        current = stack.pop()
+        origin = get_origin(current)
+        if origin is typing.Annotated:
+            stack.append(get_args(current)[0])
+            continue
+        if origin is typing.Union or origin is types.UnionType:
+            stack.extend(get_args(current))
+            continue
+        if current is type(None):
+            continue
+        target = origin or current
+        if isinstance(target, type):
+            out.add(target)
+    return out
 
 
 def _unwrap_optional(annotation: Any) -> Any:

@@ -72,6 +72,22 @@ def test_invalid_model_group_values_raise() -> None:
         FactoryArgs(video_fps=-1.0)
 
 
+def test_prefill_coalesce_range_is_enforced_at_validation() -> None:
+    assert FactoryArgs(prefill_coalesce_requests=32).prefill_coalesce_requests == 32
+    assert FactoryArgs(prefill_coalesce_wait_ms=300).prefill_coalesce_wait_ms == 300.0
+
+    with pytest.raises(ValueError, match="prefill_coalesce_requests"):
+        FactoryArgs(prefill_coalesce_requests=-1)
+    with pytest.raises(ValueError, match="prefill_coalesce_wait_ms"):
+        FactoryArgs(prefill_coalesce_wait_ms=0.0)
+
+
+def test_prefill_coalesce_requests_of_one_warns(caplog) -> None:
+    with caplog.at_level("WARNING", logger="sglang_omni.config.schema"):
+        FactoryArgs(prefill_coalesce_requests=1)
+    assert "disables coalescing" in caplog.text
+
+
 def test_the_engine_block_is_refused_off_engine_stages() -> None:
     with pytest.raises(ValueError, match="not an engine stage"):
         _stage(engine={"mem_fraction_static": 0.7})
@@ -108,7 +124,7 @@ def test_tp_size_accepts_a_matching_gpu_list() -> None:
 
 
 def test_tp_size_below_one_raises() -> None:
-    with pytest.raises(ValueError, match="tp_size >= 1"):
+    with pytest.raises(ValueError, match="tp_size"):
         _stage(tp_size=0)
 
 

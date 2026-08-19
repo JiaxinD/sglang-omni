@@ -489,7 +489,7 @@ class TestBroadcastFlags:
         # Range is the schema's rule: the flag builds patches, and resolution
         # refuses the out-of-range value with the schema's message.
         patches = patches_from_broadcast_flags(base_config, mem_fraction_static=1.5)
-        with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+        with pytest.raises(ValueError, match="mem_fraction_static"):
             ConfigManager(base_config).merge_config([], extra_patches=patches)
 
     def test_without_the_flag_no_patch_is_built(self, base_config):

@@ -22,7 +22,13 @@ class TestParsing:
             "stages.thinker.factory.max_seq_len", type(pipeline_config)
         )
         assert path.parts == ("stages", "thinker", "factory", "max_seq_len")
-        assert path.value_type == (int | None)
+        # The declared type plus its static Field constraints (gt=0), so
+        # coerce enforces the same rule the rebuild does.
+        import typing
+        from typing import get_args, get_origin
+
+        assert get_origin(path.value_type) is typing.Annotated
+        assert get_args(path.value_type)[0] == (int | None)
         assert path.is_leaf
         assert path.stage_name == "thinker"
 
@@ -225,3 +231,45 @@ class TestSchemaEnumeration:
         cls = type(pipeline_config)
         for candidate in iter_schema_paths(cls, include_non_public=True):
             ConfigPath.parse(candidate.replace("*", "thinker"), cls)
+
+
+class TestLosslessNumericCoercion:
+    """Conversions only go the lossless way, whatever the spelling.
+
+    An int fits a float field and 0/1 fit a bool field; a bool never fits a
+    numeric field (true would silently become 1) and a float never fits an
+    int field (32.0 would be truncated into shape). CLI text is parsed to a
+    scalar first, so both it and a native YAML scalar answer to the rule."""
+
+    def _path(self, pipeline_config, text: str) -> ConfigPath:
+        return ConfigPath.parse(text, type(pipeline_config))
+
+    @pytest.mark.parametrize("value", ["true", True, "2.5", 32.0])
+    def test_lossy_values_are_refused_on_an_int_field(
+        self, pipeline_config, value
+    ) -> None:
+        path = self._path(pipeline_config, "stages.thinker.tp_size")
+        with pytest.raises(ConfigPathError, match="tp_size expects"):
+            path.coerce(value)
+
+    def test_a_boolean_is_refused_on_a_float_field(self, pipeline_config) -> None:
+        path = self._path(
+            pipeline_config, "stages.thinker.factory.prefill_coalesce_wait_ms"
+        )
+        with pytest.raises(ConfigPathError, match="got a boolean"):
+            path.coerce("true")
+
+    def test_an_int_still_fits_a_float_field(self, pipeline_config) -> None:
+        path = self._path(
+            pipeline_config, "stages.thinker.factory.prefill_coalesce_wait_ms"
+        )
+        assert path.coerce("40") == 40.0
+
+    def test_zero_and_one_still_fit_a_bool_field(self, pipeline_config) -> None:
+        path = self._path(pipeline_config, "stages.thinker.factory.enable_async_decode")
+        assert path.coerce("1") is True
+        assert path.coerce("0") is False
+
+    def test_numeric_text_stays_text_on_a_string_field(self, pipeline_config) -> None:
+        path = self._path(pipeline_config, "stages.thinker.factory.device")
+        assert path.coerce("123") == "123"

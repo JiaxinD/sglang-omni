@@ -764,7 +764,7 @@ def test_qwen_broadcast_rejects_invalid_mem_fraction_without_partial_write() -> 
     # Range is the schema's rule: the flag builds patches, and resolution
     # refuses the out-of-range value without touching the source config.
     patches = patches_from_broadcast_flags(config, mem_fraction_static=1.0)
-    with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+    with pytest.raises(ValueError, match="mem_fraction_static"):
         ConfigManager(config).merge_config([], extra_patches=patches)
 
     assert config.model_dump() == original
