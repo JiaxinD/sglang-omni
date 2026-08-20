@@ -10,7 +10,6 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-import typer
 
 from sglang_omni.cli.serve import patches_from_broadcast_flags
 from sglang_omni.config.resolver import ConfigResolver
@@ -181,7 +180,7 @@ def test_higgs_shared_share_the_stride_between_both_consumers() -> None:
         [
             {
                 "select": {"stages": ["tts_engine", "vocoder"]},
-                "model": {
+                "factory": {
                     "stream_stride": 16,
                     "stream_followup_stride": 7,
                     "initial_chunk_frames": 0,
@@ -206,7 +205,7 @@ def test_higgs_explicit_stage_value_beats_the_shared_entry() -> None:
         [
             {
                 "select": {"stages": ["tts_engine", "vocoder"]},
-                "model": {"stream_stride": 16},
+                "factory": {"stream_stride": 16},
             }
         ],
         HiggsTtsPipelineConfig,
@@ -214,8 +213,8 @@ def test_higgs_explicit_stage_value_beats_the_shared_entry() -> None:
     )
     from sglang_omni.config.sources import patches_from_stages_mapping
 
-    explicit, _ = patches_from_stages_mapping(
-        {"vocoder": {"model": {"stream_stride": 8}}},
+    explicit = patches_from_stages_mapping(
+        {"vocoder": {"factory": {"stream_stride": 8}}},
         HiggsTtsPipelineConfig,
         [stage.name for stage in config.stages],
     )
@@ -2359,13 +2358,14 @@ def test_higgs_dotted_mem_fraction_beats_the_broadcast() -> None:
 
 
 def test_higgs_cli_rejects_out_of_range_mem_fraction() -> None:
+    from sglang_omni.config.manager import ConfigManager
+
     config = HiggsTtsPipelineConfig(model_path="fake-model")
 
-    with pytest.raises(typer.BadParameter):
-        patches_from_broadcast_flags(
-            config,
-            mem_fraction_static=1.3,
-        )
+    # Range is the schema's rule: the flag builds patches, resolution refuses.
+    patches = patches_from_broadcast_flags(config, mem_fraction_static=1.3)
+    with pytest.raises(ValueError, match="mem_fraction_static"):
+        ConfigManager(config).merge_config([], extra_patches=patches)
 
 
 def test_higgs_bounds_preprocessing_without_global_omp_default() -> None:

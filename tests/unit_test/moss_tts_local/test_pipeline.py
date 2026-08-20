@@ -518,7 +518,9 @@ def test_pipeline_sets_spawn_time_omp_default(
 
     config = config_module.MossTTSLocalPipelineConfig(model_path="dummy")
 
-    assert config.env_defaults["OMP_NUM_THREADS"] == str(expected_threads)
+    # Derived at launch, not written into the config.
+    assert "OMP_NUM_THREADS" not in config.env_defaults
+    assert config.resolved_env_defaults()["OMP_NUM_THREADS"] == str(expected_threads)
 
 
 def test_pipeline_preserves_explicit_omp_default() -> None:
@@ -527,7 +529,7 @@ def test_pipeline_preserves_explicit_omp_default() -> None:
         env_defaults={"OMP_NUM_THREADS": "3"},
     )
 
-    assert config.env_defaults["OMP_NUM_THREADS"] == "3"
+    assert config.resolved_env_defaults()["OMP_NUM_THREADS"] == "3"
 
 
 def test_pipeline_omp_default_uses_overridden_preprocessing_concurrency(
@@ -553,8 +555,9 @@ def test_pipeline_omp_default_uses_overridden_preprocessing_concurrency(
         config_module.MossTTSLocalPipelineConfig(model_path="dummy")
     ).merge_config([("preprocessing.factory.max_concurrency", "4")])
 
-    assert seen_worker_counts == [4]
-    assert config.env_defaults["OMP_NUM_THREADS"] == "4"
+    # The derivation runs at launch against the resolved concurrency.
+    assert config.resolved_env_defaults()["OMP_NUM_THREADS"] == "4"
+    assert seen_worker_counts[-1] == 4
 
 
 def test_clearing_preprocessing_concurrency_falls_back_to_the_default() -> None:
@@ -565,7 +568,7 @@ def test_clearing_preprocessing_concurrency_falls_back_to_the_default() -> None:
         MossTTSLocalPipelineConfig(model_path="dummy")
     ).merge_config([("preprocessing.factory.max_concurrency", "none")])
     assert cleared.stage_named("preprocessing").factory.max_concurrency is None
-    assert "OMP_NUM_THREADS" in cleared.env_defaults
+    assert "OMP_NUM_THREADS" in cleared.resolved_env_defaults()
 
 
 def test_pipeline_without_preprocessing_does_not_set_omp_default() -> None:

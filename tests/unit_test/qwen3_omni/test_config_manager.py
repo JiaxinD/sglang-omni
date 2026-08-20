@@ -61,9 +61,10 @@ def test_config_manager_applies_dotted_tp_size_override() -> None:
     assert thinker.gpu == [0, 1]
 
 
-def test_config_manager_translates_dotted_parallelism_override_to_tp_size() -> None:
+def test_config_manager_sets_tp_size_directly() -> None:
+    """tp_size is the only spelling; the parallelism.tp mirror is gone."""
     manager = ConfigManager(Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy"))
-    merged = manager.merge_config({"thinker.parallelism.tp": 2, "thinker.gpu": [0, 1]})
+    merged = manager.merge_config({"thinker.tp_size": 2, "thinker.gpu": [0, 1]})
     thinker = _stage(merged, "thinker")
 
     assert thinker.tp_size == 2
@@ -192,8 +193,9 @@ stages:
 """
     )
 
-    # An unknown name is a structural addition and must be a complete stage.
-    with pytest.raises(Exception, match="factory"):
+    # Stage topology lives in the model's config class; an unknown name in
+    # the stages: mapping is refused, not created.
+    with pytest.raises(Exception, match="no stage named"):
         ConfigManager.from_file(str(config_path))
 
 

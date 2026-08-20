@@ -130,7 +130,6 @@ def test_moss_tts_config_and_registry_contracts() -> None:
     )
     vocoder = next(stage for stage in config.stages if stage.name == "vocoder")
     assert preprocessing.factory.model_dump(exclude_none=True) == {
-        "device": "cpu",
         "dtype": "float32",
         "ref_audio_cache": True,
         "ref_audio_cache_max_items": 8192,
@@ -320,7 +319,7 @@ def test_moss_tts_preprocessing_factory_receives_placement_gpu_id() -> None:
     from sglang_omni.config.runtime import resolve_stage_factory_args
 
     config = ConfigManager(MossTTSPipelineConfig(model_path="model")).merge_config(
-        {"stages.preprocessing.gpu": 2}
+        {"preprocessing.gpu": 2}
     )
     preprocessing = next(
         stage for stage in config.stages if stage.name == "preprocessing"

@@ -102,10 +102,15 @@ def test_every_shipped_example_config_resolves_with_sharing(tmp_path):
 @pytest.mark.parametrize(
     "config_cls", ["LLaDA2UniPipelineConfig", "Qwen3OmniPipelineConfig"]
 )
-def test_pipelines_without_generation_stage_fail_at_any_n(tmp_path, config_cls):
+def test_single_engine_pipelines_resolve_but_pin_nothing(tmp_path, config_cls):
+    """These pipelines drive one SGLang engine (the thinker), which is the
+    launcher's structural requirement; with no max_total_tokens pinned they
+    resolve to (stage, None), and launch.sh refuses an unpinned KV budget for
+    N > 1 before creating any state."""
     yaml_path = _write_yaml(tmp_path, config_cls)
-    with pytest.raises(ValueError, match="does not declare an SGLang engine stage"):
-        mps_dp_config.resolve_max_total_tokens(yaml_path)
+    stage_name, value = mps_dp_config.resolve_max_total_tokens(yaml_path)
+    assert stage_name == "thinker"
+    assert value is None
 
 
 def test_multi_engine_pipeline_fails_the_singleton_check(tmp_path):
@@ -167,11 +172,11 @@ class TestLaunchFailsClosedBeforeResources:
         )
         return proc, state_root
 
-    def test_unsupported_topology_leaves_no_state(self, tmp_path):
+    def test_unpinned_kv_budget_leaves_no_state(self, tmp_path):
         yaml_path = _write_yaml(tmp_path, "LLaDA2UniPipelineConfig")
         proc, state_root = self._run(tmp_path, yaml_path)
         assert proc.returncode != 0
-        assert "does not declare an SGLang engine stage" in proc.stdout + proc.stderr
+        assert "MAX_TOTAL_TOKENS is required" in proc.stdout + proc.stderr
         assert not state_root.exists()
 
     def test_unvalidated_weight_share_leaves_no_state(self, tmp_path):

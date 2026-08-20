@@ -3865,17 +3865,15 @@ def test_qwen3_tts_dotted_mem_fraction_wins_over_the_broadcast() -> None:
 
 
 def test_qwen3_tts_cli_rejects_out_of_range_mem_fraction() -> None:
-    import typer
-
     from sglang_omni.cli.serve import patches_from_broadcast_flags
+    from sglang_omni.config.manager import ConfigManager
 
     config = Qwen3TTSPipelineConfig(model_path="fake-model")
 
-    with pytest.raises(typer.BadParameter):
-        patches_from_broadcast_flags(
-            config,
-            mem_fraction_static=1.5,
-        )
+    # Range is the schema's rule: the flag builds patches, resolution refuses.
+    patches = patches_from_broadcast_flags(config, mem_fraction_static=1.5)
+    with pytest.raises(ValueError, match="mem_fraction_static"):
+        ConfigManager(config).merge_config([], extra_patches=patches)
 
 
 def test_qwen3_tts_prefill_publishes_sglang_forward_context() -> None:

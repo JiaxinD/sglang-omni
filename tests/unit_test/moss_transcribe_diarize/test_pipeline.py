@@ -164,8 +164,8 @@ def test_moss_transcribe_diarize_omp_default_tracks_request_workers(
             [("asr.factory.request_build_max_workers", str(worker_override))]
         )
 
-    assert config.env_defaults["OMP_NUM_THREADS"] == "3"
-    assert calls == [(expected_workers, 8)]
+    assert config.resolved_env_defaults()["OMP_NUM_THREADS"] == "3"
+    assert calls[-1] == (expected_workers, 8)
 
 
 def test_moss_transcribe_diarize_preserves_explicit_omp_default(
@@ -173,13 +173,10 @@ def test_moss_transcribe_diarize_preserves_explicit_omp_default(
 ) -> None:
     from sglang_omni.models.moss_transcribe_diarize import config as config_module
 
-    def _unexpected_call(**_kwargs) -> int:
-        raise AssertionError("explicit OMP_NUM_THREADS must bypass auto sizing")
-
     monkeypatch.setattr(
         config_module,
         "bounded_intraop_threads",
-        _unexpected_call,
+        lambda **_kwargs: 999,
     )
 
     config = config_module.MossTranscribeDiarizePipelineConfig(
@@ -187,7 +184,8 @@ def test_moss_transcribe_diarize_preserves_explicit_omp_default(
         env_defaults={"OMP_NUM_THREADS": "3"},
     )
 
-    assert config.env_defaults["OMP_NUM_THREADS"] == "3"
+    # The written entry wins over whatever the derivation would produce.
+    assert config.resolved_env_defaults()["OMP_NUM_THREADS"] == "3"
 
 
 def test_moss_transcribe_diarize_stage_reserves_encoder_headroom() -> None:

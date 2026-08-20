@@ -45,7 +45,7 @@ def test_dots_tts_shares_acoustic_limits_via_shared() -> None:
         [
             {
                 "select": {"stages": ["preprocessing", "latent_engine"]},
-                "model": {"num_steps": 8, "max_generate_length": 256},
+                "factory": {"num_steps": 8, "max_generate_length": 256},
             }
         ],
         DotsTTSPipelineConfig,

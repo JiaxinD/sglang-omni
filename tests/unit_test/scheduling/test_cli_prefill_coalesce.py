@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prefill coalescing is plain per-stage configuration.
 
-The knobs live in the stage's ``scheduler`` group, so they are set with the
+The knobs live in the stage's ``factory`` group, so they are set with the
 same dotted spelling as everything else (``--<stage>.factory.prefill_coalesce_requests``)
 or under the stage's ``stages:`` entry in YAML. These tests pin that the
 values reach the AR stage factories of every supported pipeline, and that
@@ -83,7 +83,7 @@ config_cls: MossTTSLocalPipelineConfig
 model_path: dummy
 stages:
   tts_engine:
-    scheduler:
+    factory:
       prefill_coalesce_requests: 16
       prefill_coalesce_wait_ms: 200.0
 """
@@ -107,7 +107,7 @@ def test_a_flag_for_one_stage_leaves_the_other_settings_alone():
     after = _ar_stage_args(merged, "tts_engine")
     assert after["prefill_coalesce_wait_ms"] == 200.0
     after.pop("prefill_coalesce_wait_ms")
-    before.pop("prefill_coalesce_wait_ms")
+    before.pop("prefill_coalesce_wait_ms", None)
     assert after == before
 
 

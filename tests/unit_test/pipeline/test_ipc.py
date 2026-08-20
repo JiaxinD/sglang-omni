@@ -299,8 +299,11 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
     )
     runner = mp_runner.MultiProcessPipelineRunner(config)
 
+    # A cold child can spend close to 10s importing torch before the factory
+    # even runs; the dead-process fail-fast branch needs the child to have
+    # exited, so give slow hosts room instead of racing the teardown.
     with pytest.raises(RuntimeError, match="factory boom"):
-        await runner.start(timeout=10.0)
+        await runner.start(timeout=30.0)
 
     assert list(tmp_path.iterdir()) == []
 

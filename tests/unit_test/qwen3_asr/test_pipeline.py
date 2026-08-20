@@ -112,6 +112,7 @@ def test_qwen3_asr_config_declares_the_batched_stage_settings() -> None:
     assert kwargs["max_new_tokens"] == 128
     assert kwargs["prefill_coalesce_requests"] == 16
     assert kwargs["server_args_overrides"] == {
+        "max_running_requests": 64,
         "enable_torch_compile": True,
         "torch_compile_max_bs": 2,
     }

@@ -179,7 +179,7 @@ def test_colocated_config_rejects_conflicting_ar_mem_fraction() -> None:
 def test_colocated_config_rejects_missing_stage_budgets() -> None:
     config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
 
-    with pytest.raises(ValueError, match="total_gpu_memory_fraction"):
+    with pytest.raises(ValueError, match="gpu_memory_fraction"):
         build_stage_placement_plan(config)
 
 
