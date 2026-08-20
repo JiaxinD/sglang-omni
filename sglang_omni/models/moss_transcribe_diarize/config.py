@@ -81,11 +81,7 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
             return {"encoder_cache_size_bytes": _ENCODER_CACHE_SIZE_BYTES}
         return {}
 
-    def model_post_init(self, __context: Any = None) -> None:
-        super().model_post_init(__context)
-        if "OMP_NUM_THREADS" in self.env_defaults:
-            return
-
+    def resolved_env_defaults(self) -> dict[str, str]:
         asr_stage = next(stage for stage in self.stages if stage.name == "asr")
         configured_workers = asr_stage.factory.request_build_max_workers
         request_build_workers = max(
@@ -102,12 +98,17 @@ class MossTranscribeDiarizePipelineConfig(PipelineConfig):
         # cgroup CPU quota the oversubscription starves the scheduler thread
         # mid-prefill (50-300ms host stalls that gate streaming decode). The
         # env must be in place before the spawned stage process imports Torch.
-        self.env_defaults["OMP_NUM_THREADS"] = str(
-            bounded_intraop_threads(
-                worker_count=request_build_workers,
-                max_threads=_MAX_PIPELINE_INTRAOP_THREADS,
-            ),
-        )
+        # Derived at launch so a rebuilt config re-derives from the resolved
+        # worker count; a written env_defaults entry wins.
+        derived = {
+            "OMP_NUM_THREADS": str(
+                bounded_intraop_threads(
+                    worker_count=request_build_workers,
+                    max_threads=_MAX_PIPELINE_INTRAOP_THREADS,
+                )
+            )
+        }
+        return {**derived, **self.env_defaults}
 
 
 EntryClass = MossTranscribeDiarizePipelineConfig

@@ -152,34 +152,39 @@ class MossTTSLocalPipelineConfig(PipelineConfig):
             }
         return {}
 
-    def model_post_init(self, __context: Any = None) -> None:
-        super().model_post_init(__context)
+    def resolved_env_defaults(self) -> dict[str, str]:
         preprocessing = next(
             (stage for stage in self.stages if stage.name == "preprocessing"),
             None,
         )
-        if preprocessing is not None:
-            configured_workers = preprocessing.factory.max_concurrency
-            preprocessing_workers = max(
-                int(
-                    configured_workers
-                    if configured_workers is not None
-                    else _PREPROCESSING_MAX_CONCURRENCY
-                ),
-                1,
+        if preprocessing is None:
+            return dict(self.env_defaults)
+        configured_workers = preprocessing.factory.max_concurrency
+        preprocessing_workers = max(
+            int(
+                configured_workers
+                if configured_workers is not None
+                else _PREPROCESSING_MAX_CONCURRENCY
+            ),
+            1,
+        )
+        # Stage processes must inherit this before importing Torch/OpenMP-backed
+        # libraries. Calling torch.set_num_threads() inside preprocessing is too
+        # late for the separately spawned AR and vocoder processes. Derived at
+        # launch so a rebuilt config re-derives from the resolved concurrency;
+        # a written env_defaults entry wins.
+        derived = {
+            "OMP_NUM_THREADS": str(
+                bounded_intraop_threads(
+                    worker_count=preprocessing_workers,
+                    max_threads=_MAX_PIPELINE_INTRAOP_THREADS,
+                )
             )
-            # Stage processes must inherit this before importing Torch/OpenMP-backed
-            # libraries. Calling torch.set_num_threads() inside preprocessing is too
-            # late for the separately spawned AR and vocoder processes.
-            self.env_defaults.setdefault(
-                "OMP_NUM_THREADS",
-                str(
-                    bounded_intraop_threads(
-                        worker_count=preprocessing_workers,
-                        max_threads=_MAX_PIPELINE_INTRAOP_THREADS,
-                    )
-                ),
-            )
+        }
+        return {**derived, **self.env_defaults}
+
+    def model_post_init(self, __context: Any = None) -> None:
+        super().model_post_init(__context)
         if self.ref_audio_cache_max_items < 1:
             raise ValueError(
                 "ref_audio_cache_max_items must be >= 1; got "

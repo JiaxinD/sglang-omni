@@ -432,11 +432,24 @@ class PipelineConfig(BaseModel):
         This is a code-level hook, not a configuration surface: values
         returned here are wiring owned by the pipeline class, evaluated at
         launch time after every configuration source has been resolved.
-        User-tunable knobs belong in the stage's typed ``model``/``scheduler``/
-        ``engine`` groups, which override kwargs returned here whenever both
-        name the same factory parameter.
+        User-tunable knobs belong in the stage's typed ``factory``/``engine``
+        groups, which override kwargs returned here whenever both name the
+        same factory parameter.
         """
         return {}
+
+    def resolved_env_defaults(self) -> dict[str, str]:
+        """Process-environment defaults, evaluated at launch.
+
+        A code-level hook like :meth:`stage_factory_kwargs`: models override
+        it to derive environment values from the resolved configuration
+        (thread pools sized from worker settings, for instance). Deriving
+        here rather than in validation keeps the derivation out of the
+        config's dump, so a rebuild cannot mistake yesterday's derivation
+        for a written value. An entry written in ``env_defaults`` always
+        wins over a derivation.
+        """
+        return dict(self.env_defaults)
 
     @classmethod
     def generation_admission_defaults(cls) -> dict[str, Any]:
