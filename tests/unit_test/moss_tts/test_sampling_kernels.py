@@ -414,3 +414,32 @@ def test_sample_seeded_fused_rejects_complex_top_k() -> None:
             seeds=torch.zeros(2, device=device, dtype=torch.long),
             positions=torch.arange(2, device=device, dtype=torch.long),
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_signed_zero_nucleus_boundary() -> None:
+    """top_p=0.2 keeps only the FIRST sorted zero, so which of +0.0/-0.0 sorts
+    first decides the nucleus mask; fused must match baseline for both input
+    orders."""
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab = 64
+    for first, second in ((0.0, -0.0), (-0.0, 0.0)):
+        logits = torch.full((1, vocab), -30.0, device=device)
+        logits[0, 11] = first
+        logits[0, 29] = second
+        for seed in range(20):
+            params = dict(
+                temperature=torch.ones(1, device=device),
+                top_p=torch.full((1,), 0.2, device=device),
+                top_k=torch.full((1,), 8, device=device, dtype=torch.long),
+                seeds=torch.full((1,), seed, device=device, dtype=torch.long),
+                positions=torch.full((1,), 3, device=device, dtype=torch.long),
+            )
+            a = sample_seeded_branchless(logits, **params)
+            b = sample_seeded_fused(logits, **params)
+            assert torch.equal(a, b), f"order=({first},{second}) seed={seed}: {a.item()} vs {b.item()}"
