@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from copy import copy
 from typing import Any, Iterable, Optional, Tuple
 
@@ -42,6 +43,13 @@ from sglang_omni.models.moss_tts.sampling_cuda_graph import (
 from sglang_omni.platforms import current_platform
 
 logger = logging.getLogger(__name__)
+
+
+class ChannelLogitsList(list):
+    """Per-channel logits; ``fused_audio`` carries the [B, n_vq, vocab] fp32
+    tensor the audio entries are views of, so consumers can skip re-stacking."""
+
+    fused_audio: torch.Tensor | None = None
 
 
 def _as_qwen3_config(config: Any) -> Any:
@@ -132,6 +140,9 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
             ]
         )
         self._pad_token_per_channel = self._compute_pad_token_per_channel()
+        self._stacked_audio_head_weight: torch.Tensor | None = None
+        self._audio_head_padded_vocab = 0
+        self._fused_audio_heads_enabled: bool | None = None
         self.register_buffer(
             "_text_control_token_ids",
             torch.tensor(
@@ -364,6 +375,50 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         )
         return outputs
 
+    def _ensure_stacked_audio_heads(self) -> bool:
+        if self._stacked_audio_head_weight is not None:
+            return True
+        if self._fused_audio_heads_enabled is False:
+            return False
+        enabled = os.environ.get("MOSS_DELAY_FUSED_AUDIO_HEADS", "1") != "0"
+        if enabled and self.pp_group.is_last_rank:
+            weights = [getattr(head, "weight", None) for head in self.lm_heads[1:]]
+            first = weights[0] if weights else None
+            enabled = (
+                first is not None
+                and first.ndim == 2
+                and all(
+                    w is not None and w.shape == first.shape and w.dtype == first.dtype
+                    for w in weights
+                )
+            )
+        else:
+            enabled = False
+        self._fused_audio_heads_enabled = enabled
+        if not enabled:
+            return False
+        # Note (Jiaxin Deng): re-point each head's weight at a slice of one
+        # stacked buffer so the fused GEMM adds no steady-state memory.
+        stacked = torch.cat([w.data for w in weights], dim=0).contiguous()
+        rows = int(first.shape[0])
+        for index, head in enumerate(self.lm_heads[1:]):
+            head.weight.data = stacked[index * rows : (index + 1) * rows]
+        self._stacked_audio_head_weight = stacked
+        self._audio_head_padded_vocab = rows
+        return True
+
+    def _compute_fused_audio_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        n_audio = int(self.config.channels) - 1
+        audio_vocab = int(self.config.vocab_size_list[1])
+        flat = torch.nn.functional.linear(
+            hidden_states, self._stacked_audio_head_weight
+        )
+        return (
+            flat.view(hidden_states.shape[0], n_audio, self._audio_head_padded_vocab)[
+                ..., :audio_vocab
+            ].to(torch.float32)
+        )
+
     def compute_channel_logits(
         self,
         hidden_states: torch.Tensor,
@@ -371,10 +426,24 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         *,
         is_audio: bool = False,
     ) -> list[torch.Tensor]:
-        logits = [
-            output.next_token_logits
-            for output in self.compute_channel_outputs(hidden_states, forward_batch)
-        ]
+        if self._ensure_stacked_audio_heads():
+            logits_metadata = LogitsMetadata.from_forward_batch(forward_batch)
+            logits_metadata.next_token_logits_buffer = None
+            logits_metadata.forward_mode = ForwardMode.DECODE
+            text = self.logits_processors[0](
+                None,
+                hidden_states=hidden_states,
+                lm_head=self.lm_heads[0],
+                logits_metadata=logits_metadata,
+            ).next_token_logits
+            fused = self._compute_fused_audio_logits(hidden_states)
+            logits = ChannelLogitsList([text, *fused.unbind(dim=1)])
+            logits.fused_audio = fused
+        else:
+            logits = ChannelLogitsList(
+                output.next_token_logits
+                for output in self.compute_channel_outputs(hidden_states, forward_batch)
+            )
         if is_audio:
             token_ids = self._text_control_token_ids.to(device=logits[0].device)
             logits[0] = logits[0].index_select(-1, token_ids)
