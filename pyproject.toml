@@ -120,10 +120,12 @@ Repository = "https://github.com/sgl-project/sglang-omni"
 
 [tool.uv]
 # The dependency set pins CUDA-13-only wheels (mooncake-transfer-engine-cuda13,
-# nixl-cu13, flash-attn-4); without this, uv's universal resolution also solves
-# for platforms those wheels do not exist on (macOS) and fails.
+# nixl-cu13, flash-attn-4) and the fun-cosyvoice3 extra pins
+# matplotlib==3.11.1 (Python >= 3.11 only); without this, uv's universal
+# resolution also solves for platforms and Python versions those wheels do
+# not support (macOS, 3.10) and fails.
 environments = [
-    "sys_platform == 'linux'",
+    "sys_platform == 'linux' and python_full_version >= '3.11'",
 ]
 override-dependencies = [
     "protobuf>=6.31.1,<7.0.0",
