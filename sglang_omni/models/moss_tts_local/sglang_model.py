@@ -30,7 +30,11 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3 import Qwen3Model
 from sglang.srt.utils import add_prefix
 
-from sglang_omni.models.moss_tts.sampling_kernels import sample_seeded_branchless
+from sglang_omni.models.moss_tts.sampling_kernels import (
+    MAX_FUSED_SAMPLE_VOCAB,
+    sample_seeded_branchless,
+    sample_seeded_fused,
+)
 from sglang_omni.models.moss_tts_local.local_transformer import MossTTSLocalTransformer
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
@@ -370,6 +374,11 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
 
     def _ensure_frame_sampler_compile(self) -> None:
         if self._compiled_frame_sampler is None:
+            if os.environ.get("MOSS_LOCAL_FUSED_FRAME_SAMPLER", "1") != "0":
+                self._compiled_frame_sampler = self._fused_or_branchless_sampler
+                self._sample_seeded_branchless = self._fused_or_branchless_sampler
+                logger.info("Using fused MOSS-TTS Local frame sampler")
+                return
             compile_mode = os.environ.get(
                 "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
             )
@@ -380,6 +389,12 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
             )
             self._sample_seeded_branchless = self._compiled_frame_sampler
             logger.info(f"Compiled MOSS-TTS Local frame sampler (mode={compile_mode})")
+
+    @staticmethod
+    def _fused_or_branchless_sampler(logits: torch.Tensor, **kwargs) -> torch.Tensor:
+        if logits.shape[-1] <= MAX_FUSED_SAMPLE_VOCAB:
+            return sample_seeded_fused(logits, **kwargs)
+        return sample_seeded_branchless(logits, **kwargs)
 
     @torch.no_grad()
     def _decode_frame_graphable(
