@@ -187,8 +187,11 @@ def _fused_seeded_sample_kernel(
 
     # Note (Jiaxin Deng): key packs orderable score bits above a complemented
     # index so equal scores keep input order, matching cub's stable radix sort
-    # (torch.sort) bit-for-bit at nucleus tie boundaries.
-    bits = scores.to(tl.int32, bitcast=True)
+    # (torch.sort) bit-for-bit at nucleus tie boundaries. -0.0 canonicalizes to
+    # +0.0 first: the zeros compare equal numerically, so bit-distinct keys
+    # would break that input-order tie rule.
+    key_scores = tl.where(scores == 0.0, 0.0, scores)
+    bits = key_scores.to(tl.int32, bitcast=True)
     orderable = (bits ^ ((bits >> 31) | -2147483648)).to(tl.uint32).to(tl.int64)
     biased = orderable - tl.full((), 2147483648, tl.int64)
     idx64 = idx.to(tl.int64)
