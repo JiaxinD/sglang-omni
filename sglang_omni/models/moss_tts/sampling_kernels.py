@@ -276,16 +276,21 @@ def sample_seeded_fused(
         raise ValueError(
             f"fused seeded sampler supports vocab <= {MAX_FUSED_SAMPLE_VOCAB}, got {vocab}"
         )
+    if rows == 0:
+        return torch.empty(0, device=logits.device, dtype=torch.int64)
+    if top_k.dtype.is_floating_point or top_k.dtype == torch.bool:
+        raise TypeError(f"top_k must be an integer tensor, got {top_k.dtype}")
+    top_k = top_k.to(torch.int64)
     logits = logits.float().contiguous()
     out = torch.empty(rows, device=logits.device, dtype=torch.int64)
     block = triton.next_power_of_2(vocab)
     _fused_seeded_sample_kernel[(rows,)](
         logits,
-        temperature.float(),
-        top_p.float(),
-        top_k.to(torch.int64),
-        seeds,
-        positions,
+        temperature.float().contiguous(),
+        top_p.float().contiguous(),
+        top_k.contiguous(),
+        seeds.to(torch.int64).contiguous(),
+        positions.to(torch.int64).contiguous(),
         out,
         VOCAB=vocab,
         ROW_STRIDE=logits.stride(0),

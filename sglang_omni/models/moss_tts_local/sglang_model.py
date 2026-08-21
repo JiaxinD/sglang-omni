@@ -138,6 +138,7 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         # its addresses are fixed for the process lifetime.
         self._state_pool = MossTTSLocalDecodeStatePool(self)
         self._compiled_frame_sampler: Callable[..., torch.Tensor] | None = None
+        self._large_vocab_frame_sampler: Callable[..., torch.Tensor] | None = None
         self._frame_compile_configured = False
 
     def acquire_row(self, rid: str) -> int:
@@ -372,29 +373,34 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
         set_torch_compile_config()
         self._frame_compile_configured = True
 
+    def _compile_branchless_sampler(self):
+        compile_mode = os.environ.get(
+            "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
+        )
+        self._ensure_frame_compile_config()
+        compiled = torch.compile(sample_seeded_branchless, mode=compile_mode)
+        logger.info(f"Compiled MOSS-TTS Local frame sampler (mode={compile_mode})")
+        return compiled
+
     def _ensure_frame_sampler_compile(self) -> None:
         if self._compiled_frame_sampler is None:
             if os.environ.get("MOSS_LOCAL_FUSED_FRAME_SAMPLER", "1") != "0":
+                # Note (Jiaxin Deng): the Triton specializations JIT during the
+                # eager warmup passes init_frame_decode_graphs runs per bucket,
+                # so both vocab shapes compile before graph capture.
                 self._compiled_frame_sampler = self._fused_or_branchless_sampler
                 self._sample_seeded_branchless = self._fused_or_branchless_sampler
                 logger.info("Using fused MOSS-TTS Local frame sampler")
                 return
-            compile_mode = os.environ.get(
-                "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
-            )
-            self._ensure_frame_compile_config()
-            self._compiled_frame_sampler = torch.compile(
-                sample_seeded_branchless,
-                mode=compile_mode,
-            )
+            self._compiled_frame_sampler = self._compile_branchless_sampler()
             self._sample_seeded_branchless = self._compiled_frame_sampler
-            logger.info(f"Compiled MOSS-TTS Local frame sampler (mode={compile_mode})")
 
-    @staticmethod
-    def _fused_or_branchless_sampler(logits: torch.Tensor, **kwargs) -> torch.Tensor:
+    def _fused_or_branchless_sampler(self, logits: torch.Tensor, **kwargs) -> torch.Tensor:
         if logits.shape[-1] <= MAX_FUSED_SAMPLE_VOCAB:
             return sample_seeded_fused(logits, **kwargs)
-        return sample_seeded_branchless(logits, **kwargs)
+        if self._large_vocab_frame_sampler is None:
+            self._large_vocab_frame_sampler = self._compile_branchless_sampler()
+        return self._large_vocab_frame_sampler(logits, **kwargs)
 
     @torch.no_grad()
     def _decode_frame_graphable(

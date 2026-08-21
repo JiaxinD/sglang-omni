@@ -202,3 +202,138 @@ def test_sample_seeded_fused_rejects_large_vocab() -> None:
             seeds=torch.zeros(rows, device=device, dtype=torch.long),
             positions=torch.arange(rows, device=device, dtype=torch.long),
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_nucleus_knife_edges() -> None:
+    """Away from fp32 knife edges the mask matches bit-for-bit; exactly at a
+    cumulative-probability boundary the kept set may differ by the boundary
+    token only, so the sample must stay inside the top-k prefix."""
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab, k = 1025, 25
+    gen = torch.Generator(device=device).manual_seed(11)
+    logits = (torch.randn(1, vocab, device=device, generator=gen) * 4.0).float()
+    scores = logits.clone()
+    sorted_scores, sorted_idx = torch.sort(scores, descending=True, dim=-1)
+    kth = sorted_scores[0, k - 1]
+    masked = sorted_scores.masked_fill(sorted_scores < kth, float("-inf"))
+    cum = torch.cumsum(torch.softmax(masked, dim=-1), dim=-1)[0]
+    topk_ids = set(sorted_idx[0, :k].tolist())
+
+    for j in (3, 10, 20):
+        edge = float(cum[j].item())
+        for p in (
+            (edge + float(cum[j + 1].item())) / 2.0,  # strictly between edges
+            edge,  # exactly at the boundary
+            float(torch.nextafter(cum[j], cum[j] + 1).item()),
+        ):
+            params = dict(
+                temperature=torch.ones(1, device=device),
+                top_p=torch.full((1,), p, device=device),
+                top_k=torch.full((1,), k, device=device, dtype=torch.long),
+                seeds=torch.full((1,), 42, device=device, dtype=torch.long),
+                positions=torch.full((1,), 7, device=device, dtype=torch.long),
+            )
+            a = sample_seeded_branchless(logits, **params)
+            b = sample_seeded_fused(logits, **params)
+            assert int(b.item()) in topk_ids
+            if p != edge:
+                assert torch.equal(a, b), f"j={j} p={p}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_signed_zero_and_nonfinite() -> None:
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab = 64
+    logits = torch.full((3, vocab), -5.0, device=device)
+    logits[0, 3], logits[0, 7] = 0.0, -0.0  # numerically tied signed zeros
+    logits[1, 5] = float("-inf")
+    logits[2, :] = float("-inf")  # fully masked row -> greedy fallback
+    params = dict(
+        temperature=torch.tensor([1.0, 1.0, 1.0], device=device),
+        top_p=torch.tensor([0.9, 0.9, 0.9], device=device),
+        top_k=torch.tensor([8, 8, 8], device=device, dtype=torch.long),
+        seeds=torch.tensor([1, 2, 3], device=device, dtype=torch.long),
+        positions=torch.tensor([0, 1, 2], device=device, dtype=torch.long),
+    )
+    a = sample_seeded_branchless(logits, **params)
+    b = sample_seeded_fused(logits, **params)
+    assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_hash_endpoint() -> None:
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    logits = torch.tensor([[-100.0, 0.0]], device=device)
+    params = dict(
+        temperature=torch.ones(1, device=device),
+        top_p=torch.ones(1, device=device),
+        top_k=torch.zeros(1, device=device, dtype=torch.long),
+        seeds=torch.zeros(1, device=device, dtype=torch.long),
+        # MurmurHash(seed=0, position, token_id=0) == UINT32_MAX here.
+        positions=torch.tensor([_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long),
+    )
+    a = sample_seeded_branchless(logits, **params)
+    b = sample_seeded_fused(logits, **params)
+    assert torch.equal(a, b)
+    assert a.item() == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_input_hardening() -> None:
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    empty = sample_seeded_fused(
+        torch.empty(0, 1025, device=device),
+        temperature=torch.empty(0, device=device),
+        top_p=torch.empty(0, device=device),
+        top_k=torch.empty(0, device=device, dtype=torch.long),
+        seeds=torch.empty(0, device=device, dtype=torch.long),
+        positions=torch.empty(0, device=device, dtype=torch.long),
+    )
+    assert empty.shape == (0,) and empty.dtype == torch.int64
+
+    with pytest.raises(TypeError, match="integer"):
+        sample_seeded_fused(
+            torch.randn(2, 64, device=device),
+            temperature=torch.ones(2, device=device),
+            top_p=torch.ones(2, device=device),
+            top_k=torch.full((2,), 8.0, device=device),
+            seeds=torch.zeros(2, device=device, dtype=torch.long),
+            positions=torch.arange(2, device=device, dtype=torch.long),
+        )
+
+    gen = torch.Generator(device=device).manual_seed(5)
+    logits = torch.randn(4, 1025, device=device, generator=gen)
+    strided = torch.zeros(8, device=device, dtype=torch.long)[::2] + 25
+    contig = dict(
+        temperature=torch.full((4,), 1.7, device=device),
+        top_p=torch.full((4,), 0.8, device=device),
+        top_k=torch.full((4,), 25, device=device, dtype=torch.long),
+        seeds=torch.arange(4, device=device, dtype=torch.long),
+        positions=torch.arange(4, device=device, dtype=torch.long),
+    )
+    a = sample_seeded_fused(logits, **contig)
+    b = sample_seeded_fused(logits, **{**contig, "top_k": strided})
+    c = sample_seeded_branchless(logits, **contig)
+    assert torch.equal(a, b)
+    assert torch.equal(a, c)
