@@ -389,7 +389,7 @@ def test_talker_max_seq_len_applied(mock_launch_server):
     config = mock_launch_server.call_args[0][0]
     talker = _stage(config, "talker_ar")
 
-    assert talker.factory.talker_max_seq_len == 128
+    assert talker.factory.max_seq_len == 128
 
 
 def test_partial_start_updates_talker_factory_args(mock_launch_server):
