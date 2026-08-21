@@ -5,7 +5,8 @@ model_path: Qwen/Qwen3-ASR-1.7B
 
 stages:
   asr:
-    engine:
+    factory:
       dtype: bfloat16
+    engine:
       max_running_requests: 16
       mem_fraction_static: 0.65

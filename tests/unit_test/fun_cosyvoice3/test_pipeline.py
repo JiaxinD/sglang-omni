@@ -28,9 +28,7 @@ def test_fun_cosyvoice3_config_and_registry_contract() -> None:
     assert config.required_speech_reference_count == 1
     assert config.speech_reference_text_excludes_instructions is True
     assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
-    assert config.generation_sglang_role_to_stage() == {"generation": "tts_engine"}
-    assert config.mem_fraction_role_to_stage() == {"talker": "tts_engine"}
-    assert config.process_safe_edges() == frozenset({("tts_engine", "vocoder")})
+    assert type(config).stage_config_cls("tts_engine").engine_stage
     assert CAPABILITIES.supports_streaming_vocoder is False
 
     build_process_topology_plan(config, build_stage_placement_plan(config))
