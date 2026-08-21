@@ -207,9 +207,10 @@ that fails or is aborted can drop an un-emitted pending window while its
 in-flight staging buffer is retired. To disable it:
 
 ```yaml
-runtime_overrides:
+stages:
   code2wav:
-    enable_output_overlap: false
+    factory:
+      enable_output_overlap: false
 ```
 
 For manual multi-GPU placement, use the example script:

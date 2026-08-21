@@ -302,7 +302,7 @@ terminal sentinel. When the client does not set `initial_codec_chunk_frames`,
 the model selects a continuity-safe first vocoder chunk. Set the field explicitly
 to override that default, or set it to `0` to use the model's steady chunk size
 from the start. Ming-Omni-TTS is the only model that rejects the field: its
-initial and steady cadence are pipeline-level `audio_decode.factory_args`, so a
+initial and steady cadence are the audio_decode stage's `factory` settings, so a
 request that sets it fails.
 
 ### Batch Speech

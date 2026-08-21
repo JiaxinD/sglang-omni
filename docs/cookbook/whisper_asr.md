@@ -46,10 +46,11 @@ Whisper builds requests with eight worker threads by default, matching other pre
 Use `prefill_coalesce_requests` and `prefill_coalesce_wait_ms` to tune the gate. Set `prefill_coalesce_requests: 0` to disable only coalescing, or also set `request_build_max_workers: 1` to restore the pre-optimization request-build path:
 
 ```yaml
-runtime_overrides:
+stages:
   asr:
-    request_build_max_workers: 1
-    prefill_coalesce_requests: 0
+    factory:
+      request_build_max_workers: 1
+      prefill_coalesce_requests: 0
 ```
 
 ## Async Decode
@@ -240,7 +241,7 @@ All 4,608 measured requests across both modes completed successfully, and all 2,
   Graph. Validate the selected buckets before production use.
 - Audio encoding runs before LM admission by default
   (`pre_lm_max_batch_size=8`, `request_build_max_workers=8`). Set
-  `enable_pre_lm_encoder: false` under `runtime_overrides.asr` to run the
+  `enable_pre_lm_encoder: false` under `stages.asr.factory` to run the
   encoder inside prefill again.
 - The pre-LM encoder cache (`pre_lm_cache_max_entries=1024`) keeps its
   entries in page-locked (pinned) host memory so device-to-host and

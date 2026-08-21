@@ -233,3 +233,21 @@ stages:
 
     with pytest.raises(ValueError, match="gpu_memory_fraction"):
         ConfigManager.from_file(str(config_path))
+
+
+def test_qwen3_omni_h100_bf16_config_enables_speech_prefill_graph() -> None:
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = (
+        repo_root / "examples" / "configs" / "qwen3_omni_colocated_h100_bf16.yaml"
+    )
+
+    config = ConfigManager.from_file(str(config_path)).config
+    overrides = _stage(config, "thinker").engine.overrides()
+
+    assert isinstance(config, Qwen3OmniSpeechColocatedPipelineConfig)
+    assert "disable_radix_cache" not in overrides
+    assert overrides["cuda_graph_backend_prefill"] == "breakable"
+    assert "cuda_graph_bs_prefill" not in overrides
+    assert overrides["cuda_graph_max_bs_prefill"] == 2048
