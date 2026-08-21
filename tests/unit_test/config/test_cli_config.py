@@ -43,16 +43,20 @@ def output_of(result) -> str:
 
 @pytest.fixture
 def runner() -> CliRunner:
-    """A runner whose ``result.stdout`` is stdout alone.
+    """A runner whose ``result.stdout`` is stdout alone, colors off.
 
     click < 8.2 folds stderr into stdout unless asked not to, which would let
     a stderr notice land in the middle of a document meant for redirection.
-    click >= 8.2 always separates the two and dropped the argument.
+    click >= 8.2 always separates the two and dropped the argument. NO_COLOR
+    keeps rich from wrapping flag names in escape codes on color-forcing
+    terminals (CI), where the codes land inside ``--flag`` and break substring
+    assertions on error text.
     """
+    env = {"NO_COLOR": "1", "TERM": "dumb"}
     try:
-        return CliRunner(mix_stderr=False)
+        return CliRunner(mix_stderr=False, env=env)
     except TypeError:  # pragma: no cover - version dependent
-        return CliRunner()
+        return CliRunner(env=env)
 
 
 @pytest.fixture
