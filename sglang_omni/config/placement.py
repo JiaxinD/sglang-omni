@@ -18,6 +18,8 @@ class StagePlacement:
     gpu_ids: tuple[int, ...]
     tp_size: int
     total_gpu_memory_fraction: float | None
+    kv_cache_bytes: int | None
+    total_reserve_bytes: int | None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class GpuPlacement:
     total_gpu_memory_fraction: float
     has_memory_fraction: bool
     missing_fraction_stage_names: tuple[str, ...]
+    total_kv_cache_bytes: int
+    total_reserve_bytes: int
 
 
 @dataclass(frozen=True)
@@ -53,22 +57,27 @@ class StagePlacementPlanner:
     ) -> StagePlacementPlan:
         stages = stages_cfg if stages_cfg is not None else self._config.stages
         placements: dict[str, StagePlacement] = {}
-        gpu_entries: dict[int, list[tuple[str, float | None]]] = defaultdict(list)
+        gpu_entries: dict[int, list[StagePlacement]] = defaultdict(list)
 
         for stage in stages:
             gpu_ids = _resolve_stage_gpu_ids(stage)
             if not gpu_ids:
                 continue
 
-            fraction = stage.gpu_memory_fraction
-            placements[stage.name] = StagePlacement(
+            kv_cache_bytes = (
+                stage.engine.kv_cache_bytes if stage.engine is not None else None
+            )
+            placement = StagePlacement(
                 stage_name=stage.name,
                 gpu_ids=gpu_ids,
                 tp_size=stage.tp_size,
-                total_gpu_memory_fraction=fraction,
+                total_gpu_memory_fraction=stage.gpu_memory_fraction,
+                kv_cache_bytes=kv_cache_bytes,
+                total_reserve_bytes=stage.total_reserve_bytes,
             )
+            placements[stage.name] = placement
             for gpu_id in gpu_ids:
-                gpu_entries[gpu_id].append((stage.name, fraction))
+                gpu_entries[gpu_id].append(placement)
 
         gpu_plans = {
             gpu_id: _build_gpu_placement(gpu_id, entries)
@@ -92,6 +101,37 @@ class StagePlacementPlanner:
                     f"{gpu.total_gpu_memory_fraction:.3f} exceeds placement limit "
                     f"{limit:.3f}"
                 )
+
+
+def validate_gpu_capacity(plan: StagePlacementPlan) -> None:
+    """Fail before spawn when declared budgets exceed a GPU's physical memory.
+
+    Fractions and byte reserves are combined in the byte domain, so mixed
+    fraction/byte colocation cannot overcommit a card while each domain's own
+    sum still looks fine. Skipped when device metadata is unavailable.
+    """
+
+    from sglang_omni.utils.gpu_memory import format_bytes_gib, get_gpu_device_info
+
+    for gpu_id, gpu in sorted(plan.gpus.items()):
+        if gpu.total_reserve_bytes <= 0:
+            continue
+        info = get_gpu_device_info(gpu_id)
+        if info.total_memory_bytes is None:
+            continue
+        declared = (
+            gpu.total_gpu_memory_fraction * info.total_memory_bytes
+            + gpu.total_reserve_bytes
+        )
+        if declared > info.total_memory_bytes:
+            raise ValueError(
+                f"GPU {gpu_id} declared budgets exceed physical memory: "
+                f"fraction {gpu.total_gpu_memory_fraction:.3f} of "
+                f"{format_bytes_gib(info.total_memory_bytes)} plus "
+                f"total_reserve_bytes {format_bytes_gib(gpu.total_reserve_bytes)} "
+                f"= {format_bytes_gib(int(declared))}. Lower the stage budgets "
+                "or move a stage to another GPU."
+            )
 
 
 def build_stage_placement_plan(
@@ -140,25 +180,34 @@ def _resolve_stage_gpu_ids(stage: StageConfig) -> tuple[int, ...]:
 
 def _build_gpu_placement(
     gpu_id: int,
-    entries: list[tuple[str, float | None]],
+    entries: list[StagePlacement],
 ) -> GpuPlacement:
     total = 0.0
+    total_kv_cache_bytes = 0
+    total_reserve_bytes = 0
     has_memory_fraction = False
     missing: set[str] = set()
     stage_names: list[str] = []
-    for stage_name, fraction in entries:
-        stage_names.append(stage_name)
-        if fraction is None:
-            missing.add(stage_name)
-            continue
-        has_memory_fraction = True
-        total += fraction
+    for entry in entries:
+        stage_names.append(entry.stage_name)
+        if entry.total_gpu_memory_fraction is None:
+            missing.add(entry.stage_name)
+        else:
+            has_memory_fraction = True
+            total += entry.total_gpu_memory_fraction
+
+        if entry.kv_cache_bytes is not None:
+            total_kv_cache_bytes += entry.kv_cache_bytes
+        if entry.total_reserve_bytes is not None:
+            total_reserve_bytes += entry.total_reserve_bytes
     return GpuPlacement(
         gpu_id=gpu_id,
         stage_names=tuple(stage_names),
         total_gpu_memory_fraction=total,
         has_memory_fraction=has_memory_fraction,
         missing_fraction_stage_names=tuple(sorted(missing)),
+        total_kv_cache_bytes=total_kv_cache_bytes,
+        total_reserve_bytes=total_reserve_bytes,
     )
 
 
