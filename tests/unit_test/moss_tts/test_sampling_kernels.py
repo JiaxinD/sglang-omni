@@ -337,3 +337,80 @@ def test_sample_seeded_fused_input_hardening() -> None:
     c = sample_seeded_branchless(logits, **contig)
     assert torch.equal(a, b)
     assert torch.equal(a, c)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_masked_lane_hash_endpoint() -> None:
+    """A top-k-masked token whose Gumbel hash hits UINT32_MAX yields
+    -inf + inf = NaN; the baseline's NaN-first rule then selects it. The fused
+    kernel must reproduce that baseline quirk exactly (parity, not top-k
+    membership, is the contract)."""
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab = 64
+    logits = torch.full((1, vocab), 0.0, device=device)
+    logits[0, 0] = -100.0  # token 0: excluded by top-k, hash endpoint target
+    params = dict(
+        temperature=torch.ones(1, device=device),
+        top_p=torch.ones(1, device=device),
+        top_k=torch.full((1,), 8, device=device, dtype=torch.long),
+        seeds=torch.zeros(1, device=device, dtype=torch.long),
+        positions=torch.tensor(
+            [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+        ),
+    )
+    a = sample_seeded_branchless(logits, **params)
+    b = sample_seeded_fused(logits, **params)
+    assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_signed_zero_orderings_and_nonfinite() -> None:
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab = 64
+    rows = []
+    base = torch.full((vocab,), -5.0, device=device)
+    r0 = base.clone(); r0[3], r0[7] = 0.0, -0.0          # +0 before -0
+    r1 = base.clone(); r1[3], r1[7] = -0.0, 0.0          # -0 before +0 (reversed)
+    r2 = base.clone(); r2[0], r2[1] = -0.0, 0.0          # adjacent reversed
+    r3 = base.clone(); r3[5] = float("inf")              # +inf logit
+    r4 = base.clone(); r4[9] = float("nan")              # NaN logit
+    logits = torch.stack([r0, r1, r2, r3, r4])
+    n = logits.shape[0]
+    for seed in (1, 9, 1234):
+        params = dict(
+            temperature=torch.ones(n, device=device),
+            top_p=torch.full((n,), 0.9, device=device),
+            top_k=torch.full((n,), 8, device=device, dtype=torch.long),
+            seeds=torch.full((n,), seed, device=device, dtype=torch.long),
+            positions=torch.arange(n, device=device, dtype=torch.long),
+        )
+        a = sample_seeded_branchless(logits, **params)
+        b = sample_seeded_fused(logits, **params)
+        assert torch.equal(a, b), f"seed={seed}: {a.tolist()} vs {b.tolist()}"
+
+
+def test_sample_seeded_fused_rejects_complex_top_k() -> None:
+    from sglang_omni.models.moss_tts.sampling_kernels import sample_seeded_fused
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    device = torch.device("cuda")
+    with pytest.raises(TypeError, match="integer"):
+        sample_seeded_fused(
+            torch.randn(2, 64, device=device),
+            temperature=torch.ones(2, device=device),
+            top_p=torch.ones(2, device=device),
+            top_k=torch.full((2,), 8, device=device, dtype=torch.complex64),
+            seeds=torch.zeros(2, device=device, dtype=torch.long),
+            positions=torch.arange(2, device=device, dtype=torch.long),
+        )

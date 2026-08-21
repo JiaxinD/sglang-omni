@@ -278,7 +278,7 @@ def sample_seeded_fused(
         )
     if rows == 0:
         return torch.empty(0, device=logits.device, dtype=torch.int64)
-    if top_k.dtype.is_floating_point or top_k.dtype == torch.bool:
+    if top_k.dtype.is_floating_point or top_k.dtype.is_complex or top_k.dtype == torch.bool:
         raise TypeError(f"top_k must be an integer tensor, got {top_k.dtype}")
     top_k = top_k.to(torch.int64)
     logits = logits.float().contiguous()
