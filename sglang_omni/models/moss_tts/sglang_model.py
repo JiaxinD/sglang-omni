@@ -142,6 +142,7 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         self._pad_token_per_channel = self._compute_pad_token_per_channel()
         self._stacked_audio_head_weight: torch.Tensor | None = None
         self._audio_head_padded_vocab = 0
+        self._audio_head_expected_ptrs: list[int] = []
         self._fused_audio_heads_enabled: bool | None = None
         self.register_buffer(
             "_text_control_token_ids",
@@ -416,24 +417,32 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
             head.weight.data = stacked[index * rows : (index + 1) * rows]
         self._stacked_audio_head_weight = stacked
         self._audio_head_padded_vocab = rows
+        self._audio_head_expected_ptrs = [
+            stacked[index * rows : (index + 1) * rows].data_ptr()
+            for index in range(len(self.lm_heads) - 1)
+        ]
         logger.info("MOSS-TTS fused audio heads enabled (stacked %s)", tuple(stacked.shape))
         return True
 
     def _fused_audio_heads_ready(self) -> bool:
         if not self._ensure_stacked_audio_heads():
             return False
-        # Guard against head replacement (set_embed_and_head, assign=True
-        # loads): the fused buffer must still back the live head weights.
-        if (
-            self.lm_heads[1].weight.data_ptr()
-            != self._stacked_audio_head_weight.data_ptr()
-        ):
-            logger.warning(
-                "MOSS-TTS fused audio heads disabled: head weights were replaced"
-            )
-            self._stacked_audio_head_weight = None
-            self._fused_audio_heads_enabled = False
-            return False
+        # Note (Jiaxin Deng): heads can be replaced independently
+        # (set_embed_and_head, assign-loads), so every audio slice must still
+        # alias its stacked-buffer offset before the fused GEMM may run.
+        for index, head in enumerate(self.lm_heads[1:]):
+            weight = getattr(head, "weight", None)
+            if (
+                weight is None
+                or weight.data_ptr() != self._audio_head_expected_ptrs[index]
+            ):
+                logger.warning(
+                    "MOSS-TTS fused audio heads disabled: head %d weight was replaced",
+                    index + 1,
+                )
+                self._stacked_audio_head_weight = None
+                self._fused_audio_heads_enabled = False
+                return False
         return True
 
     def _compute_fused_audio_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
