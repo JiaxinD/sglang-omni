@@ -395,7 +395,10 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
                 and first.dtype in (torch.bfloat16, torch.float16, torch.float32)
                 and get_tensor_model_parallel_world_size() == 1
                 and getattr(self.config, "final_logit_softcapping", None) in (None, 0)
-                and all(type(head).__name__ == "ParallelLMHead" for head in self.lm_heads[1:])
+                and all(
+                    type(head).__name__ == "ParallelLMHead"
+                    for head in self.lm_heads[1:]
+                )
                 and all(
                     w is not None and w.shape == first.shape and w.dtype == first.dtype
                     for w in weights
@@ -406,7 +409,9 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
             enabled = False
         self._fused_audio_heads_enabled = enabled
         if not enabled:
-            logger.info("MOSS-TTS fused audio heads disabled (unsupported configuration)")
+            logger.info(
+                "MOSS-TTS fused audio heads disabled (unsupported configuration)"
+            )
             return False
         # Note (Jiaxin Deng): re-point each head's weight at a slice of one
         # stacked buffer so the fused GEMM adds no steady-state memory; the
@@ -421,7 +426,9 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
             stacked[index * rows : (index + 1) * rows].data_ptr()
             for index in range(len(self.lm_heads) - 1)
         ]
-        logger.info("MOSS-TTS fused audio heads enabled (stacked %s)", tuple(stacked.shape))
+        logger.info(
+            "MOSS-TTS fused audio heads enabled (stacked %s)", tuple(stacked.shape)
+        )
         return True
 
     def _fused_audio_heads_ready(self) -> bool:
@@ -451,11 +458,9 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         flat = torch.nn.functional.linear(
             hidden_states, self._stacked_audio_head_weight
         )
-        return (
-            flat.view(hidden_states.shape[0], n_audio, self._audio_head_padded_vocab)[
-                ..., :audio_vocab
-            ].to(torch.float32)
-        )
+        return flat.view(
+            hidden_states.shape[0], n_audio, self._audio_head_padded_vocab
+        )[..., :audio_vocab].to(torch.float32)
 
     def compute_channel_logits(
         self,
