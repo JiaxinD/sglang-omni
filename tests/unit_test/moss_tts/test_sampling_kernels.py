@@ -101,7 +101,14 @@ def test_seeded_gumbel_argmax_rejects_strided_output() -> None:
 
 
 def _fused_case(vocab: int, temp: float, top_p: float, top_k: int, tie: bool):
-    return pytest.param(vocab, temp, top_p, top_k, tie, id=f"v{vocab}-t{temp}-p{top_p}-k{top_k}-{'tied' if tie else 'random'}")
+    return pytest.param(
+        vocab,
+        temp,
+        top_p,
+        top_k,
+        tie,
+        id=f"v{vocab}-t{temp}-p{top_p}-k{top_k}-{'tied' if tie else 'random'}",
+    )
 
 
 @pytest.mark.parametrize(
@@ -163,9 +170,11 @@ def test_sample_seeded_fused_mixed_rows_and_greedy_fallback() -> None:
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(7)
     rows, vocab = 8, 1025
-    logits = (torch.randn(rows, vocab, device=device, generator=gen) * 4.0).to(
-        torch.bfloat16
-    ).float()
+    logits = (
+        (torch.randn(rows, vocab, device=device, generator=gen) * 4.0)
+        .to(torch.bfloat16)
+        .float()
+    )
     params = dict(
         temperature=torch.tensor(
             [1.7, 0.0, 1.0, 0.0, 1.2, 1.7, 0.5, 1.0], device=device
@@ -286,7 +295,9 @@ def test_sample_seeded_fused_hash_endpoint() -> None:
         top_k=torch.zeros(1, device=device, dtype=torch.long),
         seeds=torch.zeros(1, device=device, dtype=torch.long),
         # MurmurHash(seed=0, position, token_id=0) == UINT32_MAX here.
-        positions=torch.tensor([_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long),
+        positions=torch.tensor(
+            [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+        ),
     )
     a = sample_seeded_branchless(logits, **params)
     b = sample_seeded_fused(logits, **params)
@@ -377,13 +388,17 @@ def test_sample_seeded_fused_signed_zero_orderings_and_nonfinite() -> None:
 
     device = torch.device("cuda")
     vocab = 64
-    rows = []
     base = torch.full((vocab,), -5.0, device=device)
-    r0 = base.clone(); r0[3], r0[7] = 0.0, -0.0          # +0 before -0
-    r1 = base.clone(); r1[3], r1[7] = -0.0, 0.0          # -0 before +0 (reversed)
-    r2 = base.clone(); r2[0], r2[1] = -0.0, 0.0          # adjacent reversed
-    r3 = base.clone(); r3[5] = float("inf")              # +inf logit
-    r4 = base.clone(); r4[9] = float("nan")              # NaN logit
+    r0 = base.clone()
+    r0[3], r0[7] = 0.0, -0.0  # +0 before -0
+    r1 = base.clone()
+    r1[3], r1[7] = -0.0, 0.0  # -0 before +0 (reversed)
+    r2 = base.clone()
+    r2[0], r2[1] = -0.0, 0.0  # adjacent reversed
+    r3 = base.clone()
+    r3[5] = float("inf")  # +inf logit
+    r4 = base.clone()
+    r4[9] = float("nan")  # NaN logit
     logits = torch.stack([r0, r1, r2, r3, r4])
     n = logits.shape[0]
     for seed in (1, 9, 1234):
@@ -442,4 +457,6 @@ def test_sample_seeded_fused_signed_zero_nucleus_boundary() -> None:
             )
             a = sample_seeded_branchless(logits, **params)
             b = sample_seeded_fused(logits, **params)
-            assert torch.equal(a, b), f"order=({first},{second}) seed={seed}: {a.item()} vs {b.item()}"
+            assert torch.equal(
+                a, b
+            ), f"order=({first},{second}) seed={seed}: {a.item()} vs {b.item()}"

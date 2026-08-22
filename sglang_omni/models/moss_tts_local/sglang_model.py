@@ -395,7 +395,9 @@ class MossTTSLocalSGLangModel(torch.nn.Module):
             self._compiled_frame_sampler = self._compile_branchless_sampler()
             self._sample_seeded_branchless = self._compiled_frame_sampler
 
-    def _fused_or_branchless_sampler(self, logits: torch.Tensor, **kwargs) -> torch.Tensor:
+    def _fused_or_branchless_sampler(
+        self, logits: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
         if logits.shape[-1] <= MAX_FUSED_SAMPLE_VOCAB:
             return sample_seeded_fused(logits, **kwargs)
         if self._large_vocab_frame_sampler is None:
