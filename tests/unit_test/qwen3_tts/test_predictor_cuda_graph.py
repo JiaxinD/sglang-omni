@@ -65,15 +65,16 @@ class _IdentityRotary(nn.Module):
         return q, k
 
 
-def _build_talker(device: torch.device) -> Qwen3TTSTalker:
+def _build_talker(device: torch.device, pred_vocab: int = PRED_VOCAB) -> Qwen3TTSTalker:
     torch.manual_seed(7)
     predictor_len = NUM_CODE_GROUPS + 1
     talker = object.__new__(Qwen3TTSTalker)
     talker.training = False
     talker.config = SimpleNamespace(
         num_code_groups=NUM_CODE_GROUPS,
+        hidden_size=HIDDEN,
         code_predictor_config=SimpleNamespace(
-            vocab_size=PRED_VOCAB,
+            vocab_size=pred_vocab,
             hidden_size=HIDDEN,
         ),
     )
@@ -146,20 +147,20 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
             norm=RMSNorm(HIDDEN, eps=1e-6).to(device, DTYPE),
             codec_embedding=nn.ModuleList(
                 [
-                    nn.Embedding(PRED_VOCAB, HIDDEN).to(device, DTYPE)
+                    nn.Embedding(pred_vocab, HIDDEN).to(device, DTYPE)
                     for _ in range(NUM_CODE_GROUPS - 1)
                 ]
             ),
         ),
         lm_head=nn.ModuleList(
             [
-                _TupleLinear(HIDDEN, PRED_VOCAB).to(device, DTYPE)
+                _TupleLinear(HIDDEN, pred_vocab).to(device, DTYPE)
                 for _ in range(NUM_CODE_GROUPS - 1)
             ]
         ),
         project_input=lambda hidden: projection(hidden),
     )
-    layer0_embedding = nn.Embedding(PRED_VOCAB, HIDDEN).to(device, DTYPE)
+    layer0_embedding = nn.Embedding(pred_vocab, HIDDEN).to(device, DTYPE)
     talker.get_input_embeddings = lambda: layer0_embedding
 
     talker._predictor_graphs = {}
@@ -422,6 +423,116 @@ def test_capture_failure_restores_live_sub_state(monkeypatch: pytest.MonkeyPatch
     assert talker._sub_batch_size == 2
     assert talker._sub_sample_count == 2
     assert talker._sub_sample_rows == [0, 1]
+
+
+PREWARM_VOCAB = 128  # keeps the default top_k=50 bounded so the signature prewarms
+PREWARM_KEYS = tuple((bucket, "sampled", 50, False, False) for bucket in BUCKETS)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_prewarm_captures_default_keys_and_serving_reuses_them():
+    device = torch.device("cuda")
+    talker = _build_talker(device, pred_vocab=PREWARM_VOCAB)
+
+    captured = talker.prewarm_predictor_graphs()
+
+    assert captured == len(BUCKETS)
+    assert set(talker._predictor_graphs) == set(PREWARM_KEYS)
+    prewarmed_graph = talker._predictor_graphs[(4, "sampled", 50, False, False)]
+
+    talker.prepare_decode_buffers(_uniform_requests(4, top_k=50))
+    layer0, hidden, positions = _step_inputs(4, device)
+    eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+    graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+
+    assert len(talker._predictor_graphs) == captured, "serving must reuse prewarm"
+    # Same object, not a recapture under the same key.
+    assert talker._predictor_graphs[(4, "sampled", 50, False, False)] is prewarmed_graph
+    assert torch.equal(graph_codes, eager_codes)
+    assert torch.equal(graph_embeds, eager_embeds)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_prewarm_leaves_budget_for_new_signatures():
+    device = torch.device("cuda")
+    talker = _build_talker(device, pred_vocab=PREWARM_VOCAB)
+
+    captured = talker.prewarm_predictor_graphs()
+
+    # A signature outside the prewarmed set still lazy-captures afterwards.
+    talker.prepare_decode_buffers(_uniform_requests(2, top_k=5))
+    layer0, hidden, positions = _step_inputs(2, device)
+    eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+    graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+
+    assert (2, "sampled", 8, False, False) in talker._predictor_graphs
+    assert len(talker._predictor_graphs) == captured + 1
+    assert torch.equal(graph_codes, eager_codes)
+    assert torch.equal(graph_embeds, eager_embeds)
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_prewarm_is_idempotent():
+    device = torch.device("cuda")
+    talker = _build_talker(device, pred_vocab=PREWARM_VOCAB)
+
+    first = talker.prewarm_predictor_graphs()
+    graphs_snapshot = dict(talker._predictor_graphs)
+    second = talker.prewarm_predictor_graphs()
+
+    assert first == len(BUCKETS)
+    assert second == 0
+    assert talker._predictor_graphs == graphs_snapshot
+
+
+@pytest.mark.parametrize("env_value", ["0", "false", "off", "no", " OFF "])
+def test_prewarm_env_opt_out(monkeypatch: pytest.MonkeyPatch, env_value: str):
+    device = torch.device("cuda" if _HAS_CUDA else "cpu")
+    talker = _build_talker(device, pred_vocab=PREWARM_VOCAB)
+    monkeypatch.setenv("SGLANG_OMNI_QTTS_PREDICTOR_GRAPH_PREWARM", env_value)
+
+    assert talker.prewarm_predictor_graphs() == 0
+    assert not talker._predictor_graphs
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="predictor CUDA graph needs CUDA")
+def test_prewarm_failure_leaves_key_retryable():
+    device = torch.device("cuda")
+    talker = _build_talker(device, pred_vocab=PREWARM_VOCAB)
+
+    real_capture = sglang_model_module._PredictorDecodeGraph._capture
+
+    def _boom_capture(self) -> None:
+        # Fails inside the real constructor with the capture-state context
+        # entered, exercising graph.reset() cleanup and state restoration.
+        with self.model._predictor_graph_capture_state(self.batch_size, self.signature):
+            raise RuntimeError("simulated prewarm capture failure")
+
+    # A private MonkeyPatch: undoing the shared fixture instance would also
+    # drop the autouse qk-norm stub.
+    boom_patch = pytest.MonkeyPatch()
+    boom_patch.setattr(
+        sglang_model_module._PredictorDecodeGraph, "_capture", _boom_capture
+    )
+    try:
+        assert talker.prewarm_predictor_graphs() == 0
+        assert not talker._predictor_graphs
+        assert (
+            not talker._predictor_graph_disabled
+        ), "prewarm failure must stay retryable"
+    finally:
+        boom_patch.undo()
+    assert sglang_model_module._PredictorDecodeGraph._capture is real_capture
+
+    talker.prepare_decode_buffers(_uniform_requests(2, top_k=50))
+    layer0, hidden, positions = _step_inputs(2, device)
+    eager_codes, eager_embeds = _run_eager(talker, layer0, hidden, positions)
+    graph_codes, graph_embeds = _run_forward(talker, layer0, hidden, positions)
+
+    # The exact key that failed during prewarm captures lazily afterwards.
+    assert (2, "sampled", 50, False, False) in talker._predictor_graphs
+    assert torch.equal(graph_codes, eager_codes)
+    assert torch.equal(graph_embeds, eager_embeds)
 
 
 class _NoHostReadbackTensor(torch.Tensor):

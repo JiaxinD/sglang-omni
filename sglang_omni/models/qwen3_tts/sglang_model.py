@@ -36,6 +36,7 @@ from sglang_omni.vendor.sglang.server_args import get_global_server_args
 logger = logging.getLogger(__name__)
 
 QTTS_PREDICTOR_GRAPH_ENV = "SGLANG_OMNI_QTTS_PREDICTOR_GRAPH"
+QTTS_PREDICTOR_GRAPH_PREWARM_ENV = "SGLANG_OMNI_QTTS_PREDICTOR_GRAPH_PREWARM"
 _PREDICTOR_GRAPH_MAX_KEYS = 32
 _PREDICTOR_GRAPH_MAX_FAILURES = 8
 # Note: (Jiaxin Deng) 50 is on the ladder because it is the family checkpoint
@@ -43,9 +44,13 @@ _PREDICTOR_GRAPH_MAX_FAILURES = 8
 _PREDICTOR_TOP_K_LADDER = (4, 8, 16, 32, 50, 64, 128, 256, 512, 1024)
 
 
-def _predictor_graph_env_enabled() -> bool:
-    value = os.environ.get(QTTS_PREDICTOR_GRAPH_ENV, "1").strip().lower()
+def _env_flag_enabled(env_name: str) -> bool:
+    value = os.environ.get(env_name, "1").strip().lower()
     return value not in ("0", "false", "off", "no")
+
+
+def _predictor_graph_env_enabled() -> bool:
+    return _env_flag_enabled(QTTS_PREDICTOR_GRAPH_ENV)
 
 
 def _quantize_predictor_top_k(max_top_k: int, vocab_size: int) -> int | None:
@@ -1270,6 +1275,71 @@ class Qwen3TTSTalker(nn.Module):
         # Note: (Jiaxin Deng) capture under TP would record collectives; the
         # graphed chain is only validated single-rank, so TP stays eager.
         return int(server_args.tp_size) == 1
+
+    @torch.no_grad()
+    def prewarm_predictor_graphs(self) -> int:
+        """Capture the default-signature predictor graphs at startup.
+
+        Lazy capture costs ~80 ms of serving-thread stall per key; measured
+        production traffic uses exactly the checkpoint-default sampled
+        signature (subtalker_top_k=50), so only that signature is captured
+        per batch bucket while the engine is still idle. Other signatures
+        keep the lazy path, leaving most of the key budget to real traffic.
+        """
+        if not _env_flag_enabled(QTTS_PREDICTOR_GRAPH_PREWARM_ENV):
+            return 0
+        if self._predictor_graph_enabled is None:
+            self._predictor_graph_enabled = self._resolve_predictor_graph_enabled()
+        if not self._predictor_graph_enabled:
+            return 0
+        vocab_size = int(self.config.code_predictor_config.vocab_size)
+        default_top_k = _quantize_predictor_top_k(50, vocab_size)
+        if default_top_k is None:
+            return 0
+        signatures: list[tuple] = [("sampled", int(default_top_k), False, False)]
+        hidden_size = int(self.config.hidden_size)
+        hidden_dtype = self._predictor_input_buffer.dtype
+        device = self._predictor_input_buffer.device
+        reserved_before = torch.cuda.memory_reserved(device)
+        captured = 0
+        for bucket_size in self._predictor_graph_batch_sizes:
+            for signature in signatures:
+                key = (bucket_size, *signature)
+                if (
+                    key in self._predictor_graphs
+                    or key in self._predictor_graph_disabled
+                ):
+                    continue
+                if len(self._predictor_graphs) >= _PREDICTOR_GRAPH_MAX_KEYS:
+                    logger.info(
+                        "Predictor graph prewarm stopped at the %d-key cap",
+                        _PREDICTOR_GRAPH_MAX_KEYS,
+                    )
+                    return captured
+                try:
+                    self._predictor_graphs[key] = _PredictorDecodeGraph(
+                        self,
+                        bucket_size,
+                        signature,
+                        hidden_size=hidden_size,
+                        hidden_dtype=hidden_dtype,
+                    )
+                    captured += 1
+                except Exception:
+                    # Note (Jiaxin Deng): unlike a lazy-capture failure this
+                    # does not poison the key; a transient startup failure
+                    # leaves the runtime retry path available.
+                    logger.warning(
+                        "Predictor graph prewarm failed for key=%s", key, exc_info=True
+                    )
+        reserved_after = torch.cuda.memory_reserved(device)
+        logger.info(
+            "Prewarmed %d Qwen3-TTS predictor CUDA graphs "
+            "(+%.1f MiB allocator-reserved)",
+            captured,
+            (reserved_after - reserved_before) / (1 << 20),
+        )
+        return captured
 
     def _predictor_forward_graphed(
         self,

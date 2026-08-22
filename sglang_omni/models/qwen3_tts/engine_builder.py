@@ -108,6 +108,15 @@ class Qwen3TtsEngineBuilder(TtsEngineBuilder):
                 enable_torch_compile=False,
             )
 
+    def post_cuda_graph_setup(self, model: Any, server_args: Any) -> None:
+        del server_args
+        # note (Jiaxin Deng): lazy capture stalls the serving thread ~80 ms per
+        # predictor-graph key; production traffic uses the checkpoint-default
+        # signatures, so capture them here while the device is still idle.
+        prewarm = getattr(model, "prewarm_predictor_graphs", None)
+        if callable(prewarm):
+            prewarm()
+
     def make_model_runner(self, model_worker: Any, output_proc: Any) -> Any:
         model_runner_mod = importlib.import_module(
             "sglang_omni.models.qwen3_tts.model_runner"
