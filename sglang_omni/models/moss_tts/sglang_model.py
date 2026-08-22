@@ -9,7 +9,7 @@ from copy import copy
 from typing import Any, Iterable, Optional, Tuple
 
 import torch
-from sglang.srt.distributed import get_pp_group
+from sglang.srt.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from sglang.srt.layers.logits_processor import (
     LogitsMetadata,
     LogitsProcessor,
@@ -382,29 +382,58 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
             return False
         enabled = os.environ.get("MOSS_DELAY_FUSED_AUDIO_HEADS", "1") != "0"
         if enabled and self.pp_group.is_last_rank:
+            # Note (Jiaxin Deng): the fused path bypasses LogitsProcessor for the
+            # audio heads, so it is gated to the plain configuration it
+            # reproduces: TP1, unquantized same-shape ParallelLMHead weights,
+            # equal audio vocabularies, no logit softcapping.
             weights = [getattr(head, "weight", None) for head in self.lm_heads[1:]]
             first = weights[0] if weights else None
             enabled = (
                 first is not None
                 and first.ndim == 2
+                and first.dtype in (torch.bfloat16, torch.float16, torch.float32)
+                and get_tensor_model_parallel_world_size() == 1
+                and getattr(self.config, "final_logit_softcapping", None) in (None, 0)
+                and all(type(head).__name__ == "ParallelLMHead" for head in self.lm_heads[1:])
                 and all(
                     w is not None and w.shape == first.shape and w.dtype == first.dtype
                     for w in weights
                 )
+                and len({int(v) for v in self.config.vocab_size_list[1:]}) == 1
             )
         else:
             enabled = False
         self._fused_audio_heads_enabled = enabled
         if not enabled:
+            logger.info("MOSS-TTS fused audio heads disabled (unsupported configuration)")
             return False
         # Note (Jiaxin Deng): re-point each head's weight at a slice of one
-        # stacked buffer so the fused GEMM adds no steady-state memory.
+        # stacked buffer so the fused GEMM adds no steady-state memory; the
+        # transient duplicate lives only until the originals are released.
         stacked = torch.cat([w.data for w in weights], dim=0).contiguous()
         rows = int(first.shape[0])
         for index, head in enumerate(self.lm_heads[1:]):
             head.weight.data = stacked[index * rows : (index + 1) * rows]
         self._stacked_audio_head_weight = stacked
         self._audio_head_padded_vocab = rows
+        logger.info("MOSS-TTS fused audio heads enabled (stacked %s)", tuple(stacked.shape))
+        return True
+
+    def _fused_audio_heads_ready(self) -> bool:
+        if not self._ensure_stacked_audio_heads():
+            return False
+        # Guard against head replacement (set_embed_and_head, assign=True
+        # loads): the fused buffer must still back the live head weights.
+        if (
+            self.lm_heads[1].weight.data_ptr()
+            != self._stacked_audio_head_weight.data_ptr()
+        ):
+            logger.warning(
+                "MOSS-TTS fused audio heads disabled: head weights were replaced"
+            )
+            self._stacked_audio_head_weight = None
+            self._fused_audio_heads_enabled = False
+            return False
         return True
 
     def _compute_fused_audio_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -426,7 +455,7 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         *,
         is_audio: bool = False,
     ) -> list[torch.Tensor]:
-        if self._ensure_stacked_audio_heads():
+        if self._fused_audio_heads_ready():
             logits_metadata = LogitsMetadata.from_forward_batch(forward_batch)
             logits_metadata.next_token_logits_buffer = None
             logits_metadata.forward_mode = ForwardMode.DECODE
