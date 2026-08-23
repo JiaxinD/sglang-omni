@@ -49,3 +49,53 @@ def test_replacing_any_audio_head_disables_fused_path(replaced_index: int) -> No
     assert stub._fused_audio_heads_ready() is False
     assert stub._stacked_audio_head_weight is None
     assert stub._fused_audio_heads_enabled is False
+
+
+def test_ready_never_stacks_lazily() -> None:
+    # Stacking happens at load time; the request path may only observe it.
+    stub = SimpleNamespace(
+        lm_heads=[SimpleNamespace(weight=torch.randn(2, 4))],
+        _stacked_audio_head_weight=None,
+        _fused_audio_heads_enabled=None,
+    )
+    stub._fused_audio_heads_ready = MethodType(
+        MossTTSDelaySGLangModel._fused_audio_heads_ready, stub
+    )
+    assert stub._fused_audio_heads_ready() is False
+
+
+def _plain_mode_stub(n_audio: int = 2) -> SimpleNamespace:
+    heads = [SimpleNamespace(weight=torch.randn(2, 4))]
+    heads.extend(SimpleNamespace(weight=torch.randn(8, 4)) for _ in range(n_audio))
+    processors = [
+        SimpleNamespace(use_fp32_lm_head=False, rl_on_policy_target=None)
+        for _ in range(n_audio + 1)
+    ]
+    stub = SimpleNamespace(lm_heads=heads, logits_processors=processors)
+    stub._audio_heads_use_plain_lm_head = MethodType(
+        MossTTSDelaySGLangModel._audio_heads_use_plain_lm_head, stub
+    )
+    return stub
+
+
+def test_plain_mode_gate_accepts_default_configuration() -> None:
+    assert _plain_mode_stub()._audio_heads_use_plain_lm_head() is True
+
+
+def test_plain_mode_gate_rejects_fp32_lm_head() -> None:
+    stub = _plain_mode_stub()
+    stub.logits_processors[1].use_fp32_lm_head = True
+    assert stub._audio_heads_use_plain_lm_head() is False
+
+
+def test_plain_mode_gate_rejects_rl_on_policy_target() -> None:
+    stub = _plain_mode_stub()
+    stub.logits_processors[2].rl_on_policy_target = "actor"
+    assert stub._audio_heads_use_plain_lm_head() is False
+
+
+def test_plain_mode_gate_rejects_lora_wrapped_head() -> None:
+    stub = _plain_mode_stub()
+    stub.lm_heads[1].set_lora = lambda *a: None
+    stub.lm_heads[1].apply_lora = lambda *a: None
+    assert stub._audio_heads_use_plain_lm_head() is False

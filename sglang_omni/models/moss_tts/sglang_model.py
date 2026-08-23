@@ -376,6 +376,32 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         )
         return outputs
 
+    def _audio_heads_use_plain_lm_head(self) -> bool:
+        # Note (Jiaxin Deng): mirror of the pinned _compute_lm_head branch
+        # order; the fused GEMM reproduces only its final plain-matmul arm.
+        try:
+            from sglang.srt.layers.logits_processor import (
+                should_apply_lm_head_quant_method,
+            )
+            from sglang.srt.utils.common import use_intel_amx_backend
+        except ImportError:
+            return False
+        for head in self.lm_heads[1:]:
+            if hasattr(head, "set_lora") and hasattr(head, "apply_lora"):
+                return False
+            if should_apply_lm_head_quant_method(
+                head, getattr(head, "quant_method", None)
+            ):
+                return False
+            if use_intel_amx_backend(head):
+                return False
+        for processor in self.logits_processors[1:]:
+            if getattr(processor, "use_fp32_lm_head", False):
+                return False
+            if getattr(processor, "rl_on_policy_target", None) is not None:
+                return False
+        return True
+
     def _ensure_stacked_audio_heads(self) -> bool:
         if self._stacked_audio_head_weight is not None:
             return True
@@ -404,6 +430,7 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
                     for w in weights
                 )
                 and len({int(v) for v in self.config.vocab_size_list[1:]}) == 1
+                and self._audio_heads_use_plain_lm_head()
             )
         else:
             enabled = False
@@ -432,7 +459,10 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
         return True
 
     def _fused_audio_heads_ready(self) -> bool:
-        if not self._ensure_stacked_audio_heads():
+        # Note (Jiaxin Deng): stacking happens once at load time, before the
+        # weight-share IPC export and before KV profiling; the request path
+        # only observes the result.
+        if self._stacked_audio_head_weight is None:
             return False
         # Note (Jiaxin Deng): heads can be replaced independently
         # (set_embed_and_head, assign-loads), so every audio slice must still
@@ -696,6 +726,11 @@ class MossTTSDelaySGLangModel(torch.nn.Module):
                 self._load_param(param, loaded_weight)
             else:
                 logger.warning(f"MOSS-TTS parameter {original_name} not found")
+
+        # Note (Jiaxin Deng): stack here, not on the first request: the
+        # weight-share IPC export and KV profiling both run after load, so
+        # they must see the final head storage layout and the transient copy.
+        self._ensure_stacked_audio_heads()
 
     @staticmethod
     def _map_audio_embedding_name(name: str) -> str | None:
