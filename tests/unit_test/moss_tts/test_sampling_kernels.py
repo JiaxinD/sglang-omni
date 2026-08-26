@@ -121,6 +121,11 @@ def _fused_case(vocab: int, temp: float, top_p: float, top_k: int, tie: bool):
         _fused_case(1025, 1.7, 0.001, 25, False),
         _fused_case(1025, 1.7, 0.999, 25, False),
         _fused_case(1025, 0.0, 0.8, 25, False),
+        _fused_case(1024, 1.7, 0.8, 25, False),
+        _fused_case(1024, 1.7, 0.8, 25, True),
+        _fused_case(1024, 1.0, 0.9, 64, True),
+        _fused_case(1024, 1.2, 0.5, 1, False),
+        _fused_case(1024, 0.0, 0.8, 25, False),
         _fused_case(2, 1.0, 1.0, 50, False),
         _fused_case(2, 1.3, 0.7, 0, False),
     ],
@@ -460,3 +465,69 @@ def test_sample_seeded_fused_signed_zero_nucleus_boundary() -> None:
             assert torch.equal(
                 a, b
             ), f"order=({first},{second}) seed={seed}: {a.item()} vs {b.item()}"
+
+
+@pytest.mark.parametrize("temp", [0.0, 1.0], ids=["greedy", "sampled"])
+@pytest.mark.parametrize("kind", ["one_nan", "all_nan", "nan_with_inf"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_nan_rows_match_baseline(temp: float, kind: str) -> None:
+    """A NaN row falls back to torch.argmax in the baseline, which ranks NaN
+    above every number; the fused kernel must land on the same token id and
+    never on the reduction sentinel."""
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    vocab = 64
+    gen = torch.Generator(device=device).manual_seed(20260826)
+    logits = torch.randn(1, vocab, device=device, generator=gen)
+    if kind == "one_nan":
+        logits[0, 11] = float("nan")
+    elif kind == "all_nan":
+        logits[0, :] = float("nan")
+    else:
+        logits[0, 11] = float("nan")
+        logits[0, 3] = float("inf")
+    params = dict(
+        temperature=torch.full((1,), temp, device=device),
+        top_p=torch.full((1,), 0.8, device=device),
+        top_k=torch.full((1,), 25, device=device, dtype=torch.long),
+        seeds=torch.full((1,), 20260826, device=device, dtype=torch.long),
+        positions=torch.full((1,), 5, device=device, dtype=torch.long),
+    )
+    expected = sample_seeded_branchless(logits, **params)
+    actual = sample_seeded_fused(logits, **params)
+
+    assert torch.equal(expected, actual)
+    assert int(actual.item()) == int(torch.argmax(logits, dim=-1).item())
+    assert 0 <= int(actual.item()) < vocab
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_sample_seeded_fused_tied_two_token_head() -> None:
+    """The production stop head is vocab=2, where a nucleus cut keeps a single
+    lane, so the tie order alone decides continue versus stop."""
+    from sglang_omni.models.moss_tts.sampling_kernels import (
+        sample_seeded_branchless,
+        sample_seeded_fused,
+    )
+
+    device = torch.device("cuda")
+    logits = torch.full((1, 2), 2.0, device=device)
+    _, order = torch.sort(logits, descending=True, dim=-1, stable=True)
+    assert order[0].tolist() == [0, 1]
+
+    for seed in range(16):
+        params = dict(
+            temperature=torch.ones(1, device=device),
+            top_p=torch.full((1,), 0.3, device=device),
+            top_k=torch.zeros(1, device=device, dtype=torch.long),
+            seeds=torch.full((1,), seed, device=device, dtype=torch.long),
+            positions=torch.full((1,), 9, device=device, dtype=torch.long),
+        )
+        expected = sample_seeded_branchless(logits, **params)
+        actual = sample_seeded_fused(logits, **params)
+        assert torch.equal(expected, actual), f"seed={seed}"
+        assert int(actual.item()) == 0

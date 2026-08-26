@@ -218,10 +218,12 @@ def _fused_seeded_sample_kernel(
     p_active = (top_p > 0.0) & (top_p < 1.0)
     row_max = tl.max(masked_sorted, axis=0)
     finite_max = row_max > -float("inf")
+    # Note (Jiaxin Deng): masking on == -inf lets NaN and +inf lanes poison z the
+    # way torch.softmax poisons the baseline row, so both fall back identically.
     exp_term = tl.where(
-        masked_sorted > -float("inf"),
-        tl.exp(masked_sorted - tl.where(finite_max, row_max, 0.0)),
+        masked_sorted == -float("inf"),
         0.0,
+        tl.exp(masked_sorted - tl.where(finite_max, row_max, 0.0)),
     )
     z = tl.sum(exp_term, axis=0)
     probs_sorted = tl.where(z > 0, exp_term / z, 0.0)
@@ -256,9 +258,17 @@ def _fused_seeded_sample_kernel(
     )
     sampled = tl.where(nan_index != 2147483647, nan_index, max_index)
 
-    max_logit = tl.max(tl.where(valid, logits, -float("inf")), axis=0)
-    greedy = tl.min(tl.where(valid & (logits == max_logit), idx, 2147483647), axis=0)
-    use_fallback = (~do_sample) | (z <= 0)
+    # Note (Jiaxin Deng): torch.argmax ranks NaN above every number, so a NaN row
+    # must select its first NaN lane; comparing against a NaN max matches none.
+    logit_is_nan = logits != logits
+    nan_greedy = tl.min(tl.where(valid & logit_is_nan, idx, 2147483647), axis=0)
+    finite = valid & ~logit_is_nan
+    max_logit = tl.max(tl.where(finite, logits, -float("inf")), axis=0)
+    finite_greedy = tl.min(
+        tl.where(finite & (logits == max_logit), idx, 2147483647), axis=0
+    )
+    greedy = tl.where(nan_greedy != 2147483647, nan_greedy, finite_greedy)
+    use_fallback = (~do_sample) | (z <= 0) | (z != z)
     result = tl.where(use_fallback, greedy.to(tl.int64), sampled)
     tl.store(output_ptr + row, result)
 
@@ -325,7 +335,11 @@ def sample_seeded_branchless(
 
     k_active = (top_k > 0) & (top_k < vocab)
     k_clamped = top_k.clamp(min=1, max=vocab)
-    sorted_scores, sorted_indices = torch.sort(scores, descending=True, dim=-1)
+    # Note (Jiaxin Deng): an unstable sort leaves the tie order backend dependent
+    # (a two lane row reverses on cu130) and that picks the token at a nucleus edge.
+    sorted_scores, sorted_indices = torch.sort(
+        scores, descending=True, dim=-1, stable=True
+    )
     kth = sorted_scores.gather(1, (k_clamped - 1).unsqueeze(1))
     threshold = torch.where(
         k_active.unsqueeze(1), kth, torch.full_like(kth, float("-inf"))
