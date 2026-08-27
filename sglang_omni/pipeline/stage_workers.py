@@ -10,7 +10,7 @@ import os
 import queue
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
@@ -160,7 +160,7 @@ def _get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
 @contextmanager
 def _patched_spawn_env(
     spec: StageWorkerProcessSpec,
-    extra_env: dict[str, str] | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ):
     env_default_updates: dict[str, str] = {}
     for stage_spec in spec.stage_specs:
@@ -186,8 +186,8 @@ def _patched_spawn_env(
         **env_default_updates,
         **compat_env_defaults,
         **worker_process_env,
-        **(extra_env or {}),
         "SGLANG_OMNI_PLATFORM_SPEC": get_platform_spec(current_platform),
+        **(extra_env or {}),
     }
     backup = {key: os.environ.get(key) for key in updates}
     try:
@@ -219,6 +219,7 @@ class StageGroup:
         self._processes: list[multiprocessing.Process] = []
         self._ready_events: list[multiprocessing.Event] = []
         self._startup_error_channels: list[object] = []
+        self._process_start_attempts: set[str] = set()
 
     @property
     def process_count(self) -> int:
@@ -264,10 +265,14 @@ class StageGroup:
             if proc.pid is not None
         }
 
+    def process_start_attempts(self) -> set[str]:
+        """Return process names whose ``Process.start()`` was called."""
+        return set(self._process_start_attempts)
+
     def spawn(
         self,
         ctx: multiprocessing.context.SpawnContext,
-        extra_env_for: Callable[[StageWorkerProcessSpec], dict[str, str]] | None = None,
+        process_env_overrides: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         """Spawn the OS process(es) owned by this group."""
         for spec in self.process_specs:
@@ -281,8 +286,13 @@ class StageGroup:
                 daemon=True,
             )
             try:
-                extra_env = extra_env_for(spec) if extra_env_for else None
+                extra_env = (
+                    process_env_overrides.get(spec.process_name)
+                    if process_env_overrides is not None
+                    else None
+                )
                 with _patched_spawn_env(spec, extra_env=extra_env):
+                    self._process_start_attempts.add(spec.process_name)
                     proc.start()
             except Exception:
                 _close_queue(startup_error_channel)

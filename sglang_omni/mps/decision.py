@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-GPU MPS activation predicate over the resolved process plan.
-
-A GPU gets a private MPS daemon only when every CUDA process on it is a
-single-GPU, non-TP client. TP groups are excluded (NCCL x MPS is unvalidated
-for our pipelines) and a fused process spanning GPUs cannot be scoped to one
-daemon, so its GPUs are excluded too.
-"""
+"""MPS-specific facts extracted from resolved pipeline process specs."""
 
 from __future__ import annotations
 
-import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
-
 MPS_MODES = ("off", "on", "auto")
+_CUDA_DEVICE = re.compile(r"cuda:(\d+)", re.IGNORECASE)
 
 
 class MpsDecisionError(ValueError):
@@ -22,60 +16,94 @@ class MpsDecisionError(ValueError):
 
 
 @dataclass(frozen=True)
-class MpsGpuPlan:
-    gpu_id: int
-    client_process_names: tuple[str, ...]
+class MpsProcessFact:
+    process_name: str
+    placement_gpu_ids: tuple[int, ...]
+    explicit_cuda_gpu_ids: tuple[int, ...]
+    contains_tp: bool
 
 
 def _process_gpu_ids(process_spec) -> set[int]:
-    return {spec.gpu_id for spec in process_spec.stage_specs if spec.gpu_id is not None}
-
-
-def _is_eligible(process_spec, gpu_ids: set[int]) -> bool:
-    if len(gpu_ids) != 1:
-        return False
-    return all(spec.tp_size <= 1 for spec in process_spec.stage_specs)
-
-
-def plan_mps_gpus(process_specs, mode: str) -> list[MpsGpuPlan]:
-    if mode not in MPS_MODES:
-        raise MpsDecisionError(f"invalid mps mode {mode!r}; expected {MPS_MODES}")
-    if mode == "off":
-        return []
-
-    clients_by_gpu: dict[int, list[str]] = {}
-    blocked_gpus: dict[int, list[str]] = {}
-    for process_spec in process_specs:
-        gpu_ids = _process_gpu_ids(process_spec)
-        if not gpu_ids:
-            continue
-        if _is_eligible(process_spec, gpu_ids):
-            (gpu_id,) = gpu_ids
-            clients_by_gpu.setdefault(gpu_id, []).append(process_spec.process_name)
-        else:
-            for gpu_id in gpu_ids:
-                blocked_gpus.setdefault(gpu_id, []).append(process_spec.process_name)
-
-    min_clients = 2 if mode == "auto" else 1
-    plans: list[MpsGpuPlan] = []
-    for gpu_id in sorted(clients_by_gpu):
-        names = clients_by_gpu[gpu_id]
-        if gpu_id in blocked_gpus:
-            logger.warning(
-                "MPS (%s): skipping GPU %d; process(es) %s are TP or span GPUs "
-                "and cannot attach",
-                mode,
-                gpu_id,
-                blocked_gpus[gpu_id],
+    return {
+        int(gpu_id)
+        for stage_spec in process_spec.stage_specs
+        if (
+            gpu_id := (
+                stage_spec.placement_gpu_id
+                if stage_spec.placement_gpu_id is not None
+                else stage_spec.gpu_id
             )
-            continue
-        if len(names) < min_clients:
-            continue
-        plans.append(MpsGpuPlan(gpu_id=gpu_id, client_process_names=tuple(names)))
-
-    if mode == "on" and not plans:
-        raise MpsDecisionError(
-            "mps=on but no GPU is eligible for MPS (TP stages, multi-GPU "
-            "processes, and CPU-only processes cannot attach)"
         )
-    return plans
+        is not None
+    }
+
+
+def _explicit_cuda_gpu_ids(value) -> set[int]:
+    """Find every explicit local CUDA ordinal in resolved launch values."""
+
+    if isinstance(value, str):
+        match = _CUDA_DEVICE.fullmatch(value.strip())
+        return {int(match.group(1))} if match is not None else set()
+    if isinstance(value, Mapping):
+        values = value.values()
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        return set()
+    return {gpu_id for item in values for gpu_id in _explicit_cuda_gpu_ids(item)}
+
+
+def _process_explicit_cuda_gpu_ids(process_spec) -> set[int]:
+    return {
+        gpu_id
+        for stage_spec in process_spec.stage_specs
+        for values in (
+            getattr(stage_spec, "factory_args", {}),
+            getattr(stage_spec, "factory_arg_defaults", {}),
+        )
+        for gpu_id in _explicit_cuda_gpu_ids(values)
+    }
+
+
+def collect_mps_facts(process_specs) -> tuple[MpsProcessFact, ...]:
+    """Extract facts needed for physical MPS planning from resolved specs.
+
+    This deliberately does not inspect pipeline edges or decide workload
+    topology. The caller resolves the collected logical ordinals against the
+    parent CUDA visibility before making MPS decisions.
+    """
+
+    process_specs = list(process_specs)
+    process_order: list[str] = []
+    placement_by_process: dict[str, set[int]] = {}
+    explicit_by_process: dict[str, set[int]] = {}
+    contains_tp: dict[str, bool] = {}
+
+    for process_spec in process_specs:
+        name = process_spec.process_name
+        if name not in placement_by_process:
+            process_order.append(name)
+            placement_by_process[name] = set()
+            explicit_by_process[name] = set()
+            contains_tp[name] = False
+        placement_by_process[name].update(_process_gpu_ids(process_spec))
+        contains_tp[name] = contains_tp[name] or any(
+            stage_spec.tp_size > 1 for stage_spec in process_spec.stage_specs
+        )
+
+    for process_spec in process_specs:
+        name = process_spec.process_name
+        if placement_by_process[name] and not contains_tp[name]:
+            explicit_by_process[name].update(
+                _process_explicit_cuda_gpu_ids(process_spec)
+            )
+
+    return tuple(
+        MpsProcessFact(
+            process_name=name,
+            placement_gpu_ids=tuple(sorted(placement_by_process[name])),
+            explicit_cuda_gpu_ids=tuple(sorted(explicit_by_process[name])),
+            contains_tp=contains_tp[name],
+        )
+        for name in process_order
+    )

@@ -1,17 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the pipeline-level MPS orchestrator (decision -> managers)."""
+"""Pipeline-level MPS acquisition, routing, and rollback tests."""
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
+import stat
+import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-from sglang_omni.mps.manager import MpsError, MpsState
-from sglang_omni.mps.runtime import MpsPipelineRuntime
+from sglang_omni.mps.devices import MpsPhysicalDevice
+from sglang_omni.mps.manager import (
+    MpsClientRef,
+    MpsDirtyStateError,
+    MpsError,
+    MpsLease,
+)
+from sglang_omni.mps.runtime import MpsPipelineRuntime, create_for_pipeline
 from tests.unit_test.mps.test_mps_manager import FakeControlClient
 
 
@@ -20,6 +32,12 @@ class StubStage:
     stage_name: str
     gpu_id: int | None
     tp_size: int = 1
+    placement_gpu_id: int | None = None
+    factory_args: dict = field(default_factory=dict)
+    factory_arg_defaults: dict = field(default_factory=dict)
+    env_defaults: dict = field(default_factory=dict)
+    next_stages: str | list[str] | None = None
+    stage_gpu_ids: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -29,58 +47,418 @@ class StubProcess:
 
 
 def proc(name, gpu_id, tp_size=1):
-    return StubProcess(name, [StubStage(name, gpu_id, tp_size)])
+    return StubProcess(name, [StubStage(name, gpu_id, tp_size, gpu_id)])
+
+
+def gpu_uuid(index: int) -> str:
+    return f"GPU-aaaaaaaa-bbbb-cccc-dddd-{index:012d}"
+
+
+def manager_on(runtime: MpsPipelineRuntime, physical_index: int):
+    return runtime.managers[gpu_uuid(physical_index)]
 
 
 class FakeDeviceInfo:
-    def __init__(self, unsupported: dict[int, str] | None = None):
+    def __init__(
+        self,
+        unsupported: dict[int, str] | None = None,
+        physical_ids: dict[int, int] | None = None,
+        resolution_errors: dict[int, str] | None = None,
+    ):
         self.unsupported = unsupported or {}
+        self.physical_ids = physical_ids or {}
+        self.resolution_errors = resolution_errors or {}
 
-    def gpu_uuid(self, gpu_id):
-        return f"GPU-aaaaaaaa-bbbb-cccc-dddd-00000000000{gpu_id}"
-
-    def unsupported_reason(self, gpu_id):
-        return self.unsupported.get(gpu_id)
+    def inspect(self, gpu_ids):
+        return {
+            gpu_id: (
+                MpsPhysicalDevice(None, self.resolution_errors[gpu_id])
+                if gpu_id in self.resolution_errors
+                else MpsPhysicalDevice(
+                    gpu_uuid(self.physical_ids.get(gpu_id, gpu_id)),
+                    self.unsupported.get(gpu_id),
+                )
+            )
+            for gpu_id in gpu_ids
+        }
 
 
 @pytest.fixture
 def short_root():
-    root = Path(tempfile.mkdtemp(prefix="mpsr-"))
+    root = Path(tempfile.mkdtemp(prefix="mpsr-", dir="/tmp"))
     yield root
     shutil.rmtree(root, ignore_errors=True)
 
 
-COLOCATED = [lambda: [proc("a", 0), proc("b", 0), proc("solo", 1)]][0]
+def colocated():
+    return [proc("a", 0), proc("b", 0), proc("solo", 1)]
 
 
-def create(short_root, mode="auto", procs=None, unsupported=None, client=None):
-    return MpsPipelineRuntime.create(
+def create(
+    short_root,
+    mode="auto",
+    procs=None,
+    unsupported=None,
+    physical_ids=None,
+    resolution_errors=None,
+    client=None,
+    state_root=None,
+):
+    process_specs = procs if procs is not None else colocated()
+    runtime = MpsPipelineRuntime.create(
         mode=mode,
-        process_specs=procs if procs is not None else COLOCATED(),
-        device_info=FakeDeviceInfo(unsupported),
+        process_specs=process_specs,
+        device_info=FakeDeviceInfo(
+            unsupported,
+            physical_ids,
+            resolution_errors,
+        ),
         client=client or FakeControlClient(),
-        state_root=short_root,
+        state_root=short_root if state_root is None else state_root,
     )
+    if runtime is not None:
+        for manager in runtime.managers.values():
+            manager.poll_interval = 0.0
+            manager.drain_timeout = 0.02
+            manager.stop_timeout = 0.02
+    return runtime
+
+
+def detach_all(runtime, client):
+    for manager in runtime.managers.values():
+        client.set_clients(manager.paths.pipe_dir, {})
 
 
 def test_off_creates_nothing(short_root):
     assert create(short_root, mode="off") is None
 
 
+def test_off_does_not_inspect_external_process_pipe(short_root):
+    processes = colocated()
+    processes[0].stage_specs[0].env_defaults = {
+        "CUDA_MPS_PIPE_DIRECTORY": "/external/mps"
+    }
+
+    assert create(short_root, mode="off", procs=processes) is None
+
+
 def test_auto_without_colocation_creates_nothing(short_root):
     assert create(short_root, procs=[proc("a", 0), proc("b", 1)]) is None
 
 
-def test_env_only_for_client_processes(short_root):
+@pytest.mark.asyncio
+async def test_env_only_for_acquired_client_processes(short_root):
     client = FakeControlClient()
     runtime = create(short_root, client=client)
-    runtime.start()
+    await runtime.start()
 
     env = runtime.env_for_process("a")
     assert env["CUDA_VISIBLE_DEVICES"] == "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000000"
     assert "CUDA_MPS_PIPE_DIRECTORY" in env
     assert env["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
     assert runtime.env_for_process("solo") == {}
+
+    detach_all(runtime, client)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_parent_visible_ordinal_selects_the_physical_uuid(short_root):
+    client = FakeControlClient()
+    runtime = create(
+        short_root,
+        client=client,
+        physical_ids={0: 1},
+    )
+
+    await runtime.start()
+
+    assert runtime.env_for_process("a")["CUDA_VISIBLE_DEVICES"] == (
+        "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000001"
+    )
+    assert runtime.env_for_process("b")["CUDA_VISIBLE_DEVICES"] == (
+        "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000001"
+    )
+
+    detach_all(runtime, client)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_logical_gpu_aliases_coalesce_by_physical_uuid(short_root):
+    client = FakeControlClient()
+    runtime = create(
+        short_root,
+        mode="auto",
+        procs=[proc("a", 0), proc("b", 1)],
+        client=client,
+        physical_ids={0: 1, 1: 1},
+    )
+
+    assert runtime is not None
+    assert list(runtime.managers) == [gpu_uuid(1)]
+
+    await runtime.start()
+
+    assert client.start_calls == 1
+    assert runtime.env_for_process("a")["CUDA_VISIBLE_DEVICES"] == gpu_uuid(1)
+    assert runtime.env_for_process("b")["CUDA_VISIBLE_DEVICES"] == gpu_uuid(1)
+    manager = manager_on(runtime, 1)
+    client.set_clients(manager.paths.pipe_dir, {7000: [11, 12]})
+    await runtime.verify({"a": 11, "b": 12})
+    client.set_clients(manager.paths.pipe_dir, {7000: [11]})
+    failures = await runtime.probe_failures()
+    assert "client_pid=12" in failures[gpu_uuid(1)]
+
+    client.set_clients(manager.paths.pipe_dir, {})
+    await runtime.close()
+
+    assert not runtime.has_leases
+    assert client.quit_calls == [str(manager.paths.pipe_dir)]
+    assert not manager.paths.state_dir.exists()
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_one_process_cannot_resolve_to_multiple_physical_gpus(
+    short_root,
+    mode,
+):
+    client = FakeControlClient()
+    with pytest.raises(MpsError) as exc_info:
+        create(
+            short_root,
+            mode=mode,
+            procs=[proc("duplicate", 0), proc("duplicate", 1)],
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "process 'duplicate'" in message
+    assert f"0: '{gpu_uuid(0)}'" in message
+    assert f"1: '{gpu_uuid(1)}'" in message
+    assert "Use mps=off" in message
+    assert list(short_root.iterdir()) == []
+    assert client.daemons == {}
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_unrelated_resolution_error_does_not_hide_multi_physical_process(
+    short_root,
+    mode,
+):
+    client = FakeControlClient()
+
+    with pytest.raises(MpsError) as exc_info:
+        create(
+            short_root,
+            mode=mode,
+            procs=[proc("multi", 0), proc("multi", 1), proc("broken", 9)],
+            resolution_errors={9: "CUDA_ERROR_INVALID_DEVICE"},
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "process 'multi'" in message
+    assert f"0: '{gpu_uuid(0)}'" in message
+    assert f"1: '{gpu_uuid(1)}'" in message
+    assert "Use mps=off" in message
+    assert list(short_root.iterdir()) == []
+    assert client.daemons == {}
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_nvml_failure_does_not_hide_driver_proven_multi_physical_process(
+    short_root,
+    mode,
+):
+    client = FakeControlClient()
+
+    with pytest.raises(MpsError) as exc_info:
+        create(
+            short_root,
+            mode=mode,
+            procs=[proc("multi", 0), proc("multi", 1)],
+            unsupported={1: "NVML capability query failed"},
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "process 'multi'" in message
+    assert f"0: '{gpu_uuid(0)}'" in message
+    assert f"1: '{gpu_uuid(1)}'" in message
+    assert "Use mps=off" in message
+    assert list(short_root.iterdir()) == []
+    assert client.daemons == {}
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_known_multi_physical_subset_precedes_driver_resolution_error(
+    short_root,
+    mode,
+):
+    client = FakeControlClient()
+
+    with pytest.raises(MpsError) as exc_info:
+        create(
+            short_root,
+            mode=mode,
+            procs=[proc("multi", 0), proc("multi", 1), proc("multi", 9)],
+            resolution_errors={9: "CUDA_ERROR_INVALID_DEVICE"},
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "process 'multi'" in message
+    assert f"0: '{gpu_uuid(0)}'" in message
+    assert f"1: '{gpu_uuid(1)}'" in message
+    assert "unresolved CUDA ordinals: [9]" in message
+    assert "Use mps=off" in message
+    assert list(short_root.iterdir()) == []
+    assert client.daemons == {}
+
+
+def test_explicit_device_must_match_process_physical_placement(short_root):
+    processes = [proc("a", 1), proc("b", 1)]
+    processes[0].stage_specs[0].factory_args = {"device": "cuda:0"}
+
+    with pytest.raises(MpsError, match="multiple physical GPUs"):
+        create(
+            short_root,
+            mode="on",
+            procs=processes,
+        )
+
+    assert list(short_root.iterdir()) == []
+
+
+def test_pipeline_edge_to_another_gpu_does_not_change_mps_process_planning(
+    short_root,
+):
+    processes = [proc("a", 0), proc("b", 0), proc("remote", 1)]
+    source = processes[0].stage_specs[0]
+    source.next_stages = "remote"
+    source.stage_gpu_ids = {"remote": (1,)}
+
+    runtime = create(short_root, procs=processes)
+
+    assert list(runtime.managers) == [gpu_uuid(0)]
+
+
+def test_tp_ranks_do_not_block_an_eligible_group_on_another_gpu(short_root):
+    processes = [
+        StubProcess(
+            "thinker_tp0",
+            [StubStage("thinker", 0, tp_size=2, placement_gpu_id=0)],
+        ),
+        StubProcess(
+            "thinker_tp1",
+            [StubStage("thinker", 1, tp_size=2, placement_gpu_id=1)],
+        ),
+        proc("a", 2),
+        proc("b", 2),
+    ]
+
+    runtime = create(short_root, procs=processes)
+
+    assert list(runtime.managers) == [gpu_uuid(2)]
+    assert runtime.env_for_process("thinker_tp0") == {}
+    assert runtime.env_for_process("thinker_tp1") == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_rolls_back_before_any_client_can_attach(
+    short_root,
+    monkeypatch,
+):
+    client = FakeControlClient()
+    runtime = create(short_root, client=client)
+    manager = manager_on(runtime, 0)
+    original_acquire = manager.acquire
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_acquire():
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_acquire()
+
+    monkeypatch.setattr(manager, "acquire", blocked_acquire)
+    start_task = asyncio.create_task(runtime.start())
+    assert await asyncio.to_thread(entered.wait, 1)
+    start_task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert not runtime.has_leases
+    assert not manager.paths.state_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_new_state_root_is_created_private(short_root):
+    client = FakeControlClient()
+    state_root = short_root / "new-state"
+    runtime = create(
+        short_root,
+        client=client,
+        state_root=state_root,
+    )
+
+    await runtime.start()
+
+    assert stat.S_IMODE(state_root.stat().st_mode) == 0o700
+    detach_all(runtime, client)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_nonprivate_state_root_is_rejected_without_chmod(
+    short_root,
+):
+    state_root = short_root / "shared"
+    state_root.mkdir(mode=0o755)
+    state_root.chmod(0o755)
+    runtime = create(short_root, state_root=state_root)
+
+    with pytest.raises(MpsError, match="expected 0o700"):
+        await runtime.start()
+
+    assert stat.S_IMODE(state_root.stat().st_mode) == 0o755
+    assert list(state_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_symlink_state_root_is_rejected_without_mutating_target(short_root):
+    target = short_root / "target"
+    target.mkdir(mode=0o700)
+    state_root = short_root / "state-link"
+    state_root.symlink_to(target, target_is_directory=True)
+    runtime = create(short_root, state_root=state_root)
+
+    with pytest.raises(MpsError, match="must not be a symlink"):
+        await runtime.start()
+
+    assert state_root.is_symlink()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_state_root_owned_by_another_uid_is_rejected(
+    short_root,
+    monkeypatch,
+):
+    import sglang_omni.mps.state as mps_state
+
+    runtime = create(short_root)
+    actual_uid = os.getuid()
+    monkeypatch.setattr(mps_state.os, "getuid", lambda: actual_uid + 1)
+
+    with pytest.raises(MpsError, match="not current uid"):
+        await runtime.start()
+
+    assert list(short_root.iterdir()) == []
 
 
 def test_unsupported_gpu_under_auto_downgrades_to_off(short_root):
@@ -92,50 +470,318 @@ def test_unsupported_gpu_under_on_raises(short_root):
         create(short_root, mode="on", unsupported={0: "MIG enabled"})
 
 
-def test_verify_routes_pids_to_the_gpu_manager(short_root):
+def test_native_mps_rejects_cuda_alike_non_nvidia_platform(monkeypatch):
+    class NonNvidiaPlatform:
+        @staticmethod
+        def is_cuda() -> bool:
+            return False
+
+        @staticmethod
+        def is_cuda_alike() -> bool:  # pragma: no cover - must not be consulted
+            raise AssertionError("NVIDIA MPS must not use is_cuda_alike()")
+
+    platforms = ModuleType("sglang_omni.platforms")
+    platforms.current_platform = NonNvidiaPlatform()
+    monkeypatch.setitem(sys.modules, "sglang_omni.platforms", platforms)
+
+    assert create_for_pipeline("auto", []) is None
+    with pytest.raises(MpsError, match="requires an NVIDIA CUDA platform"):
+        create_for_pipeline("on", [])
+
+
+@pytest.mark.asyncio
+async def test_verify_routes_pids_and_retains_exact_refs(short_root):
     client = FakeControlClient()
     runtime = create(short_root, client=client)
-    runtime.start()
+    await runtime.start()
+    manager = manager_on(runtime, 0)
+    client.set_clients(manager.paths.pipe_dir, {7000: [11, 12, 99]})
 
-    client.servers = {7000: [11, 12]}
-    runtime.verify({"a": 11, "b": 12, "solo": 99})
-    assert all(m.state is MpsState.SERVING for m in runtime.managers.values())
+    await runtime.verify({"a": 11, "b": 12, "solo": 99})
+
+    assert runtime._leases[gpu_uuid(0)].attached_clients == {
+        MpsClientRef(7000, 11),
+        MpsClientRef(7000, 12),
+    }
+    detach_all(runtime, client)
+    await runtime.close()
 
 
-def test_stop_cleans_all_state(short_root):
+@pytest.mark.asyncio
+async def test_close_releases_all_acquired_leases(short_root):
     client = FakeControlClient()
     runtime = create(short_root, client=client)
-    runtime.start()
-    client.servers = {7000: [11, 12]}
-    runtime.verify({"a": 11, "b": 12})
+    await runtime.start()
+    manager = manager_on(runtime, 0)
+    client.set_clients(manager.paths.pipe_dir, {7000: [11, 12]})
+    await runtime.verify({"a": 11, "b": 12})
+    client.set_clients(manager.paths.pipe_dir, {})
 
-    client.servers = {}
-    runtime.stop()
-    assert all(m.state is MpsState.CLEANED for m in runtime.managers.values())
+    await runtime.close()
 
-
-def test_global_pipe_dir_export_is_rejected(short_root, monkeypatch):
-    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps")
-    with pytest.raises(MpsError, match="CUDA_MPS_PIPE_DIRECTORY"):
-        create(short_root)
+    assert not runtime.has_leases
+    assert not manager.paths.state_dir.exists()
 
 
-def test_runtime_stop_attempts_every_manager(short_root, monkeypatch):
+def test_process_pipe_dir_is_rejected_before_state_creation(short_root):
+    processes = colocated()
+    processes[0].stage_specs[0].env_defaults = {
+        "CUDA_MPS_PIPE_DIRECTORY": "/external/mps"
+    }
+
+    with pytest.raises(MpsError) as exc_info:
+        create(short_root, procs=processes)
+
+    message = str(exc_info.value)
+    assert "process 'a'" in message
+    assert "CUDA_MPS_PIPE_DIRECTORY='/external/mps'" in message
+    assert "mps=off" in message
+    assert list(short_root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CUDA_MPS_PIPE_DIRECTORY", "/parent/mps"),
+        ("SGLANG_OMNI_WEIGHT_SHARE", "invalid-but-enabled"),
+    ],
+)
+def test_parent_mps_conflict_is_reported_before_state_creation(
+    short_root,
+    monkeypatch,
+    name,
+    value,
+):
+    monkeypatch.setenv(name, value)
+    monkeypatch.setenv("SGLANG_OMNI_MPS_STATE_ROOT", str(short_root))
+
+    with pytest.raises(MpsError) as exc_info:
+        create_for_pipeline("on", colocated())
+
+    message = str(exc_info.value)
+    assert "parent" in message
+    assert f"{name}={value!r}" in message
+    assert "mps=off" in message
+    assert list(short_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_start_rolls_back_only_successful_acquisitions(short_root):
+    client = FakeControlClient()
+    runtime = create(
+        short_root,
+        mode="on",
+        procs=[proc("a", 0), proc("b", 1)],
+        client=client,
+    )
+    assert list(runtime.managers) == [gpu_uuid(0), gpu_uuid(1)]
+    dirty = manager_on(runtime, 1).paths
+    dirty.pipe_dir.mkdir(parents=True)
+    dirty.log_dir.mkdir()
+    dirty.owners_dir.mkdir()
+    (dirty.owners_dir / "777").write_text("")
+
+    with pytest.raises(MpsError, match="dirty state"):
+        await runtime.start()
+
+    assert not runtime.has_leases
+    assert not manager_on(runtime, 0).paths.state_dir.exists()
+    assert (dirty.owners_dir / "777").exists()
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_pre_spawn_rollback_leaves_shared_owner_clean(short_root):
+    client = FakeControlClient()
+    runtime = create(
+        short_root,
+        mode="on",
+        procs=[proc("a", 0), proc("b", 1)],
+        client=client,
+    )
+    shared = manager_on(runtime, 0)
+    shared.paths.pipe_dir.mkdir(parents=True)
+    shared.paths.log_dir.mkdir()
+    shared.paths.owners_dir.mkdir()
+    (shared.paths.pipe_dir / "nvidia-cuda-mps-control.pid").write_text("9000")
+    (shared.paths.owners_dir / "888").write_text("active\n")
+    client.daemons[str(shared.paths.pipe_dir)] = 9000
+    client.alive_pids.add(9000)
+    client.held_owner_pids.add(888)
+    foreign = MpsClientRef(7000, 101)
+    client.set_clients(shared.paths.pipe_dir, {7000: [101]})
+
+    dirty = manager_on(runtime, 1).paths
+    dirty.pipe_dir.mkdir(parents=True)
+    dirty.log_dir.mkdir()
+    dirty.owners_dir.mkdir()
+    (dirty.owners_dir / "777").write_text("retained\n")
+
+    with pytest.raises(MpsError, match="dirty state"):
+        await runtime.start()
+
+    assert not runtime.has_leases
+    assert not shared._owner_file.exists()
+    assert (shared.paths.owners_dir / "888").read_text() == "active\n"
+    assert client.snapshot(shared.paths.pipe_dir) == {foreign}
+    assert client.daemon_process_alive(9000)
+    assert client.quit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_start_preserves_acquire_and_rollback_dirty_diagnostics(
+    short_root,
+    monkeypatch,
+):
+    runtime = create(
+        short_root,
+        mode="on",
+        procs=[proc("a", 0), proc("b", 1)],
+    )
+    acquired = MpsLease(daemon_pid=100, owner_fd=10)
+    acquire_dirty = MpsDirtyStateError("GPU 1 acquire retained at /state/gpu1")
+
+    monkeypatch.setattr(manager_on(runtime, 0), "acquire", lambda: acquired)
+
+    def fail_acquire():
+        raise MpsError("GPU 1 startup failed") from acquire_dirty
+
+    def dirty_rollback(lease, **_kwargs):
+        lease.owner_fd = -1
+        raise MpsDirtyStateError("GPU 0 rollback retained at /state/gpu0")
+
+    monkeypatch.setattr(manager_on(runtime, 1), "acquire", fail_acquire)
+    monkeypatch.setattr(manager_on(runtime, 0), "release", dirty_rollback)
+
+    with pytest.raises(MpsError, match="GPU 1 startup failed") as exc_info:
+        await runtime.start()
+
+    messages: list[str] = []
+    error: BaseException | None = exc_info.value
+    while error is not None:
+        messages.append(str(error))
+        error = error.__cause__
+    report = "\n".join(messages)
+    assert "GPU 1 acquire retained at /state/gpu1" in report
+    assert "GPU 0 rollback retained at /state/gpu0" in report
+    assert not runtime.has_leases
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_close_persists_dirty_gpu_and_releases_clean_gpu(short_root):
     client = FakeControlClient()
     runtime = create(
         short_root,
         procs=[proc("a", 0), proc("b", 0), proc("c", 1), proc("d", 1)],
         client=client,
     )
-    runtime.start()
-    first = runtime.managers[0]
-    second = runtime.managers[1]
-    monkeypatch.setattr(
-        first, "stop", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    stopped = []
-    monkeypatch.setattr(second, "stop", lambda: stopped.append(True))
+    await runtime.start()
+    detach_all(runtime, client)
+    dirty_manager = manager_on(runtime, 1)
+    clean_manager = manager_on(runtime, 0)
+    client.set_clients(dirty_manager.paths.pipe_dir, {7000: [30]})
+    await runtime.verify({"c": 30})
 
-    with pytest.raises(MpsError, match="boom"):
-        runtime.stop()
-    assert stopped == [True]
+    with pytest.raises(MpsDirtyStateError, match="still attached"):
+        await runtime.close()
+
+    assert not runtime.has_leases
+    assert dirty_manager.paths.state_dir.is_dir()
+    assert dirty_manager._owner_file.read_text() == "retained\n"
+    assert not clean_manager.paths.state_dir.exists()
+    assert client.daemon_signals == []
+
+
+@pytest.mark.asyncio
+async def test_start_attempts_are_classified_per_physical_gpu(short_root):
+    client = FakeControlClient()
+    runtime = create(
+        short_root,
+        mode="on",
+        procs=[proc("attempted", 0), proc("not-started", 1)],
+        client=client,
+    )
+    attempted = manager_on(runtime, 0)
+    not_started = manager_on(runtime, 1)
+    foreign_clients = {}
+
+    for index, manager in enumerate((attempted, not_started)):
+        paths = manager.paths
+        paths.pipe_dir.mkdir(parents=True)
+        paths.log_dir.mkdir()
+        paths.owners_dir.mkdir()
+        daemon_pid = 9000 + index
+        owner_pid = 8000 + index
+        (paths.pipe_dir / "nvidia-cuda-mps-control.pid").write_text(
+            str(daemon_pid)
+        )
+        (paths.owners_dir / str(owner_pid)).write_text("active\n")
+        client.daemons[str(paths.pipe_dir)] = daemon_pid
+        client.alive_pids.add(daemon_pid)
+        client.held_owner_pids.add(owner_pid)
+        client.set_clients(paths.pipe_dir, {7000 + index: [200 + index]})
+        foreign_clients[manager.gpu_uuid] = client.snapshot(paths.pipe_dir)
+
+    await runtime.start()
+
+    with pytest.raises(MpsDirtyStateError, match="ownership is incomplete"):
+        await runtime.close(process_start_attempts={"attempted"})
+
+    current_owner = str(os.getpid())
+    assert (attempted.paths.owners_dir / current_owner).read_text() == (
+        "retained\n"
+    )
+    assert not (not_started.paths.owners_dir / current_owner).exists()
+    for index, manager in enumerate((attempted, not_started)):
+        assert (manager.paths.owners_dir / str(8000 + index)).read_text() == (
+            "active\n"
+        )
+        assert client.snapshot(manager.paths.pipe_dir) == foreign_clients[
+            manager.gpu_uuid
+        ]
+        assert client.daemon_process_alive(9000 + index)
+
+    later_lease = not_started.acquire()
+    not_started.release(later_lease, clients_could_have_attached=False)
+    assert not (not_started.paths.owners_dir / current_owner).exists()
+    with pytest.raises(MpsError, match="retained"):
+        attempted.acquire()
+
+
+@pytest.mark.asyncio
+async def test_probe_failures_preserve_gpu_and_reason(short_root):
+    client = FakeControlClient()
+    runtime = create(short_root, client=client)
+    await runtime.start()
+    manager = manager_on(runtime, 0)
+    client.set_clients(manager.paths.pipe_dir, {7000: [11, 12]})
+    await runtime.verify({"a": 11, "b": 12})
+    client.set_clients(manager.paths.pipe_dir, {7000: [11]})
+
+    failures = await runtime.probe_failures()
+
+    assert list(failures) == [gpu_uuid(0)]
+    assert "verified client refs disappeared" in failures[gpu_uuid(0)]
+    assert "client_pid=12" in failures[gpu_uuid(0)]
+
+    client.set_clients(manager.paths.pipe_dir, {})
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_preverify_clients_are_preserved_without_guessing_ownership(short_root):
+    client = FakeControlClient()
+    runtime = create(short_root, client=client)
+    await runtime.start()
+    manager = manager_on(runtime, 0)
+    client.set_clients(manager.paths.pipe_dir, {7000: [200], 8000: [909]})
+    client.parents[200] = 100
+
+    with pytest.raises(MpsDirtyStateError) as exc_info:
+        await runtime.close()
+
+    message = str(exc_info.value)
+    assert not runtime.has_leases
+    assert "terminate_client 7000 200" not in message
+    assert "terminate_client 8000 909" not in message
+    assert client.daemon_signals == []
+    assert manager._owner_file.read_text() == "retained\n"

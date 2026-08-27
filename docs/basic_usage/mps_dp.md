@@ -23,16 +23,30 @@ Modes (`--mps` on the CLI or `mps:` in the pipeline config; default `off`):
 
 * `off`: MPS is never touched.
 * `auto`: MPS is enabled on every GPU that hosts two or more single-GPU,
-  non-TP CUDA processes of this pipeline. GPUs with one process, TP groups,
-  and GPU-spanning processes run without MPS.
+  non-TP CUDA processes of this pipeline. GPUs with one process and TP groups
+  run without MPS.
 * `on`: a single eligible process is enough, and an MPS-incapable platform is
   a hard error instead of a warning. Use `on` for same-GPU data parallelism:
   every `serve --mps on` on one GPU joins the same daemon.
 
+Both `auto` and `on` reject startup before acquiring MPS state when one process's
+resolved placement and explicit factory CUDA ordinals select more than one
+physical GPU; use `mps=off` for that placement. Native MPS v1 also excludes a
+single-physical-GPU candidate when its own nonzero `cuda:N` value would become
+invalid after normalization. Narrowing a worker to one UUID makes its only
+valid CUDA ordinal `cuda:0`.
+Pipeline-edge transport remains the responsibility of the existing router and
+relay layers; it does not participate in MPS eligibility.
+
 The daemon is shared per physical GPU (keyed by device UUID): MPS merges
 kernels only for clients of one server, so the first serve creates the
 daemon, later serves join it, and the last one to leave drains the clients
-and quits it. Same-GPU DP is therefore just N serve commands:
+and quits it. Logical GPU ordinals are resolved once against the parent
+process's CUDA visibility and then grouped by physical UUID; `auto` counts the
+combined client processes in each physical group. Pipeline or stage
+environment defaults must not override `CUDA_VISIBLE_DEVICES` or
+`CUDA_DEVICE_ORDER` while native MPS is enabled; set them on the parent command
+instead, or use `mps=off`. Same-GPU DP is therefore just N serve commands:
 
 ```bash
 sgl-omni serve --model-path <model> --mps on --mem-fraction-static 0.35 --port 8807
@@ -47,24 +61,41 @@ reasons described under the script recipe below. Route traffic with the
 The runtime owns the full lifecycle. Every managed process is verified against
 the daemon's client list before serving starts, because a process that misses
 the pipe directory silently falls back to time slicing. A watchdog fails the
-pipeline if the daemon dies mid-serving. Shutdown drains this serve's clients
-and quits the daemon only when no other serve still owns it.
+pipeline if daemon identity, control access, or a verified client attachment is
+lost mid-serving. Shutdown drains this serve's clients and quits the daemon only
+when no other serve still owns it.
 
-Dirty state is never repaired automatically. After a hard kill (SIGKILL, OOM
-kill, node crash), the next start finds leftover state, refuses to start, and
-prints the full picture: the state directory, the daemon and owner PIDs with
-their liveness, any live MPS clients, and the exact cleanup commands. Clean
-up and start again. A normal shutdown leaves nothing behind, so this only
-ever happens after a crash.
+If a managed worker does not exit before the shutdown timeout, the runtime
+terminates that directly owned child process and reaps it before the launcher
+exits, even when that directly owned worker is also an MPS client. It sends no
+additional signal based on an MPS snapshot or client PID, and never
+automatically signals the daemon, an unknown descendant, or a GPU-wide process
+set. Process ownership and shared MPS state are handled independently: if
+daemon identity, client ownership, or control state cannot be proved after the
+workers are gone, the owner file is marked `retained`, its lock is released,
+and the state directory is preserved. The current command then exits with a
+detailed non-zero error instead of keeping a CLI owner alive.
+
+Dirty state is never repaired automatically. A join requires the native
+`nvidia-cuda-mps-control.pid` identity, a responsive control socket, and every
+published owner lease to still be held. After a hard kill (SIGKILL, OOM kill,
+node crash), even an idle daemon or one dead co-owner makes the next start
+preserve the state and fail with owner/client details and safe cleanup guidance.
+An unlocked or retained owner blocks every later start until an operator has
+inspected and cleaned the state. Existing healthy co-owners keep serving, but
+new owners cannot join and no process retries cleanup automatically. Clean up
+and start again. A normal shutdown leaves nothing behind.
 
 Operator notes: state lives under `/tmp/sglang-omni-mps-<user>/<gpu-uuid>/`
 (`SGLANG_OMNI_MPS_STATE_ROOT` overrides it). Serves that are meant to share
 one GPU must use the same state root, or they cannot discover each other's
 daemon and will run separate MPS servers that time-slice against each other.
-A globally exported `CUDA_MPS_PIPE_DIRECTORY`
-is rejected while `--mps` is enabled, and combining native `--mps` with the
-script's `WEIGHT_SHARE=1` is rejected: CUDA IPC weight sharing remains the
-one deployment shape that still uses `examples/mps_dp/launch.sh` below.
+The state root is created with mode `0700`; an existing root must already be a
+non-symlink directory owned by the current user with that mode. Native MPS
+rejects `CUDA_MPS_PIPE_DIRECTORY` in the parent, pipeline, or stage environment
+instead of overwriting or joining an external daemon. It likewise rejects
+`SGLANG_OMNI_WEIGHT_SHARE` in those locations: CUDA IPC weight sharing remains
+the one deployment shape that still uses `examples/mps_dp/launch.sh` below.
 
 ## Deploy
 

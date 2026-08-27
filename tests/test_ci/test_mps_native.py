@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,7 @@ def _serve(port: int, mps: str) -> subprocess.Popen:
         env=env,
         stdout=log,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
 
 
@@ -176,25 +178,116 @@ def _wait_gpu_drained(timeout_s: int = 180) -> None:
 
 
 @pytest.fixture(autouse=True)
-def clean_state_root():
+def clean_state_root(monkeypatch):
+    # Never erase the only control path or diagnostics from an interrupted run.
+    # A clean root may still contain stale per-GPU lock files, which are safe to
+    # discard only after both state and daemon checks pass.
+    _assert_no_residue()
+    stale_daemons = _daemon_pids()
+    assert not stale_daemons, (
+        f"stale MPS daemon(s) from an earlier run: {stale_daemons}; "
+        f"preserving {STATE_ROOT} for scoped operator cleanup"
+    )
     shutil.rmtree(STATE_ROOT, ignore_errors=True)
     _wait_gpu_drained()
+    processes: list[subprocess.Popen] = []
+    session_ids: set[int] = set()
+    serve = _serve
+
+    def tracked_serve(port: int, mps: str) -> subprocess.Popen:
+        proc = serve(port, mps)
+        processes.append(proc)
+        session_ids.add(proc.pid)
+        return proc
+
+    monkeypatch.setattr(sys.modules[__name__], "_serve", tracked_serve)
     yield
-    shutil.rmtree(STATE_ROOT, ignore_errors=True)
+
+    for proc in processes:
+        if proc.poll() is None:
+            try:
+                _terminate(proc, timeout=10)
+            except AssertionError:
+                pass
+    if list(STATE_ROOT.glob("*/pipe")):
+        _operator_cleanup(session_ids)
+    else:
+        _signal_test_sessions(session_ids, signal.SIGKILL)
+        shutil.rmtree(STATE_ROOT, ignore_errors=True)
 
 
-def _operator_cleanup() -> None:
-    # The dirty-state error names the live client PIDs; those are the serve's
-    # orphaned spawn children, so the operator kills them along with the tree.
-    subprocess.run(["pkill", "-9", "-f", "sglang_omni.cli serve"], check=False)
-    subprocess.run(
-        ["pkill", "-9", "-f", "multiprocessing.spawn import spawn_main"],
-        check=False,
+def _signal_test_sessions(session_ids: Iterable[int], sig: int) -> set[int]:
+    """Signal only process groups created by this test and return matches."""
+
+    signalled: set[int] = set()
+    for session_id in set(session_ids):
+        try:
+            os.killpg(session_id, sig)
+        except ProcessLookupError:
+            continue
+        signalled.add(session_id)
+    return signalled
+
+
+def _operator_cleanup(session_ids: int | Iterable[int]) -> None:
+    """Clean only this test's process groups, preserving MPS signal order."""
+
+    from sglang_omni.mps.control import SubprocessMpsControlClient
+
+    control = SubprocessMpsControlClient()
+    pipe_dirs = sorted(STATE_ROOT.glob("*/pipe"))
+    assert pipe_dirs, f"no MPS control directory under {STATE_ROOT}"
+    sessions = {session_ids} if isinstance(session_ids, int) else set(session_ids)
+
+    # Every test serve owns a dedicated process group. Freezing them closes the
+    # attach window while keeping every signal scoped to this test.
+    live_sessions = _signal_test_sessions(sessions, signal.SIGSTOP)
+
+    daemon_pids: dict[Path, int] = {}
+    try:
+        for pipe_dir in pipe_dirs:
+            daemon_pids[pipe_dir] = control.read_daemon_identity(pipe_dir)
+            for client in control.snapshot(pipe_dir):
+                _terminate_mps_client(pipe_dir, client)
+            deadline = time.monotonic() + 10
+            while remaining := control.snapshot(pipe_dir):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"MPS clients remain after termination: {remaining}"
+                    )
+                time.sleep(0.1)
+    finally:
+        _signal_test_sessions(live_sessions, signal.SIGKILL)
+
+    for pipe_dir, daemon_pid in daemon_pids.items():
+        control.quit_daemon(pipe_dir)
+        deadline = time.monotonic() + 10
+        while control.daemon_process_alive(daemon_pid):
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"MPS daemon {daemon_pid} survived quit")
+            time.sleep(0.1)
+    shutil.rmtree(STATE_ROOT)
+
+
+def _terminate_mps_client(pipe_dir: Path, client) -> None:
+    command = f"terminate_client {client.server_pid} {client.client_pid}"
+    env = os.environ.copy()
+    env["CUDA_MPS_PIPE_DIRECTORY"] = str(pipe_dir)
+    result = subprocess.run(
+        ["nvidia-cuda-mps-control"],
+        input=command + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
     )
-    for pid in _daemon_pids():
-        subprocess.run(["kill", "-9", str(pid)], check=False)
-    time.sleep(10)
-    shutil.rmtree(STATE_ROOT, ignore_errors=True)
+    output = result.stdout.strip()
+    if result.returncode != 0 or output != "0":
+        raise AssertionError(
+            f"nvidia-cuda-mps-control {command!r} failed "
+            f"(rc={result.returncode}, stdout={output!r}, "
+            f"stderr={result.stderr.strip()!r})"
+        )
 
 
 def test_hard_kill_fails_fast_until_operator_cleans():
@@ -205,6 +298,7 @@ def test_hard_kill_fails_fast_until_operator_cleans():
         assert _daemon_pids(), "no MPS daemon started for the colocated pipeline"
         _request_ok(port)
 
+        dirty_session = proc.pid
         proc.kill()
         proc.wait(timeout=30)
         time.sleep(10)
@@ -218,7 +312,7 @@ def test_hard_kill_fails_fast_until_operator_cleans():
         assert "dirty state" in log and "rm -rf" in log
 
         # After the documented operator cleanup, startup succeeds again.
-        _operator_cleanup()
+        _operator_cleanup(dirty_session)
         port = _free_port()
         proc = _serve(port, "auto")
         _wait_healthy(port, proc)

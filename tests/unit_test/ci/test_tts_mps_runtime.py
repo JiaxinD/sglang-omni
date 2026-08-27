@@ -84,8 +84,7 @@ def test_core_blocks_preserve_the_pci_domain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from sglang_omni.mps import topology as runtime
-
+    runtime = _load(RUNTIME_SCRIPT, "tts_mps_runtime_pci_domain")
     pci_devices = tmp_path / "pci"
     numa_nodes = tmp_path / "nodes"
     for domain, numa_node in (("0000", 0), ("0001", 1)):
@@ -124,8 +123,7 @@ def test_core_blocks_keep_the_hard_minimum_when_the_node_is_small(
     tmp_path: Path,
     core_count: int,
 ) -> None:
-    from sglang_omni.mps import topology as runtime
-
+    runtime = _load(RUNTIME_SCRIPT, f"tts_mps_runtime_small_node_{core_count}")
     pci_devices = tmp_path / "pci"
     numa_nodes = tmp_path / "nodes"
     device = pci_devices / "0000:08:00.0"
