@@ -506,9 +506,13 @@ def test_sample_seeded_fused_nan_rows_match_baseline(temp: float, kind: str) -> 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_sample_seeded_fused_tied_two_token_head() -> None:
+def test_tied_two_token_head_agrees_across_sampling_paths() -> None:
     """The production stop head is vocab=2, where a nucleus cut keeps a single
-    lane, so the tie order alone decides continue versus stop."""
+    lane, so the tie order alone decides continue versus stop. All three paths
+    that serve it must agree: the graphed fused kernel, the large-vocab
+    branchless fallback, and the eager `_sample_tokens` path taken when an audio
+    repetition penalty is set or the batch outgrows the frame graph."""
+    from sglang_omni.models.moss_tts.model_runner import MossTTSModelRunner
     from sglang_omni.models.moss_tts.sampling_kernels import (
         sample_seeded_branchless,
         sample_seeded_fused,
@@ -527,7 +531,9 @@ def test_sample_seeded_fused_tied_two_token_head() -> None:
             seeds=torch.full((1,), seed, device=device, dtype=torch.long),
             positions=torch.full((1,), 9, device=device, dtype=torch.long),
         )
-        expected = sample_seeded_branchless(logits, **params)
-        actual = sample_seeded_fused(logits, **params)
-        assert torch.equal(expected, actual), f"seed={seed}"
-        assert int(actual.item()) == 0
+        fused = sample_seeded_fused(logits, **params)
+        branchless = sample_seeded_branchless(logits, **params)
+        eager = MossTTSModelRunner._sample_tokens(logits, **params).view(-1)
+        assert int(fused.item()) == 0
+        assert torch.equal(fused, branchless), f"branchless seed={seed}"
+        assert torch.equal(fused, eager), f"eager seed={seed}"

@@ -282,7 +282,14 @@ def sample_seeded_fused(
     seeds: torch.Tensor,
     positions: torch.Tensor,
 ) -> torch.Tensor:
-    """Single-kernel drop-in for :func:`sample_seeded_branchless` (vocab <= 2048)."""
+    """Single-kernel seeded sampler for vocab <= 2048.
+
+    Numerically equivalent to :func:`sample_seeded_branchless` rather than bit
+    identical by construction: the in-kernel softmax and cumsum reduce in a
+    different order than aten, so at an exact nucleus boundary the kept set may
+    differ by the boundary token. The tie order (input order), the greedy and
+    NaN fallbacks, and the seeded draw are exact.
+    """
 
     rows, vocab = logits.shape
     if vocab > MAX_FUSED_SAMPLE_VOCAB:
