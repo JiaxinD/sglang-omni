@@ -16,6 +16,7 @@ from types import ModuleType
 
 import pytest
 
+from sglang_omni.mps.decision import MpsDecisionError
 from sglang_omni.mps.devices import MpsPhysicalDevice
 from sglang_omni.mps.manager import (
     MPS_CLIENT_TOKEN_ENV,
@@ -340,18 +341,39 @@ def test_unrelated_resolution_error_does_not_hide_multi_physical_process(
     assert client.daemons == {}
 
 
-def test_explicit_device_must_match_process_physical_placement(short_root):
+@pytest.mark.parametrize("source", ["factory_kwargs", "typed_kwargs"])
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_cuda_zero_uses_the_narrowed_worker_namespace(short_root, mode, source):
     processes = [proc("a", 1), proc("b", 1)]
-    processes[0].stage_specs[0].typed_kwargs = {"device": "cuda:0"}
+    setattr(processes[0].stage_specs[0], source, {"device": "cuda:0"})
 
-    with pytest.raises(MpsError, match="multiple physical GPUs"):
+    runtime = create(short_root, mode=mode, procs=processes)
+
+    assert list(runtime.managers) == [gpu_uuid(1)]
+    assert runtime.env_for_process("a")["CUDA_VISIBLE_DEVICES"] == gpu_uuid(1)
+    assert runtime.env_for_process("b")["CUDA_VISIBLE_DEVICES"] == gpu_uuid(1)
+
+
+def test_nonzero_cuda_device_is_rejected_before_mps_acquisition(short_root):
+    client = FakeControlClient()
+    processes = [proc("a", 1)]
+    processes[0].stage_specs[0].typed_kwargs = {"device": "cuda:1"}
+
+    with pytest.raises((MpsError, MpsDecisionError)) as exc_info:
         create(
             short_root,
             mode="on",
             procs=processes,
+            client=client,
         )
 
+    message = str(exc_info.value)
+    assert "process 'a'" in message
+    assert "explicit CUDA ordinal(s) [1]" in message
+    assert "cuda:0" in message
+    assert "mps=off" in message
     assert list(short_root.iterdir()) == []
+    assert client.daemons == {}
 
 
 def test_pipeline_edge_to_another_gpu_does_not_change_mps_process_planning(

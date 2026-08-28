@@ -75,9 +75,8 @@ def _resolve_physical_plans(
             )
         return {}
 
-    ordinals_by_process: dict[str, set[int]] = {
+    placement_ordinals_by_process: dict[str, set[int]] = {
         fact.process_name: set(fact.placement_gpu_ids)
-        | set(fact.explicit_cuda_gpu_ids)
         for fact in potential_clients
     }
 
@@ -85,7 +84,7 @@ def _resolve_physical_plans(
         sorted(
             {
                 gpu_id
-                for process_gpu_ids in ordinals_by_process.values()
+                for process_gpu_ids in placement_ordinals_by_process.values()
                 for gpu_id in process_gpu_ids
             }
         )
@@ -114,7 +113,7 @@ def _resolve_physical_plans(
         for gpu_id, device in devices.items()
         if device.gpu_uuid is not None
     }
-    for process_name, process_gpu_ids in ordinals_by_process.items():
+    for process_name, process_gpu_ids in placement_ordinals_by_process.items():
         resolved = {
             gpu_id: uuid_for[gpu_id]
             for gpu_id in sorted(process_gpu_ids)
@@ -161,12 +160,6 @@ def _resolve_physical_plans(
             uuid_for[gpu_id]
             for gpu_id in fact.placement_gpu_ids
         }
-        explicit_uuids = {
-            uuid_for[gpu_id]
-            for gpu_id in fact.explicit_cuda_gpu_ids
-        }
-        affected_uuids = placement_uuids | explicit_uuids
-
         (placement_uuid,) = placement_uuids
         names = clients_by_uuid.setdefault(placement_uuid, [])
         if fact.process_name not in names:
@@ -178,10 +171,11 @@ def _resolve_physical_plans(
         nonzero_explicit = set(fact.explicit_cuda_gpu_ids) - {0}
         if nonzero_explicit:
             block(
-                affected_uuids,
+                {placement_uuid},
                 f"process {fact.process_name!r} contains explicit CUDA "
                 f"ordinal(s) {sorted(nonzero_explicit)} that would be invalid "
-                "after single-device MPS normalization",
+                "after single-device MPS normalization; use cuda:0 for the "
+                "worker-local device or use mps=off",
             )
 
     unsupported_by_uuid: dict[str, list[str]] = {}

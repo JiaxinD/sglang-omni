@@ -30,11 +30,11 @@ Modes (`--mps` on the CLI or `mps:` in the pipeline config; default `off`):
   every `serve --mps on` on one GPU joins the same daemon.
 
 Both `auto` and `on` reject startup before acquiring MPS state when one process's
-resolved placement and explicit factory CUDA ordinals select more than one
-physical GPU; use `mps=off` for that placement. Native MPS v1 also excludes a
-single-physical-GPU candidate when its own nonzero `cuda:N` value would become
-invalid after normalization. Narrowing a worker to one UUID makes its only
-valid CUDA ordinal `cuda:0`.
+resolved placement spans more than one physical GPU; use `mps=off` for that
+placement. Factory CUDA devices use the narrowed worker's local namespace:
+`cuda:0` is compatible with any single-GPU placement, while a nonzero `cuda:N`
+is excluded because narrowing a worker to one UUID makes its only valid CUDA
+ordinal `cuda:0`.
 Pipeline-edge transport remains the responsibility of the existing router and
 relay layers; it does not participate in MPS eligibility.
 
