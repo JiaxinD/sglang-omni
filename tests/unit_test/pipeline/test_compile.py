@@ -211,6 +211,10 @@ def test_tp_specs_carry_typed_gpu_id_to_single_visible_device_child(
         "sglang_omni.pipeline.mp_runner._NcclPortAllocator.allocate",
         lambda _self: 29500,
     )
+    monkeypatch.setattr(
+        "sglang_omni.pipeline.runtime_config._visible_device_count",
+        lambda: 5,
+    )
     config = PipelineConfig(
         model_path="model",
         mps="off",
