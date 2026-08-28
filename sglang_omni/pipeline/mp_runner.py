@@ -651,15 +651,8 @@ class MultiProcessPipelineRunner:
             await self.stop()
             return
 
-        try:
-            await self.stop()
-        except BaseException as cleanup_error:
-            detail = f"MPS cleanup after runtime failure failed: {cleanup_error}"
-            logger.error("%s", detail)
-            error.__cause__ = cleanup_error
-        finally:
-            if self._fatal_event is not None:
-                self._fatal_event.set()
+        if self._fatal_event is not None:
+            self._fatal_event.set()
 
     async def wait_failed(self) -> None:
         if self._fatal_event is None:
@@ -708,11 +701,11 @@ class MultiProcessPipelineRunner:
             return_exceptions=True,
         )
 
-        mps_error: Exception | None = None
+        mps_error: BaseException | None = None
         if self._mps is not None:
             try:
                 await self._close_mps()
-            except Exception as exc:
+            except BaseException as exc:
                 logger.error("MPS teardown incomplete: %s", exc)
                 mps_error = exc
 
@@ -724,6 +717,9 @@ class MultiProcessPipelineRunner:
 
         self._close_runtime_dir()
         if mps_error is not None:
+            if isinstance(mps_error, Exception) and self._fatal_error is not None:
+                self._fatal_error.__cause__ = mps_error
+                return
             raise mps_error
 
     async def _cleanup_on_failure(self) -> None:

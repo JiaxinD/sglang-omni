@@ -61,9 +61,9 @@ reasons described under the script recipe below. Route traffic with the
 The runtime owns the full lifecycle. Every managed process is verified against
 the daemon's client list before serving starts, because a process that misses
 the pipe directory silently falls back to time slicing. A watchdog fails the
-pipeline if daemon identity, control access, or a verified client attachment is
-lost mid-serving. Shutdown drains this serve's clients and quits the daemon only
-when no other serve still owns it.
+pipeline if daemon identity or control access is lost mid-serving. Shutdown
+re-evaluates the current client list, drains this serve's clients, and quits the
+daemon only when no other serve still owns it.
 
 If a managed worker does not exit before the shutdown timeout, the runtime
 terminates that directly owned child process and reaps it before the launcher

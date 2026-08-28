@@ -91,7 +91,7 @@ class _FakeCoordinator:
         del error
 
     async def stop(self) -> None:
-        return None
+        self.events.append("coordinator stop")
 
 
 class _FakeProcess:
@@ -508,7 +508,7 @@ async def test_attempted_mps_process_start_keeps_fail_closed_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_mps_watchdog_waits_for_terminal_cleanup_and_reports_close_error(
+async def test_mps_watchdog_fails_serving_before_launcher_cleanup(
     short_base,
     monkeypatch,
     caplog,
@@ -530,19 +530,37 @@ async def test_mps_watchdog_waits_for_terminal_cleanup_and_reports_close_error(
     await runner.start()
 
     probe_gate.set()
-    await entered.wait()
-    waiter = asyncio.create_task(runner.wait_failed())
-    await asyncio.sleep(0)
-    assert not waiter.done()
-
-    release.set()
     with pytest.raises(RuntimeError, match="MPS health check failed") as exc_info:
-        await waiter
+        await runner.wait_failed()
 
-    assert "MPS cleanup after runtime failure failed: dirty state persisted" in caplog.text
+    stop_task = asyncio.create_task(runner.stop())
+    await entered.wait()
+    assert not stop_task.done()
+    release.set()
+    await stop_task
+
+    assert "MPS teardown incomplete: dirty state persisted" in caplog.text
     assert FAKE_GPU_UUID in str(exc_info.value)
     assert "daemon identity changed" in str(exc_info.value)
     assert exc_info.value.__cause__ is dirty
+
+
+@pytest.mark.asyncio
+async def test_mps_close_cancellation_finishes_runner_cleanup_before_propagating(
+    short_base,
+    monkeypatch,
+):
+    events: list[str] = []
+    group = _FakeGroup(events)
+    fake_mps = _FakeMps(events, close_error=asyncio.CancelledError())
+    _patch_runner(monkeypatch, events, group, fake_mps)
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
+    await runner.start()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.stop()
+
+    assert events.index("MPS close") < events.index("coordinator stop")
 
 
 @pytest.mark.asyncio
@@ -577,8 +595,8 @@ async def test_mps_off_keeps_merge_base_spawn_and_failure_order(
     group.dead = True
     waiter = asyncio.create_task(runner.wait_failed())
     await entered.wait()
-    assert not waiter.done()
-    release.set()
+    assert waiter.done()
     with pytest.raises(RuntimeError, match="Dead stage process"):
         await waiter
+    release.set()
     assert "MPS close" not in events
