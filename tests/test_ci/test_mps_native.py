@@ -62,7 +62,7 @@ def _serve(port: int, mps: str) -> subprocess.Popen:
             "0.45",
             # DP replicas budget KV explicitly; the second serve profiles a
             # shrunken free pool (see the KV sizing note in mps_dp.md).
-            "--max-total-tokens",
+            "--tts_engine.engine.max_total_tokens",
             "20000",
             "--port",
             str(port),

@@ -54,7 +54,8 @@ sgl-omni serve --model-path <model> --mps on --mem-fraction-static 0.35 --port 8
 ```
 
 Start replicas one after another and give each an explicit memory budget
-(`--mem-fraction-static` or `--max-total-tokens`), for the same KV-sizing
+(`--mem-fraction-static` or the stage-qualified
+`--<engine-stage>.engine.max_total_tokens`), for the same KV-sizing
 reasons described under the script recipe below. Route traffic with the
 [Omni Router](omni_router.md).
 
