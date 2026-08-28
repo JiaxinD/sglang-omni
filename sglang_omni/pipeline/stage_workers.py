@@ -879,7 +879,6 @@ def _normalize_spec_gpu_id_to_local_device(spec: StageLaunchConfig) -> None:
         spec.placement_gpu_id = spec.gpu_id
     spec.gpu_id = 0
     for kwargs in (
-        spec.factory_kwargs,
         spec.typed_kwargs,
         spec.factory_arg_defaults,
         spec.comm_config,
