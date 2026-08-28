@@ -276,6 +276,7 @@ def clean_state_root(monkeypatch):
         _operator_cleanup(session_ids)
     else:
         _signal_test_sessions(session_ids, signal.SIGKILL)
+        _assert_process_identities_gone(mps_processes)
         shutil.rmtree(STATE_ROOT, ignore_errors=True)
     _assert_process_identities_gone(mps_processes)
 
@@ -300,28 +301,35 @@ def _operator_cleanup(session_ids: int | Iterable[int]) -> None:
 
     control = SubprocessMpsControlClient()
     pipe_dirs = sorted(STATE_ROOT.glob("*/pipe"))
-    assert pipe_dirs, f"no MPS control directory under {STATE_ROOT}"
     sessions = {session_ids} if isinstance(session_ids, int) else set(session_ids)
+    mps_processes = _mps_process_identities()
 
     # Every test serve owns a dedicated process group. Freezing them closes the
     # attach window while keeping every signal scoped to this test.
     live_sessions = _signal_test_sessions(sessions, signal.SIGSTOP)
 
+    if not pipe_dirs or not _daemon_pids():
+        _signal_test_sessions(live_sessions, signal.SIGKILL)
+        _assert_process_identities_gone(mps_processes)
+        shutil.rmtree(STATE_ROOT, ignore_errors=True)
+        return
+
     daemon_pids: dict[Path, int] = {}
     try:
         for pipe_dir in pipe_dirs:
             daemon_pids[pipe_dir] = control.read_daemon_identity(pipe_dir)
-            for client in control.snapshot(pipe_dir):
-                _terminate_mps_client(pipe_dir, client)
-            deadline = time.monotonic() + 10
-            while remaining := control.snapshot(pipe_dir):
-                if time.monotonic() >= deadline:
-                    raise AssertionError(
-                        f"MPS clients remain after termination: {remaining}"
-                    )
-                time.sleep(0.1)
+            control.snapshot(pipe_dir)
     finally:
         _signal_test_sessions(live_sessions, signal.SIGKILL)
+
+    for pipe_dir in daemon_pids:
+        deadline = time.monotonic() + 10
+        while remaining := control.snapshot(pipe_dir):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"MPS clients remain after owned process-group kill: {remaining}"
+                )
+            time.sleep(0.1)
 
     for pipe_dir, daemon_pid in daemon_pids.items():
         control.quit_daemon(pipe_dir)
@@ -330,28 +338,8 @@ def _operator_cleanup(session_ids: int | Iterable[int]) -> None:
             if time.monotonic() >= deadline:
                 raise AssertionError(f"MPS daemon {daemon_pid} survived quit")
             time.sleep(0.1)
+    _assert_process_identities_gone(mps_processes)
     shutil.rmtree(STATE_ROOT)
-
-
-def _terminate_mps_client(pipe_dir: Path, client) -> None:
-    command = f"terminate_client {client.server_pid} {client.client_pid}"
-    env = os.environ.copy()
-    env["CUDA_MPS_PIPE_DIRECTORY"] = str(pipe_dir)
-    result = subprocess.run(
-        ["nvidia-cuda-mps-control"],
-        input=command + "\n",
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env=env,
-    )
-    output = result.stdout.strip()
-    if result.returncode != 0 or output != "0":
-        raise AssertionError(
-            f"nvidia-cuda-mps-control {command!r} failed "
-            f"(rc={result.returncode}, stdout={output!r}, "
-            f"stderr={result.stderr.strip()!r})"
-        )
 
 
 def test_hard_kill_fails_fast_until_operator_cleans():
