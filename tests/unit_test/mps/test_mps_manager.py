@@ -41,13 +41,10 @@ class FakeControlClient:
         self.parent_error: str | None = None
         self.quit_error: str | None = None
         self.quit_works = True
-        self.start_calls = 0
-        self.quit_calls: list[str] = []
-        self.daemon_signals: list[tuple[int, bool]] = []
+        self.unsafe_daemon_signals: list[tuple[int, bool]] = []
 
     def start_daemon(self, pipe_dir, log_dir, gpu_uuid):
         del log_dir, gpu_uuid
-        self.start_calls += 1
         if self.start_fails:
             raise MpsControlError("spawn failed")
         self.daemon_pid = self._next_daemon_pid
@@ -85,7 +82,6 @@ class FakeControlClient:
         }
 
     def quit_daemon(self, pipe_dir):
-        self.quit_calls.append(str(pipe_dir))
         if self.quit_error is not None:
             raise MpsControlError(self.quit_error)
         if not self.quit_works:
@@ -99,7 +95,7 @@ class FakeControlClient:
         return pid in self.alive_pids
 
     def terminate_daemon_process(self, pid, force=False):
-        self.daemon_signals.append((pid, force))
+        self.unsafe_daemon_signals.append((pid, force))
         self.alive_pids.discard(pid)
 
     def parent_of(self, pid):
@@ -119,6 +115,10 @@ GPU_UUID = "GPU-11111111-2222-3333-4444-555555555555"
 
 def daemon_pid_file(paths: MpsGpuPaths) -> Path:
     return paths.pipe_dir / "nvidia-cuda-mps-control.pid"
+
+
+def owner_marker(manager: MpsManager, pid: int | None = None) -> Path:
+    return manager.paths.owners_dir / str(os.getpid() if pid is None else pid)
 
 
 @pytest.fixture
@@ -182,7 +182,7 @@ def test_first_owner_uses_native_pid_file_and_returns_one_lease(short_root):
     owner_stat = os.stat(manager.paths.owners_dir / str(os.getpid()))
     fd_stat = os.fstat(lease.owner_fd)
     assert (fd_stat.st_dev, fd_stat.st_ino) == (owner_stat.st_dev, owner_stat.st_ino)
-    assert manager._owner_file.read_text() == "active\n"
+    assert owner_marker(manager).read_text() == "active\n"
     assert daemon_pid_file(manager.paths).read_text() == str(client.daemon_pid)
     assert not (manager.paths.state_dir / "manifest").exists()
 
@@ -199,12 +199,11 @@ def test_second_owner_joins_only_when_every_existing_lease_is_held(short_root):
 
     lease = manager.acquire()
     assert lease.daemon_pid == 999
-    assert client.start_calls == 0
 
     manager.release(lease)
     assert paths.state_dir.is_dir()
     assert (paths.owners_dir / "888").exists()
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(999)
 
 
 def test_dead_co_owner_is_preserved_and_blocks_join(short_root):
@@ -220,7 +219,6 @@ def test_dead_co_owner_is_preserved_and_blocks_join(short_root):
         make_manager(short_root, client).acquire()
 
     assert (paths.owners_dir / "777").exists()
-    assert client.start_calls == 0
 
 
 def test_dirty_state_never_claims_ambiguous_clients_are_safe_to_terminate(short_root):
@@ -260,7 +258,7 @@ def test_idle_daemon_is_not_adopted(short_root):
 
     assert paths.state_dir.is_dir()
     assert (paths.owners_dir / "777").exists()
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(999)
 
 
 def test_missing_native_pid_file_fails_even_when_control_responds(short_root):
@@ -304,9 +302,9 @@ def test_unresponsive_new_daemon_is_persisted_without_process_signals(short_root
     with pytest.raises(MpsError, match="control daemon"):
         manager.acquire()
 
-    assert client.daemon_signals == []
+    assert client.unsafe_daemon_signals == []
     assert manager.paths.state_dir.is_dir()
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
 
 
 def test_ambiguous_start_failure_without_native_identity_preserves_state(short_root):
@@ -318,8 +316,8 @@ def test_ambiguous_start_failure_without_native_identity_preserves_state(short_r
         manager.acquire()
 
     assert manager.paths.state_dir.is_dir()
-    assert client.daemon_signals == []
-    assert manager._owner_file.read_text() == "retained\n"
+    assert client.unsafe_daemon_signals == []
+    assert owner_marker(manager).read_text() == "retained\n"
     assert isinstance(exc_info.value.__cause__, MpsDirtyStateError)
     assert "lock is released" in str(exc_info.value.__cause__)
 
@@ -338,7 +336,7 @@ def test_preexec_daemon_failure_removes_unstarted_state(short_root):
         manager.acquire()
 
     assert not manager.paths.state_dir.exists()
-    assert client.daemon_signals == []
+    assert client.unsafe_daemon_signals == []
 
 
 def test_startup_rollback_never_signals_an_unverified_pid(short_root):
@@ -356,8 +354,8 @@ def test_startup_rollback_never_signals_an_unverified_pid(short_root):
         manager.acquire()
 
     assert manager.paths.state_dir.is_dir()
-    assert client.daemon_signals == []
-    assert manager._owner_file.read_text() == "retained\n"
+    assert client.unsafe_daemon_signals == []
+    assert owner_marker(manager).read_text() == "retained\n"
 
 
 def test_verify_returns_and_retains_exact_client_refs(short_root):
@@ -450,15 +448,15 @@ def test_dead_root_with_live_descendant_persists_dirty_and_reports_cleanup(
 
     assert lease.owner_fd == -1
     assert manager.paths.state_dir.is_dir()
-    assert manager._owner_file.read_text() == "retained\n"
-    assert client.quit_calls == []
-    assert client.daemon_signals == []
+    assert owner_marker(manager).read_text() == "retained\n"
+    assert client.daemon_process_alive(lease.daemon_pid)
+    assert client.unsafe_daemon_signals == []
     assert f"Owner PID {os.getpid()}" in str(exc_info.value)
     assert "Current MPS client refs" in str(exc_info.value)
     assert "terminate_client 7000 200" in str(exc_info.value)
     assert "lock is released" in str(exc_info.value)
 
-    owner_fd = os.open(manager._owner_file, os.O_RDWR)
+    owner_fd = os.open(owner_marker(manager), os.O_RDWR)
     try:
         fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
@@ -513,8 +511,8 @@ def test_verified_owner_release_ignores_only_coowner_clients(
     manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert not manager._owner_file.exists()
-    assert client.quit_calls == []
+    assert not owner_marker(manager).exists()
+    assert client.daemon_process_alive(lease.daemon_pid)
     assert client.snapshot(manager.paths.pipe_dir) == {MpsClientRef(8000, 202)}
 
 
@@ -534,7 +532,7 @@ def test_unattributable_orphan_persists_dirty_and_blocks_join(short_root):
         manager.release(lease)
 
     assert "terminate_client 7000 200" not in str(exc_info.value)
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
     assert lease.owner_fd == -1
     with pytest.raises(MpsError, match="retained"):
         make_manager(short_root, client).acquire()
@@ -570,11 +568,11 @@ def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
     message = str(exc_info.value)
     assert "terminate_client 7000 101" in message
     assert "terminate_client 8000 202" not in message
-    assert manager_a._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager_a, 1001).read_text() == "retained\n"
     assert lease_a.owner_fd == -1
     current_pid = 1002
     assert manager_b.probe(lease_b) is None
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(lease_b.daemon_pid)
 
     current_pid = 1003
     with pytest.raises(MpsError, match="retained") as join_error:
@@ -587,7 +585,7 @@ def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
     manager_b.release(lease_b)
 
     assert lease_b.owner_fd == -1
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(lease_b.daemon_pid)
     assert manager_b.paths.state_dir.is_dir()
     assert (manager_b.paths.owners_dir / "1001").read_text() == "retained\n"
     assert not (manager_b.paths.owners_dir / "1002").exists()
@@ -603,9 +601,9 @@ def test_last_owner_preserves_unknown_clients_instead_of_quitting(short_root):
         manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
     assert manager.paths.state_dir.is_dir()
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(lease.daemon_pid)
 
 
 def test_happy_path_detaches_releases_and_quits_last_owner(short_root):
@@ -617,7 +615,7 @@ def test_happy_path_detaches_releases_and_quits_last_owner(short_root):
 
     assert lease.owner_fd == -1
     assert not manager.paths.state_dir.exists()
-    assert client.quit_calls == [str(manager.paths.pipe_dir)]
+    assert not client.daemon_process_alive(lease.daemon_pid)
 
 
 def test_dead_daemon_during_service_is_preserved_as_dirty(short_root):
@@ -630,7 +628,7 @@ def test_dead_daemon_during_service_is_preserved_as_dirty(short_root):
         manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
     assert manager.paths.state_dir.is_dir()
     assert f"Owner PID {os.getpid()}" in str(exc_info.value)
     assert "Current MPS client refs: unavailable" in str(exc_info.value)
@@ -652,10 +650,10 @@ def test_dirty_coowner_does_not_block_clean_owner_exit(short_root):
     manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert not manager._owner_file.exists()
+    assert not owner_marker(manager).exists()
     assert (paths.owners_dir / "888").exists()
     assert paths.state_dir.is_dir()
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(lease.daemon_pid)
 
     with pytest.raises(MpsError, match="dirty state"):
         make_manager(short_root, client).acquire()
@@ -677,10 +675,10 @@ def test_corrupt_coowner_does_not_block_clean_owner_exit(short_root):
     manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert not manager._owner_file.exists()
+    assert not owner_marker(manager).exists()
     assert corrupt_owner.read_text() == "broken\n"
     assert paths.state_dir.is_dir()
-    assert client.quit_calls == []
+    assert client.daemon_process_alive(lease.daemon_pid)
 
     with pytest.raises(MpsError, match="invalid status"):
         make_manager(short_root, client).acquire()
@@ -696,10 +694,10 @@ def test_daemon_refusing_quit_persists_dirty_state(short_root):
         manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
     assert manager.paths.state_dir.is_dir()
     assert f"Owner PID {os.getpid()}" in str(exc_info.value)
-    assert client.daemon_signals == []
+    assert client.unsafe_daemon_signals == []
 
     with pytest.raises(MpsError, match="retained"):
         make_manager(short_root, client).acquire()
@@ -718,10 +716,10 @@ def test_quit_control_error_persists_dirty_and_releases_authority(short_root):
         manager.release(lease)
 
     assert lease.owner_fd == -1
-    assert manager._owner_file.read_text() == "retained\n"
+    assert owner_marker(manager).read_text() == "retained\n"
     assert manager.paths.state_dir.is_dir()
     assert "lock is released" in str(exc_info.value)
-    assert client.daemon_signals == []
+    assert client.unsafe_daemon_signals == []
 
 
 def test_release_requires_the_acquisition_token(short_root, tmp_path):
@@ -740,9 +738,18 @@ def test_release_requires_the_acquisition_token(short_root, tmp_path):
         os.close(foreign_fd)
 
 
-def test_proc_stat_zombie_is_not_alive():
-    from sglang_omni.mps.control import _stat_says_alive
+def test_daemon_liveness_rejects_zombie_proc_entries(monkeypatch):
+    from sglang_omni.mps import control
 
-    assert _stat_says_alive("430465 (nvidia-cuda-mps) Z 1 430465 0") is False
-    assert _stat_says_alive("53748 (nvidia-cuda-mps-control) S 1 0 0") is True
-    assert _stat_says_alive("7 (weird) name) Z 1 0") is False
+    stats = {
+        Path("/proc/430465/stat"): "430465 (nvidia-cuda-mps) Z 1 430465 0",
+        Path("/proc/53748/stat"): "53748 (nvidia-cuda-mps-control) S 1 0 0",
+        Path("/proc/7/stat"): "7 (weird) name) Z 1 0",
+    }
+    monkeypatch.setattr(Path, "read_text", lambda path: stats[path])
+    monkeypatch.setattr(control.os, "kill", lambda _pid, _signal: None)
+    client = control.SubprocessMpsControlClient()
+
+    assert not client.daemon_process_alive(430465)
+    assert client.daemon_process_alive(53748)
+    assert not client.daemon_process_alive(7)

@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -18,24 +17,34 @@ from sglang_omni.mps.runtime import MpsPipelineRuntime
 from sglang_omni.pipeline.mp_runner import _build_stage_groups
 from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
 from sglang_omni.pipeline.stage_workers import (
+    StageLaunchConfig,
+    StageWorkerProcessSpec,
     _patched_spawn_env,
     _prepare_accelerator_environment,
 )
 from tests.unit_test.mps.test_mps_manager import FakeControlClient
 
 
-@dataclass
-class StubStageSpec:
-    stage_name: str = "thinker"
-    gpu_id: int | None = 0
-    tp_size: int = 1
-    env_defaults: dict = field(default_factory=dict)
+_FACTORY = f"{__name__}.unused_factory"
 
 
-@dataclass
-class StubProcessSpec:
-    process_name: str = "thinker"
-    stage_specs: list = field(default_factory=lambda: [StubStageSpec()])
+def _launch_stage(
+    stage_name: str = "thinker",
+    *,
+    gpu_id: int | None = 0,
+    env_defaults: dict[str, str] | None = None,
+) -> StageLaunchConfig:
+    return StageLaunchConfig(
+        stage_name=stage_name,
+        factory=_FACTORY,
+        gpu_id=gpu_id,
+        placement_gpu_id=gpu_id,
+        env_defaults=env_defaults or {},
+    )
+
+
+def _process_spec(stage: StageLaunchConfig) -> StageWorkerProcessSpec:
+    return StageWorkerProcessSpec(process_name=stage.stage_name, stage_specs=[stage])
 
 
 @pytest.fixture(autouse=True)
@@ -53,7 +62,7 @@ def short_root():
 
 
 def test_mps_overlay_is_visible_only_during_spawn(monkeypatch):
-    spec = StubProcessSpec()
+    spec = _process_spec(_launch_stage())
     monkeypatch.delenv("CUDA_MPS_PIPE_DIRECTORY", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
@@ -72,8 +81,9 @@ def test_mps_overlay_is_visible_only_during_spawn(monkeypatch):
 
 
 def test_no_mps_overlay_keeps_existing_stage_default_behavior(monkeypatch):
-    spec = StubProcessSpec()
-    spec.stage_specs[0].env_defaults = {"WORKER_DEFAULT": "stage-value"}
+    spec = _process_spec(
+        _launch_stage(env_defaults={"WORKER_DEFAULT": "stage-value"})
+    )
     monkeypatch.delenv("WORKER_DEFAULT", raising=False)
 
     with _patched_spawn_env(spec):
@@ -161,8 +171,7 @@ def test_mps_rejects_worker_gpu_environment_overrides_before_acquire(
 
 
 def test_cpu_stage_keeps_none_gpu_id_under_single_device_marker(monkeypatch):
-    spec = StubStageSpec(stage_name="preprocessing")
-    spec.gpu_id = None
+    spec = _launch_stage("preprocessing", gpu_id=None)
     monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-abc")
 

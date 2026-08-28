@@ -17,16 +17,9 @@ from sglang_omni.mps.manager import (
 )
 
 
-def test_pid_list_accepts_driver_whitespace_but_not_extra_text():
-    assert control._parse_pid_list("101  202\n303\n", "list") == [101, 202, 303]
-
-    with pytest.raises(MpsControlError, match="unexpected output"):
-        control._parse_pid_list("101\nserver=202\n", "list")
-
-
-def test_snapshot_retains_server_client_pairs(monkeypatch):
+def test_snapshot_parses_driver_output_and_retains_server_client_pairs(monkeypatch):
     responses = {
-        "get_server_list\n": "7000 8000\n",
+        "get_server_list\n": "7000  8000\n",
         "get_client_list 7000\n": "101\n102\n",
         "get_client_list 8000\n": "909\n",
     }
@@ -46,6 +39,10 @@ def test_snapshot_retains_server_client_pairs(monkeypatch):
         MpsClientRef(7000, 102),
         MpsClientRef(8000, 909),
     }
+
+    responses["get_client_list 7000\n"] = "101\nserver=202\n"
+    with pytest.raises(MpsControlError, match="unexpected output"):
+        control.SubprocessMpsControlClient().snapshot(Path("/mps/pipe"))
 
 
 def test_control_query_rejects_nonzero_exit_and_timeout(monkeypatch):

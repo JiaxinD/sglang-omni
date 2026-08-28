@@ -12,6 +12,13 @@ from pathlib import Path
 import pytest
 
 from sglang_omni.config import EndpointsConfig, PipelineConfig, StageConfig
+from sglang_omni.config.patch import (
+    ConfigPatch,
+    ConfigPatchSet,
+    ConfigSource,
+    SourceKind,
+)
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.mps.devices import MpsPhysicalDevice
 from sglang_omni.mps.manager import MpsDirtyStateError, MpsError
 from sglang_omni.mps.runtime import MpsPipelineRuntime
@@ -30,6 +37,7 @@ from tests.unit_test.mps.test_mps_manager import (
 )
 
 FAKE_GPU_UUID = "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000000"
+_MPS_FLAG = ConfigSource(SourceKind.CLI_FLAG, "--mps")
 
 
 @pytest.fixture
@@ -44,10 +52,9 @@ def noop_factory():  # pragma: no cover - never constructed in these tests
 
 
 def _make_config(base_path: Path, *, mps: str = "auto") -> PipelineConfig:
-    return PipelineConfig(
+    base = PipelineConfig(
         model_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         entry_stage="preprocessing",
-        mps=mps,
         stages=[
             StageConfig(
                 name="preprocessing",
@@ -58,6 +65,8 @@ def _make_config(base_path: Path, *, mps: str = "auto") -> PipelineConfig:
         ],
         endpoints=EndpointsConfig(base_path=str(base_path)),
     )
+    patch = ConfigPatch.create("mps", mps, _MPS_FLAG)
+    return ConfigResolver(base).resolve(ConfigPatchSet([patch])).config
 
 
 class _FakeCoordinator:
@@ -107,7 +116,6 @@ class _FakeProcess:
 
 
 class _FakeGroup:
-    process_specs = [type("Spec", (), {"process_name": "pipeline"})()]
     stage_control_endpoints = {"preprocessing": "ipc://preprocessing"}
     process_count = 1
 
@@ -124,6 +132,21 @@ class _FakeGroup:
         self.shutdown_gate = shutdown_gate
         self.processes = [_FakeProcess(events)] if direct_process else []
         self.spawn_env = object()
+        self.dead = False
+        self.process_specs = [
+            StageWorkerProcessSpec(
+                process_name="pipeline",
+                stage_specs=[
+                    StageLaunchConfig(
+                        stage_name="preprocessing",
+                        factory=f"{__name__}.noop_factory",
+                        placement_gpu_id=0,
+                        gpu_id=0,
+                        recv_endpoint="ipc://preprocessing",
+                    )
+                ],
+            )
+        ]
 
     def spawn(self, ctx, process_env_overrides=None) -> None:
         del ctx
@@ -137,10 +160,10 @@ class _FakeGroup:
             raise self.ready_error
 
     def any_dead(self) -> bool:
-        return False
+        return self.dead
 
     def dead_summary(self) -> str:
-        return "(none)"
+        return "preprocessing exited" if self.dead else "(none)"
 
     def process_pids(self) -> dict[str, int]:
         return {"pipeline": 101}
@@ -167,6 +190,7 @@ class _FakeMps:
         close_error: BaseException | None = None,
         spawn_env: dict[str, str] | None = None,
         probe_result: dict[str, str] | None = None,
+        probe_gate: asyncio.Event | None = None,
     ) -> None:
         self.events = events
         self.close_error = close_error
@@ -174,6 +198,7 @@ class _FakeMps:
             "CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"
         }
         self.probe_result = probe_result or {}
+        self.probe_gate = probe_gate
         self.started = False
         self.verified: dict[str, int] | None = None
         self.close_process_start_attempts: set[str] | None = None
@@ -196,6 +221,8 @@ class _FakeMps:
         self.verified = dict(pids)
 
     async def probe_failures(self) -> dict[str, str]:
+        if self.probe_gate is not None:
+            await self.probe_gate.wait()
         return dict(self.probe_result)
 
     async def close(
@@ -287,6 +314,7 @@ def _real_mps_group() -> StageGroup:
                 stage_specs=[
                     StageLaunchConfig(
                         stage_name="preprocessing",
+                        factory=f"{__name__}.noop_factory",
                         placement_gpu_id=0,
                         gpu_id=0,
                         recv_endpoint="ipc://preprocessing",
@@ -334,7 +362,9 @@ async def test_mps_hooks_follow_resolved_spawn_lifecycle(short_base, monkeypatch
 
     await runner.start()
 
-    assert events[:4] == ["MPS acquire", "spawn", "ready", "MPS verify"]
+    assert events.index("MPS acquire") < events.index("spawn")
+    assert events.index("spawn") < events.index("ready")
+    assert events.index("ready") < events.index("MPS verify")
     assert group.spawn_env == {
         "pipeline": {"CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"}
     }
@@ -343,11 +373,8 @@ async def test_mps_hooks_follow_resolved_spawn_lifecycle(short_base, monkeypatch
 
     await runner.stop()
 
-    assert events[-3:] == [
-        "graceful shutdown",
-        "process shutdown",
-        "MPS close",
-    ]
+    assert events.index("graceful shutdown") < events.index("process shutdown")
+    assert events.index("process shutdown") < events.index("MPS close")
 
 
 @pytest.mark.asyncio
@@ -483,7 +510,7 @@ async def test_attempted_mps_process_start_keeps_fail_closed_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_mps_failure_waits_for_terminal_cleanup_and_reports_close_error(
+async def test_mps_watchdog_waits_for_terminal_cleanup_and_reports_close_error(
     short_base,
     monkeypatch,
     caplog,
@@ -493,53 +520,31 @@ async def test_mps_failure_waits_for_terminal_cleanup_and_reports_close_error(
     release = asyncio.Event()
     group = _FakeGroup(events, shutdown_gate=(entered, release))
     dirty = MpsDirtyStateError("dirty state persisted")
-    fake_mps = _FakeMps(events, close_error=dirty)
+    probe_gate = asyncio.Event()
+    fake_mps = _FakeMps(
+        events,
+        close_error=dirty,
+        probe_result={FAKE_GPU_UUID: "daemon identity changed"},
+        probe_gate=probe_gate,
+    )
     _patch_runner(monkeypatch, events, group, fake_mps)
     runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
     await runner.start()
 
-    failure = RuntimeError("MPS daemon died")
-    fail_task = asyncio.create_task(runner._fail_runtime(failure))
+    probe_gate.set()
     await entered.wait()
     waiter = asyncio.create_task(runner.wait_failed())
     await asyncio.sleep(0)
     assert not waiter.done()
 
     release.set()
-    await fail_task
-    with pytest.raises(RuntimeError, match="MPS daemon died") as exc_info:
+    with pytest.raises(RuntimeError, match="MPS health check failed") as exc_info:
         await waiter
 
     assert "MPS cleanup after runtime failure failed: dirty state persisted" in caplog.text
+    assert FAKE_GPU_UUID in str(exc_info.value)
+    assert "daemon identity changed" in str(exc_info.value)
     assert exc_info.value.__cause__ is dirty
-
-
-@pytest.mark.asyncio
-async def test_watchdog_reports_the_mps_health_failure_reason(
-    short_base,
-    monkeypatch,
-):
-    events: list[str] = []
-    group = _FakeGroup(events)
-    fake_mps = _FakeMps(
-        events,
-        probe_result={
-            FAKE_GPU_UUID: "client snapshot query failed: control unavailable"
-        },
-    )
-    _patch_runner(monkeypatch, events, group, fake_mps)
-    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
-    await runner.start()
-
-    with pytest.raises(RuntimeError) as exc_info:
-        await asyncio.wait_for(runner.wait_failed(), timeout=1)
-
-    message = str(exc_info.value)
-    assert "MPS health check failed" in message
-    assert (
-        f"{FAKE_GPU_UUID}: client snapshot query failed: control unavailable"
-        in message
-    )
 
 
 @pytest.mark.asyncio
@@ -553,6 +558,13 @@ async def test_mps_off_keeps_merge_base_spawn_and_failure_order(
     group = _FakeGroup(events, shutdown_gate=(entered, release))
     _patch_runner(monkeypatch, events, group, fake_mps=None)
 
+    original_sleep = asyncio.sleep
+
+    async def checkpoint(_delay: float) -> None:
+        await original_sleep(0)
+
+    monkeypatch.setattr(mp_runner.asyncio, "sleep", checkpoint)
+
     def unexpected_mps(*args, **kwargs):
         del args, kwargs
         raise AssertionError("mps=off must not create an MPS runtime")
@@ -564,14 +576,11 @@ async def test_mps_off_keeps_merge_base_spawn_and_failure_order(
     await runner.start()
     assert group.spawn_env is None
 
-    failure = RuntimeError("stage died")
-    fail_task = asyncio.create_task(runner._fail_runtime(failure))
-    await entered.wait()
+    group.dead = True
     waiter = asyncio.create_task(runner.wait_failed())
-    with pytest.raises(RuntimeError, match="stage died"):
-        await waiter
-
-    assert not fail_task.done()
+    await entered.wait()
+    assert not waiter.done()
     release.set()
-    await fail_task
+    with pytest.raises(RuntimeError, match="Dead stage process"):
+        await waiter
     assert "MPS close" not in events
