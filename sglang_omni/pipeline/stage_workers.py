@@ -886,10 +886,14 @@ def _normalize_spec_gpu_id_to_local_device(spec: StageLaunchConfig) -> None:
     if spec.placement_gpu_id is None:
         spec.placement_gpu_id = spec.gpu_id
     spec.gpu_id = 0
-    if "gpu_id" in spec.factory_arg_defaults:
-        spec.factory_arg_defaults["gpu_id"] = 0
-    if "gpu_id" in spec.comm_config:
-        spec.comm_config["gpu_id"] = 0
+    for kwargs in (
+        spec.factory_kwargs,
+        spec.typed_kwargs,
+        spec.factory_arg_defaults,
+        spec.comm_config,
+    ):
+        if kwargs.get("gpu_id") is not None:
+            kwargs["gpu_id"] = 0
 
 
 def _process_name(spec: StageWorkerProcessSpec) -> str:
