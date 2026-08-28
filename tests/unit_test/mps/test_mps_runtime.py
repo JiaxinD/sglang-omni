@@ -33,7 +33,8 @@ class StubStage:
     gpu_id: int | None
     tp_size: int = 1
     placement_gpu_id: int | None = None
-    factory_args: dict = field(default_factory=dict)
+    factory_kwargs: dict = field(default_factory=dict)
+    typed_kwargs: dict = field(default_factory=dict)
     factory_arg_defaults: dict = field(default_factory=dict)
     env_defaults: dict = field(default_factory=dict)
     next_stages: str | list[str] | None = None
@@ -319,7 +320,7 @@ def test_known_multi_physical_subset_precedes_driver_resolution_error(
 
 def test_explicit_device_must_match_process_physical_placement(short_root):
     processes = [proc("a", 1), proc("b", 1)]
-    processes[0].stage_specs[0].factory_args = {"device": "cuda:0"}
+    processes[0].stage_specs[0].typed_kwargs = {"device": "cuda:0"}
 
     with pytest.raises(MpsError, match="multiple physical GPUs"):
         create(

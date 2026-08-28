@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from sglang_omni.config import PipelineConfig, StageConfig
+from sglang_omni.config.manager import ConfigManager
 
 _FACTORY = "tests.unit_test.fixtures.pipeline_fakes.dummy_factory"
 
@@ -18,7 +19,7 @@ def _config(**kwargs) -> PipelineConfig:
             StageConfig(
                 name="thinker",
                 process="pipeline",
-                factory=_FACTORY,
+                factory_path=_FACTORY,
                 gpu=0,
                 terminal=True,
             )
@@ -33,9 +34,12 @@ def test_mps_defaults_off():
 
 @pytest.mark.parametrize("mode", ["off", "on", "auto"])
 def test_mps_accepts_valid_modes(mode):
-    assert _config(mps=mode).mps == mode
+    manager = ConfigManager(_config())
+    cli_args = manager.parse_extra_args(["--mps", mode])
+
+    assert manager.merge_config(cli_args).mps == mode
 
 
 def test_mps_rejects_unknown_mode():
     with pytest.raises(ValidationError):
-        _config(mps="always")
+        ConfigManager(_config()).merge_config([("mps", "always")])

@@ -340,19 +340,6 @@ def serve(
             help="Mount the OpenAI Realtime WebSocket endpoint at /v1/realtime.",
         ),
     ] = False,
-    mps: Annotated[
-        str | None,
-        typer.Option(
-            "--mps",
-            help=(
-                "CUDA MPS for colocated GPU processes: off, on, or auto. "
-                "auto enables MPS on any GPU hosting two or more single-GPU "
-                "stage processes of this pipeline. on always joins the shared "
-                "per-GPU daemon; use it on every replica for same-GPU data "
-                "parallelism. Omit to use the pipeline config default (off)."
-            ),
-        ),
-    ] = None,
 ) -> None:
     """Serve the pipeline.
 
@@ -406,17 +393,6 @@ def serve(
         config_manager.config,
         mem_fraction_static=mem_fraction_static,
     )
-    if mps is not None:
-        if mps not in ("off", "on", "auto"):
-            raise typer.BadParameter("--mps must be off, on, or auto")
-        flag_patches.add(
-            ConfigPatch.create(
-                "mps",
-                mps,
-                ConfigSource(SourceKind.CLI_FLAG, "--mps"),
-                root=type(config_manager.config),
-            )
-        )
     if config and model_path is not None:
         # Given both, the flag is a command line source and outranks the
         # file's model_path. Merged as a patch rather than assigned onto the

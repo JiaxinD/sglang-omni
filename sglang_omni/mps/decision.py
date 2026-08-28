@@ -58,8 +58,9 @@ def _process_explicit_cuda_gpu_ids(process_spec) -> set[int]:
         gpu_id
         for stage_spec in process_spec.stage_specs
         for values in (
-            getattr(stage_spec, "factory_args", {}),
-            getattr(stage_spec, "factory_arg_defaults", {}),
+            stage_spec.factory_kwargs,
+            stage_spec.typed_kwargs,
+            stage_spec.factory_arg_defaults,
         )
         for gpu_id in _explicit_cuda_gpu_ids(values)
     }

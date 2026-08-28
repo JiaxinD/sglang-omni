@@ -94,7 +94,7 @@ def _resolved_config_process(*, pipeline_env: dict, stage_env: dict):
                 StageConfig(
                     name="worker",
                     process="pipeline",
-                    factory=f"{__name__}.unused_factory",
+                    factory_path=f"{__name__}.unused_factory",
                     gpu=0,
                     terminal=True,
                     env=stage_env,

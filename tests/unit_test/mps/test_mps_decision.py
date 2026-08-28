@@ -14,7 +14,8 @@ class StubStage:
     gpu_id: int | None
     tp_size: int = 1
     placement_gpu_id: int | None = None
-    factory_args: dict = field(default_factory=dict)
+    factory_kwargs: dict = field(default_factory=dict)
+    typed_kwargs: dict = field(default_factory=dict)
     factory_arg_defaults: dict = field(default_factory=dict)
 
 
@@ -31,16 +32,17 @@ def proc(name, gpu_id, tp_size=1):
 def test_extracts_resolved_process_facts_without_deciding_physical_identity():
     placed = proc("placed", 0)
     placed.stage_specs[0].placement_gpu_id = 3
-    placed.stage_specs[0].factory_args = {
+    placed.stage_specs[0].factory_kwargs = {
         "nested": [{"device": "cuda:1"}]
     }
-    placed.stage_specs[0].factory_arg_defaults = {"fallback": "cuda:2"}
+    placed.stage_specs[0].typed_kwargs = {"configured": "cuda:2"}
+    placed.stage_specs[0].factory_arg_defaults = {"fallback": "cuda:4"}
     tp = proc("tp", 4, tp_size=2)
 
     facts = collect_mps_facts([placed, tp])
 
     assert facts[0].process_name == "placed"
     assert facts[0].placement_gpu_ids == (3,)
-    assert facts[0].explicit_cuda_gpu_ids == (1, 2)
+    assert facts[0].explicit_cuda_gpu_ids == (1, 2, 4)
     assert not facts[0].contains_tp
     assert facts[1].contains_tp
