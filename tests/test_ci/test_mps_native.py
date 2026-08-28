@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,60 @@ def _daemon_pids() -> set[int]:
     return pids
 
 
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    start_time: int
+
+
+def _process_identity(pid: int) -> tuple[_ProcessIdentity, str] | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return _ProcessIdentity(pid, int(fields[19])), fields[0]
+    except (FileNotFoundError, IndexError, ValueError):
+        return None
+
+
+def _mps_process_identities() -> set[_ProcessIdentity]:
+    """Capture exact MPS processes while their scoped environment is readable."""
+
+    identities: set[_ProcessIdentity] = set()
+    for environ_file in Path("/proc").glob("[0-9]*/environ"):
+        try:
+            env = environ_file.read_bytes()
+            cmd = (environ_file.parent / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if str(STATE_ROOT).encode() not in env or b"nvidia-cuda-mps" not in cmd:
+            continue
+        identity_and_state = _process_identity(int(environ_file.parent.name))
+        if identity_and_state is not None:
+            identities.add(identity_and_state[0])
+    return identities
+
+
+def _assert_process_identities_gone(
+    identities: set[_ProcessIdentity],
+    timeout_s: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        leftovers: dict[_ProcessIdentity, str] = {}
+        for identity in identities:
+            current = _process_identity(identity.pid)
+            if current is not None and current[0] == identity:
+                leftovers[identity] = current[1]
+        if not leftovers:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"MPS process residue (state is /proc status): {leftovers}. "
+                "If these are zombies reparented to PID 1, run the container "
+                "with a child-reaping init (for Docker, --init)."
+            )
+        time.sleep(0.1)
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -192,7 +247,13 @@ def clean_state_root(monkeypatch):
     _wait_gpu_drained()
     processes: list[subprocess.Popen] = []
     session_ids: set[int] = set()
+    mps_processes: set[_ProcessIdentity] = set()
     serve = _serve
+    daemon_pids = _daemon_pids
+
+    def tracked_daemon_pids() -> set[int]:
+        mps_processes.update(_mps_process_identities())
+        return daemon_pids()
 
     def tracked_serve(port: int, mps: str) -> subprocess.Popen:
         proc = serve(port, mps)
@@ -201,8 +262,10 @@ def clean_state_root(monkeypatch):
         return proc
 
     monkeypatch.setattr(sys.modules[__name__], "_serve", tracked_serve)
+    monkeypatch.setattr(sys.modules[__name__], "_daemon_pids", tracked_daemon_pids)
     yield
 
+    mps_processes.update(_mps_process_identities())
     for proc in processes:
         if proc.poll() is None:
             try:
@@ -214,6 +277,7 @@ def clean_state_root(monkeypatch):
     else:
         _signal_test_sessions(session_ids, signal.SIGKILL)
         shutil.rmtree(STATE_ROOT, ignore_errors=True)
+    _assert_process_identities_gone(mps_processes)
 
 
 def _signal_test_sessions(session_ids: Iterable[int], sig: int) -> set[int]:
