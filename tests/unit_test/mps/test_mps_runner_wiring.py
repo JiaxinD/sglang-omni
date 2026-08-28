@@ -165,9 +165,6 @@ class _FakeGroup:
     def dead_summary(self) -> str:
         return "preprocessing exited" if self.dead else "(none)"
 
-    def process_pids(self) -> dict[str, int]:
-        return {"pipeline": 101}
-
     def process_start_attempts(self) -> set[str]:
         return {"pipeline"} if "spawn" in self.events else set()
 
@@ -200,7 +197,7 @@ class _FakeMps:
         self.probe_result = probe_result or {}
         self.probe_gate = probe_gate
         self.started = False
-        self.verified: dict[str, int] | None = None
+        self.verified = False
         self.close_process_start_attempts: set[str] | None = None
 
     @property
@@ -216,9 +213,9 @@ class _FakeMps:
             return {}
         return dict(self.spawn_env)
 
-    async def verify(self, pids: dict[str, int]) -> None:
+    async def verify(self) -> None:
         self.events.append("MPS verify")
-        self.verified = dict(pids)
+        self.verified = True
 
     async def probe_failures(self) -> dict[str, str]:
         if self.probe_gate is not None:
@@ -345,6 +342,7 @@ def _shared_mps_runtime(
         state_root=root,
     )
     assert runtime is not None
+    client.client_tokens[202] = "healthy-coowner"
     manager = runtime.managers[GPU_UUID]
     manager.poll_interval = 0.0
     manager.drain_timeout = 0.02
@@ -368,7 +366,7 @@ async def test_mps_hooks_follow_resolved_spawn_lifecycle(short_base, monkeypatch
     assert group.spawn_env == {
         "pipeline": {"CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"}
     }
-    assert fake_mps.verified == {"pipeline": 101}
+    assert fake_mps.verified
     assert coordinator.registered == {"preprocessing": "ipc://preprocessing"}
 
     await runner.stop()
@@ -471,7 +469,7 @@ async def test_failure_before_first_mps_process_start_rolls_back_cleanly(
     assert client.snapshot(paths.pipe_dir) == foreign_clients
     assert client.daemon_process_alive(999)
 
-    later_lease = manager.acquire()
+    later_lease = manager.acquire({"later": "later-owner"})
     manager.release(later_lease, clients_could_have_attached=False)
     assert (paths.owners_dir / "888").read_text() == "active\n"
     assert client.daemon_process_alive(999)
@@ -506,7 +504,7 @@ async def test_attempted_mps_process_start_keeps_fail_closed_cleanup(
     assert client.snapshot(paths.pipe_dir) == foreign_clients
     assert client.daemon_process_alive(999)
     with pytest.raises(MpsError, match="retained"):
-        make_manager(short_base, client).acquire()
+        make_manager(short_base, client).acquire({"later": "later-owner"})
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ import pytest
 
 from sglang_omni.mps.devices import MpsPhysicalDevice
 from sglang_omni.mps.manager import (
+    MPS_CLIENT_TOKEN_ENV,
     MpsClientRef,
     MpsDirtyStateError,
     MpsError,
@@ -171,6 +172,7 @@ async def test_env_only_for_acquired_client_processes(short_root):
     assert env["CUDA_VISIBLE_DEVICES"] == "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000000"
     assert "CUDA_MPS_PIPE_DIRECTORY" in env
     assert env["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
+    assert env[MPS_CLIENT_TOKEN_ENV]
     assert runtime.env_for_process("solo") == {}
 
     detach_all(runtime, client)
@@ -221,10 +223,15 @@ async def test_logical_gpu_aliases_coalesce_by_physical_uuid(short_root):
     daemon_pid = client.daemons[str(manager.paths.pipe_dir)]
     assert set(client.daemons) == {str(manager.paths.pipe_dir)}
     client.set_clients(manager.paths.pipe_dir, {7000: [11, 12]})
-    await runtime.verify({"a": 11, "b": 12})
+    client.client_tokens.update(
+        {
+            11: runtime.env_for_process("a")[MPS_CLIENT_TOKEN_ENV],
+            12: runtime.env_for_process("b")[MPS_CLIENT_TOKEN_ENV],
+        }
+    )
+    await runtime.verify()
     client.set_clients(manager.paths.pipe_dir, {7000: [11]})
-    failures = await runtime.probe_failures()
-    assert "client_pid=12" in failures[gpu_uuid(1)]
+    assert await runtime.probe_failures() == {}
 
     client.set_clients(manager.paths.pipe_dir, {})
     await runtime.close()
@@ -407,10 +414,10 @@ async def test_cancelled_start_rolls_back_before_any_client_can_attach(
     entered = threading.Event()
     release = threading.Event()
 
-    def blocked_acquire():
+    def blocked_acquire(client_tokens):
         entered.set()
         assert release.wait(timeout=5)
-        return original_acquire()
+        return original_acquire(client_tokens)
 
     monkeypatch.setattr(manager, "acquire", blocked_acquire)
     start_task = asyncio.create_task(runtime.start())
@@ -526,7 +533,13 @@ async def test_close_releases_all_acquired_leases(short_root):
     await runtime.start()
     manager = manager_on(runtime, 0)
     client.set_clients(manager.paths.pipe_dir, {7000: [11, 12]})
-    await runtime.verify({"a": 11, "b": 12})
+    client.client_tokens.update(
+        {
+            11: runtime.env_for_process("a")[MPS_CLIENT_TOKEN_ENV],
+            12: runtime.env_for_process("b")[MPS_CLIENT_TOKEN_ENV],
+        }
+    )
+    await runtime.verify()
     client.set_clients(manager.paths.pipe_dir, {})
 
     await runtime.close()
@@ -651,9 +664,9 @@ async def test_multi_gpu_close_persists_dirty_gpu_and_releases_clean_gpu(short_r
     dirty_manager = manager_on(runtime, 1)
     clean_manager = manager_on(runtime, 0)
     client.set_clients(dirty_manager.paths.pipe_dir, {7000: [30]})
-    await runtime.verify({"c": 30})
+    client.client_tokens[30] = runtime.env_for_process("c")[MPS_CLIENT_TOKEN_ENV]
 
-    with pytest.raises(MpsDirtyStateError, match="still attached"):
+    with pytest.raises(MpsDirtyStateError, match="owned="):
         await runtime.close()
 
     assert not runtime.has_leases
@@ -691,6 +704,7 @@ async def test_start_attempts_are_classified_per_physical_gpu(short_root):
         client.alive_pids.add(daemon_pid)
         client.held_owner_pids.add(owner_pid)
         client.set_clients(paths.pipe_dir, {7000 + index: [200 + index]})
+        client.client_tokens[200 + index] = f"foreign-owner-{index}"
         foreign_clients[manager.gpu_uuid] = client.snapshot(paths.pipe_dir)
 
     await runtime.start()
@@ -712,11 +726,11 @@ async def test_start_attempts_are_classified_per_physical_gpu(short_root):
         ]
         assert client.daemon_process_alive(9000 + index)
 
-    later_lease = not_started.acquire()
+    later_lease = not_started.acquire({"later": "later-owner"})
     not_started.release(later_lease, clients_could_have_attached=False)
     assert not (not_started.paths.owners_dir / current_owner).exists()
     with pytest.raises(MpsError, match="retained"):
-        attempted.acquire()
+        attempted.acquire({"later": "later-owner"})
 
 
 @pytest.mark.asyncio
@@ -726,14 +740,19 @@ async def test_preverify_clients_are_preserved_without_guessing_ownership(short_
     await runtime.start()
     manager = manager_on(runtime, 0)
     client.set_clients(manager.paths.pipe_dir, {7000: [200], 8000: [909]})
-    client.parents[200] = 100
+    client.client_tokens.update(
+        {
+            200: runtime.env_for_process("a")[MPS_CLIENT_TOKEN_ENV],
+            909: "foreign-owner",
+        }
+    )
 
     with pytest.raises(MpsDirtyStateError) as exc_info:
         await runtime.close()
 
     message = str(exc_info.value)
     assert not runtime.has_leases
-    assert "terminate_client 7000 200" not in message
+    assert "terminate_client 7000 200" in message
     assert "terminate_client 8000 909" not in message
     assert client.unsafe_daemon_signals == []
     assert owner_marker(manager).read_text() == "retained\n"

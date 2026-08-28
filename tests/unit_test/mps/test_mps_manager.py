@@ -33,12 +33,12 @@ class FakeControlClient:
         self.daemons: dict[str, int] = {}
         self.alive_pids: set[int] = set()
         self.held_owner_pids: set[int] = set()
-        self.parents: dict[int, int] = {}
+        self.client_tokens: dict[int, str] = {}
         self.snapshots: dict[str, set[MpsClientRef]] = {}
         self.start_fails = False
         self.snapshot_error: str | None = None
         self.identity_error: str | None = None
-        self.parent_error: str | None = None
+        self.client_token_error: str | None = None
         self.quit_error: str | None = None
         self.quit_works = True
         self.unsafe_daemon_signals: list[tuple[int, bool]] = []
@@ -98,10 +98,10 @@ class FakeControlClient:
         self.unsafe_daemon_signals.append((pid, force))
         self.alive_pids.discard(pid)
 
-    def parent_of(self, pid):
-        if self.parent_error is not None:
-            raise MpsControlError(self.parent_error)
-        return self.parents.get(pid)
+    def client_token(self, pid):
+        if self.client_token_error is not None:
+            raise MpsControlError(self.client_token_error)
+        return self.client_tokens.get(pid)
 
     def owner_lease_held(self, lease_file):
         try:
@@ -166,9 +166,10 @@ def seed_shared_dir(
 
 def start_serving(root, client, client_pid=101):
     manager = make_manager(root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.set_clients(manager.paths.pipe_dir, {7000: [client_pid]})
-    manager.verify(lease, {client_pid})
+    client.client_tokens[client_pid] = "owner-worker"
+    manager.verify(lease)
     return manager, lease
 
 
@@ -176,7 +177,7 @@ def test_first_owner_uses_native_pid_file_and_returns_one_lease(short_root):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
 
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
 
     assert lease.daemon_pid == client.daemon_pid
     owner_stat = os.stat(manager.paths.owners_dir / str(os.getpid()))
@@ -197,7 +198,7 @@ def test_second_owner_joins_only_when_every_existing_lease_is_held(short_root):
     )
     manager = make_manager(short_root, client)
 
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     assert lease.daemon_pid == 999
 
     manager.release(lease)
@@ -216,7 +217,7 @@ def test_dead_co_owner_is_preserved_and_blocks_join(short_root):
     )
 
     with pytest.raises(MpsError, match="777"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
     assert (paths.owners_dir / "777").exists()
 
@@ -232,7 +233,7 @@ def test_dirty_state_never_claims_ambiguous_clients_are_safe_to_terminate(short_
     )
 
     with pytest.raises(MpsError) as exc_info:
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
     message = str(exc_info.value)
     control = f"CUDA_MPS_PIPE_DIRECTORY={paths.pipe_dir} nvidia-cuda-mps-control"
@@ -254,7 +255,7 @@ def test_idle_daemon_is_not_adopted(short_root):
     )
 
     with pytest.raises(MpsError, match="dirty state"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
     assert paths.state_dir.is_dir()
     assert (paths.owners_dir / "777").exists()
@@ -272,7 +273,7 @@ def test_missing_native_pid_file_fails_even_when_control_responds(short_root):
     daemon_pid_file(paths).unlink()
 
     with pytest.raises(MpsError, match="native PID file"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
     assert paths.state_dir.is_dir()
 
@@ -289,7 +290,7 @@ def test_malformed_owner_entry_fails_without_deletion(short_root):
     malformed.write_text("")
 
     with pytest.raises(MpsError, match="malformed owner lease"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
     assert malformed.exists()
 
@@ -300,7 +301,7 @@ def test_unresponsive_new_daemon_is_persisted_without_process_signals(short_root
     manager = make_manager(short_root, client)
 
     with pytest.raises(MpsError, match="control daemon"):
-        manager.acquire()
+        manager.acquire({"worker": "owner-worker"})
 
     assert client.unsafe_daemon_signals == []
     assert manager.paths.state_dir.is_dir()
@@ -313,7 +314,7 @@ def test_ambiguous_start_failure_without_native_identity_preserves_state(short_r
     manager = make_manager(short_root, client)
 
     with pytest.raises(MpsError, match="spawn failed") as exc_info:
-        manager.acquire()
+        manager.acquire({"worker": "owner-worker"})
 
     assert manager.paths.state_dir.is_dir()
     assert client.unsafe_daemon_signals == []
@@ -333,7 +334,7 @@ def test_preexec_daemon_failure_removes_unstarted_state(short_root):
     client.start_daemon = cannot_execute
 
     with pytest.raises(MpsDaemonNotStartedError, match="not executed"):
-        manager.acquire()
+        manager.acquire({"worker": "owner-worker"})
 
     assert not manager.paths.state_dir.exists()
     assert client.unsafe_daemon_signals == []
@@ -351,59 +352,62 @@ def test_startup_rollback_never_signals_an_unverified_pid(short_root):
     client.snapshot = lose_identity
 
     with pytest.raises(MpsError, match="control daemon"):
-        manager.acquire()
+        manager.acquire({"worker": "owner-worker"})
 
     assert manager.paths.state_dir.is_dir()
     assert client.unsafe_daemon_signals == []
     assert owner_marker(manager).read_text() == "retained\n"
 
 
-def test_verify_returns_and_retains_exact_client_refs(short_root):
+def test_verify_returns_current_exact_client_refs(short_root):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"a": "owner-a", "b": "owner-b"})
     client.set_clients(manager.paths.pipe_dir, {7000: [101, 102], 8000: [909]})
+    client.client_tokens.update({101: "owner-a", 102: "owner-b", 909: "foreign"})
 
-    attached = manager.verify(lease, {101, 102})
+    attached = manager.verify(lease)
 
     assert attached == {MpsClientRef(7000, 101), MpsClientRef(7000, 102)}
-    assert lease.attached_clients == attached
 
 
-def test_verify_matches_descendant_cuda_client(short_root):
+def test_verify_matches_inherited_process_token_on_cuda_client(short_root):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.set_clients(manager.paths.pipe_dir, {7000: [200]})
-    client.parents[200] = 100
+    client.client_tokens[200] = "owner-worker"
 
-    assert manager.verify(lease, {100}) == {MpsClientRef(7000, 200)}
+    assert manager.verify(lease) == {MpsClientRef(7000, 200)}
 
 
-def test_verify_timeout_retains_clients_that_did_attach(short_root):
+def test_verify_does_not_accumulate_clients_across_snapshots(short_root, monkeypatch):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
-    client.set_clients(manager.paths.pipe_dir, {7000: [101]})
+    lease = manager.acquire({"a": "owner-a", "b": "owner-b"})
+    snapshots = iter(
+        [
+            {MpsClientRef(7000, 101)},
+            {MpsClientRef(7000, 202)},
+        ]
+    )
+    client.client_tokens.update({101: "owner-a", 202: "owner-b"})
+    last = {MpsClientRef(7000, 202)}
+    monkeypatch.setattr(client, "snapshot", lambda _pipe: next(snapshots, last))
 
-    with pytest.raises(MpsError, match=r"\[202\]"):
-        manager.verify(lease, {101, 202})
+    with pytest.raises(MpsError, match=r"stage process\(es\) \['a'\]"):
+        manager.verify(lease)
 
-    assert lease.attached_clients == {MpsClientRef(7000, 101)}
     assert lease.owner_fd >= 0
 
 
-def test_probe_reports_disappeared_verified_clients(short_root):
+def test_probe_allows_a_verified_client_to_exit(short_root):
     client = FakeControlClient()
     manager, lease = start_serving(short_root, client)
     assert manager.probe(lease) is None
 
     client.set_clients(manager.paths.pipe_dir, {})
-    reason = manager.probe(lease)
-
-    assert reason is not None
-    assert "verified client refs disappeared" in reason
-    assert "client_pid=101" in reason
+    assert manager.probe(lease) is None
 
 
 def test_probe_distinguishes_identity_and_snapshot_failures(short_root):
@@ -437,13 +441,12 @@ def test_dead_root_with_live_descendant_persists_dirty_and_reports_cleanup(
 ):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.set_clients(manager.paths.pipe_dir, {7000: [200]})
-    client.parents[200] = 100
-    manager.verify(lease, {100})
-    client.parents[200] = 1
+    client.client_tokens[200] = "owner-worker"
+    manager.verify(lease)
 
-    with pytest.raises(MpsDirtyStateError, match="still attached") as exc_info:
+    with pytest.raises(MpsDirtyStateError, match="owned=") as exc_info:
         manager.release(lease)
 
     assert lease.owner_fd == -1
@@ -463,7 +466,7 @@ def test_dead_root_with_live_descendant_persists_dirty_and_reports_cleanup(
         os.close(owner_fd)
 
     with pytest.raises(MpsError, match="dirty state"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
 
 def test_dirty_owner_guidance_never_targets_a_coowners_clients(short_root):
@@ -475,16 +478,15 @@ def test_dirty_owner_guidance_never_targets_a_coowners_clients(short_root):
         owners={888: True},
     )
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
-    owned = MpsClientRef(7000, 101)
+    lease = manager.acquire({"worker": "owner-worker"})
     foreign = MpsClientRef(8000, 202)
     client.set_clients(manager.paths.pipe_dir, {7000: [101], 8000: [202]})
-    manager.verify(lease, {101})
+    client.client_tokens.update({101: "owner-worker", 202: "coowner-worker"})
+    manager.verify(lease)
 
     with pytest.raises(MpsDirtyStateError) as exc_info:
         manager.release(lease)
 
-    assert owned in lease.attached_clients
     message = str(exc_info.value)
     assert "terminate_client 7000 101" in message
     assert "terminate_client 8000 202" not in message
@@ -503,9 +505,10 @@ def test_verified_owner_release_ignores_only_coowner_clients(
         owners={888: True},
     )
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.set_clients(manager.paths.pipe_dir, {7000: [101], 8000: [202]})
-    manager.verify(lease, {101})
+    client.client_tokens.update({101: "owner-worker", 202: "coowner-worker"})
+    manager.verify(lease)
     client.set_clients(manager.paths.pipe_dir, {8000: [202]})
 
     manager.release(lease)
@@ -514,6 +517,33 @@ def test_verified_owner_release_ignores_only_coowner_clients(
     assert not owner_marker(manager).exists()
     assert client.daemon_process_alive(lease.daemon_pid)
     assert client.snapshot(manager.paths.pipe_dir) == {MpsClientRef(8000, 202)}
+
+
+def test_client_created_after_verify_prevents_shared_owner_release(short_root):
+    client = FakeControlClient()
+    seed_shared_dir(
+        short_root,
+        client,
+        daemon_pid=999,
+        owners={888: True},
+    )
+    manager = make_manager(short_root, client)
+    lease = manager.acquire({"worker": "owner-worker"})
+    client.set_clients(manager.paths.pipe_dir, {7000: [101]})
+    client.client_tokens[101] = "owner-worker"
+    manager.verify(lease)
+
+    client.set_clients(manager.paths.pipe_dir, {7000: [303], 8000: [202]})
+    client.client_tokens.update({303: "owner-worker", 202: "coowner-worker"})
+
+    with pytest.raises(MpsDirtyStateError) as exc_info:
+        manager.release(lease)
+
+    assert "terminate_client 7000 303" in str(exc_info.value)
+    assert "terminate_client 8000 202" not in str(exc_info.value)
+    assert owner_marker(manager).read_text() == "retained\n"
+    assert (manager.paths.owners_dir / "888").read_text() == "active\n"
+    assert client.daemon_process_alive(999)
 
 
 def test_unattributable_orphan_persists_dirty_and_blocks_join(short_root):
@@ -526,7 +556,7 @@ def test_unattributable_orphan_persists_dirty_and_blocks_join(short_root):
         clients={7000: [200], 8000: [202]},
     )
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
 
     with pytest.raises(MpsDirtyStateError) as exc_info:
         manager.release(lease)
@@ -535,7 +565,7 @@ def test_unattributable_orphan_persists_dirty_and_blocks_join(short_root):
     assert owner_marker(manager).read_text() == "retained\n"
     assert lease.owner_fd == -1
     with pytest.raises(MpsError, match="retained"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
 
 def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
@@ -547,19 +577,20 @@ def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
     client = FakeControlClient()
 
     manager_a = make_manager(short_root, client)
-    lease_a = manager_a.acquire()
+    lease_a = manager_a.acquire({"worker-a": "owner-a"})
     client.held_owner_pids.add(1001)
 
     current_pid = 1002
     manager_b = make_manager(short_root, client)
-    lease_b = manager_b.acquire()
+    lease_b = manager_b.acquire({"worker-b": "owner-b"})
     client.held_owner_pids.add(1002)
 
     client.set_clients(manager_a.paths.pipe_dir, {7000: [101], 8000: [202]})
+    client.client_tokens.update({101: "owner-a", 202: "owner-b"})
     current_pid = 1001
-    manager_a.verify(lease_a, {101})
+    manager_a.verify(lease_a)
     current_pid = 1002
-    manager_b.verify(lease_b, {202})
+    manager_b.verify(lease_b)
 
     current_pid = 1001
     with pytest.raises(MpsDirtyStateError) as exc_info:
@@ -576,7 +607,7 @@ def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
 
     current_pid = 1003
     with pytest.raises(MpsError, match="retained") as join_error:
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
     assert "terminate_client 7000 101" not in str(join_error.value)
     assert "terminate_client 8000 202" not in str(join_error.value)
 
@@ -594,10 +625,10 @@ def test_dirty_owner_blocks_join_without_interrupting_clean_coowner(
 def test_last_owner_preserves_unknown_clients_instead_of_quitting(short_root):
     client = FakeControlClient()
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.set_clients(manager.paths.pipe_dir, {7000: [909]})
 
-    with pytest.raises(MpsDirtyStateError, match="releasing the last owner"):
+    with pytest.raises(MpsDirtyStateError, match="unattributable"):
         manager.release(lease)
 
     assert lease.owner_fd == -1
@@ -644,7 +675,7 @@ def test_dirty_coowner_does_not_block_clean_owner_exit(short_root):
         owners={888: True},
     )
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     client.held_owner_pids.discard(888)
 
     manager.release(lease)
@@ -656,7 +687,7 @@ def test_dirty_coowner_does_not_block_clean_owner_exit(short_root):
     assert client.daemon_process_alive(lease.daemon_pid)
 
     with pytest.raises(MpsError, match="dirty state"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
 
 def test_corrupt_coowner_does_not_block_clean_owner_exit(short_root):
@@ -668,7 +699,7 @@ def test_corrupt_coowner_does_not_block_clean_owner_exit(short_root):
         owners={888: True},
     )
     manager = make_manager(short_root, client)
-    lease = manager.acquire()
+    lease = manager.acquire({"worker": "owner-worker"})
     corrupt_owner = paths.owners_dir / "888"
     corrupt_owner.write_text("broken\n")
 
@@ -681,7 +712,7 @@ def test_corrupt_coowner_does_not_block_clean_owner_exit(short_root):
     assert client.daemon_process_alive(lease.daemon_pid)
 
     with pytest.raises(MpsError, match="invalid status"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
 
 def test_daemon_refusing_quit_persists_dirty_state(short_root):
@@ -700,7 +731,7 @@ def test_daemon_refusing_quit_persists_dirty_state(short_root):
     assert client.unsafe_daemon_signals == []
 
     with pytest.raises(MpsError, match="retained"):
-        make_manager(short_root, client).acquire()
+        make_manager(short_root, client).acquire({"worker": "owner-worker"})
 
 
 def test_quit_control_error_persists_dirty_and_releases_authority(short_root):
@@ -733,7 +764,13 @@ def test_release_requires_the_acquisition_token(short_root, tmp_path):
 
     try:
         with pytest.raises(MpsError, match="live MPS lease"):
-            manager.release(MpsLease(daemon_pid=123, owner_fd=foreign_fd))
+            manager.release(
+                MpsLease(
+                    daemon_pid=123,
+                    owner_fd=foreign_fd,
+                    client_tokens={"worker": "owner-worker"},
+                )
+            )
     finally:
         os.close(foreign_fd)
 

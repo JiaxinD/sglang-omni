@@ -119,3 +119,18 @@ def test_owner_liveness_comes_from_the_kernel_held_lease(tmp_path):
         fcntl.flock(owner, fcntl.LOCK_UN)
 
     assert not client.owner_lease_held(lease_file)
+
+
+def test_client_token_is_read_from_the_current_client_environment(monkeypatch):
+    client = control.SubprocessMpsControlClient()
+    environ = (
+        b"PATH=/usr/bin\0"
+        + f"{control.MPS_CLIENT_TOKEN_ENV}=owner-worker".encode()
+        + b"\0"
+    )
+
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: environ)
+    assert client.client_token(123) == "owner-worker"
+
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: b"PATH=/usr/bin\0")
+    assert client.client_token(123) is None

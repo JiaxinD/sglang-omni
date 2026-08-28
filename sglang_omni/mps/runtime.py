@@ -7,6 +7,7 @@ import asyncio
 import getpass
 import logging
 import os
+import secrets
 import shutil
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from sglang_omni.mps.decision import (
 )
 from sglang_omni.mps.devices import MpsPhysicalDevice
 from sglang_omni.mps.manager import (
+    MPS_CLIENT_TOKEN_ENV,
     MpsControlClient,
     MpsDirtyStateError,
     MpsError,
@@ -287,6 +289,10 @@ class MpsPipelineRuntime:
             for gpu_uuid, plan in plans.items()
             for name in plan.client_process_names
         }
+        self._client_tokens = {
+            process_name: secrets.token_hex(16)
+            for process_name in self._client_uuid
+        }
 
     @property
     def has_leases(self) -> bool:
@@ -358,7 +364,7 @@ class MpsPipelineRuntime:
         acquired: list[str] = []
         try:
             for gpu_uuid, manager in self.managers.items():
-                lease = manager.acquire()
+                lease = manager.acquire(self._tokens_on(gpu_uuid))
                 self._leases[gpu_uuid] = lease
                 acquired.append(gpu_uuid)
                 logger.info(
@@ -419,6 +425,12 @@ class MpsPipelineRuntime:
             if physical == gpu_uuid
         ]
 
+    def _tokens_on(self, gpu_uuid: str) -> dict[str, str]:
+        return {
+            name: self._client_tokens[name]
+            for name in self._names_on(gpu_uuid)
+        }
+
     def env_for_process(self, process_name: str) -> dict[str, str]:
         gpu_uuid = self._client_uuid.get(process_name)
         if gpu_uuid is None:
@@ -426,17 +438,16 @@ class MpsPipelineRuntime:
         env = self.managers[gpu_uuid].env_for_stage()
         # UUID visibility makes the physical device local ordinal zero.
         env["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] = "true"
+        env[MPS_CLIENT_TOKEN_ENV] = self._client_tokens[process_name]
         return env
 
-    async def verify(self, pids_by_process_name: dict[str, int]) -> None:
+    async def verify(self) -> None:
         async with self._operation_lock:
-            await self._run_blocking(self._verify, pids_by_process_name)
+            await self._run_blocking(self._verify)
 
-    def _verify(self, pids_by_process_name: dict[str, int]) -> None:
+    def _verify(self) -> None:
         for gpu_uuid, lease in self._leases.items():
-            expected = self._pids_on(gpu_uuid, pids_by_process_name)
-            if expected:
-                self.managers[gpu_uuid].verify(lease, expected)
+            self.managers[gpu_uuid].verify(lease)
 
     async def probe_failures(self) -> dict[str, str]:
         async with self._operation_lock:
@@ -449,17 +460,6 @@ class MpsPipelineRuntime:
             if reason is not None:
                 failures[gpu_uuid] = reason
         return failures
-
-    def _pids_on(
-        self,
-        gpu_uuid: str,
-        pids_by_process_name: dict[str, int],
-    ) -> set[int]:
-        return {
-            pid
-            for name, pid in pids_by_process_name.items()
-            if self._client_uuid.get(name) == gpu_uuid
-        }
 
     async def close(
         self,

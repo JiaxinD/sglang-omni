@@ -560,10 +560,7 @@ class MultiProcessPipelineRunner:
                     )
 
             if self._mps is not None:
-                pids_by_process: dict[str, int] = {}
-                for group in self._groups:
-                    pids_by_process.update(group.process_pids())
-                await self._mps.verify(pids_by_process)
+                await self._mps.verify()
 
             for group in self._groups:
                 for stage_name, endpoint in group.stage_control_endpoints.items():

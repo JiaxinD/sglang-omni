@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from sglang_omni.mps.manager import (
+    MPS_CLIENT_TOKEN_ENV,
     MpsClientRef,
     MpsControlError,
     MpsDaemonNotStartedError,
@@ -151,17 +152,27 @@ class SubprocessMpsControlClient:
         except (OSError, IndexError) as exc:
             raise MpsControlError(f"cannot inspect daemon pid {pid}: {exc}") from exc
 
-    def parent_of(self, pid: int) -> int | None:
+    def client_token(self, pid: int) -> str | None:
         try:
-            stat_text = Path(f"/proc/{pid}/stat").read_text()
+            entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise MpsControlError(f"cannot inspect client pid {pid}: {exc}") from exc
+        prefix = f"{MPS_CLIENT_TOKEN_ENV}=".encode()
+        values = [entry[len(prefix) :] for entry in entries if entry.startswith(prefix)]
+        if not values:
+            return None
+        if len(values) != 1 or not values[0]:
+            raise MpsControlError(
+                f"client pid {pid} has malformed {MPS_CLIENT_TOKEN_ENV}"
+            )
         try:
-            return int(stat_text.rsplit(")", 1)[1].split()[1])
-        except (IndexError, ValueError) as exc:
-            raise MpsControlError(f"malformed /proc/{pid}/stat") from exc
+            return values[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise MpsControlError(
+                f"client pid {pid} has non-ASCII {MPS_CLIENT_TOKEN_ENV}"
+            ) from exc
 
     def owner_lease_held(self, lease_file: Path) -> bool:
         try:

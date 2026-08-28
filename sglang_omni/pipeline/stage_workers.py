@@ -257,14 +257,6 @@ class StageGroup:
     def processes(self) -> list[multiprocessing.Process]:
         return list(self._processes)
 
-    def process_pids(self) -> dict[str, int]:
-        """Map process_name to spawned PID, aligned with process_specs."""
-        return {
-            spec.process_name: proc.pid
-            for spec, proc in zip(self.process_specs, self._processes)
-            if proc.pid is not None
-        }
-
     def process_start_attempts(self) -> set[str]:
         """Return process names whose ``Process.start()`` was called."""
         return set(self._process_start_attempts)
