@@ -252,9 +252,7 @@ class MpsManager:
                 f"cannot read owner lease status {owner_file}: {exc}"
             ) from exc
         if status not in _OWNER_STATUSES:
-            raise MpsError(
-                f"owner lease {owner_file} has invalid status {status!r}"
-            )
+            raise MpsError(f"owner lease {owner_file} has invalid status {status!r}")
         return status
 
     def _owner_files(self) -> dict[int, Path]:
@@ -329,14 +327,10 @@ class MpsManager:
             return f"printf '%s\\n' {shlex.quote(value)} | {control}"
 
         actionable_clients = (
-            None
-            if clients is None
-            else clients & (owned_clients or set())
+            None if clients is None else clients & (owned_clients or set())
         )
         foreign_clients = (
-            set()
-            if clients is None
-            else clients - (owned_clients or set())
+            set() if clients is None else clients - (owned_clients or set())
         )
 
         if actionable_clients is None:
@@ -356,9 +350,7 @@ class MpsManager:
                 "Run only these commands for clients proven to belong to this "
                 "owner before any forced OS signal:\n  "
                 + "\n  ".join(
-                    command(
-                        f"terminate_client {client.server_pid} {client.client_pid}"
-                    )
+                    command(f"terminate_client {client.server_pid} {client.client_pid}")
                     for client in sorted(actionable_clients)
                 )
             )
@@ -415,8 +407,7 @@ class MpsManager:
 
         self._require_live_lease(lease)
         expected_by_token = {
-            token: process_name
-            for process_name, token in lease.client_tokens.items()
+            token: process_name for process_name, token in lease.client_tokens.items()
         }
         missing = set(lease.client_tokens)
         last_error: MpsControlError | None = None
@@ -457,8 +448,7 @@ class MpsManager:
             return f"daemon identity query failed: {exc}"
         if daemon_pid != lease.daemon_pid:
             return (
-                f"daemon identity changed from {lease.daemon_pid} "
-                f"to {daemon_pid}"
+                f"daemon identity changed from {lease.daemon_pid} " f"to {daemon_pid}"
             )
         try:
             self.client.snapshot(self.paths.pipe_dir)
@@ -546,9 +536,7 @@ class MpsManager:
                 )
 
         remaining_owner_pids = {
-            pid
-            for pid, path in self._owner_files().items()
-            if path != self._owner_file
+            pid for pid, path in self._owner_files().items() if path != self._owner_file
         }
 
         if remaining_owner_pids:
@@ -615,9 +603,7 @@ class MpsManager:
         owned_clients: set[MpsClientRef] | None = None
         query_error: MpsControlError | None = None
         try:
-            observed_daemon_pid = self.client.read_daemon_identity(
-                self.paths.pipe_dir
-            )
+            observed_daemon_pid = self.client.read_daemon_identity(self.paths.pipe_dir)
             if clients is None:
                 clients = self.client.snapshot(self.paths.pipe_dir)
             owned_clients, _, _ = self._classify_clients(clients, lease)

@@ -128,9 +128,7 @@ class SubprocessMpsControlClient:
         clients: set[MpsClientRef] = set()
         for server_pid in servers:
             command = f"get_client_list {server_pid}"
-            client_pids = _parse_pid_list(
-                self._query(pipe_dir, command), command
-            )
+            client_pids = _parse_pid_list(self._query(pipe_dir, command), command)
             for client_pid in client_pids:
                 clients.add(MpsClientRef(server_pid, client_pid))
         return clients

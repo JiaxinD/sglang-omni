@@ -8,10 +8,7 @@ import uuid
 from enum import IntEnum
 from types import ModuleType, SimpleNamespace
 
-import pytest
-
 from sglang_omni.mps.devices import NvmlDeviceInfo
-
 
 GPU_A = "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000001"
 GPU_B = "GPU-aaaaaaaa-bbbb-cccc-dddd-000000000007"

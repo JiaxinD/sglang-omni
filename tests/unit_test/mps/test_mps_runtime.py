@@ -718,9 +718,7 @@ async def test_start_attempts_are_classified_per_physical_gpu(short_root):
         paths.owners_dir.mkdir()
         daemon_pid = 9000 + index
         owner_pid = 8000 + index
-        (paths.pipe_dir / "nvidia-cuda-mps-control.pid").write_text(
-            str(daemon_pid)
-        )
+        (paths.pipe_dir / "nvidia-cuda-mps-control.pid").write_text(str(daemon_pid))
         (paths.owners_dir / str(owner_pid)).write_text("active\n")
         client.daemons[str(paths.pipe_dir)] = daemon_pid
         client.alive_pids.add(daemon_pid)
@@ -735,17 +733,15 @@ async def test_start_attempts_are_classified_per_physical_gpu(short_root):
         await runtime.close(process_start_attempts={"attempted"})
 
     current_owner = str(os.getpid())
-    assert (attempted.paths.owners_dir / current_owner).read_text() == (
-        "retained\n"
-    )
+    assert (attempted.paths.owners_dir / current_owner).read_text() == ("retained\n")
     assert not (not_started.paths.owners_dir / current_owner).exists()
     for index, manager in enumerate((attempted, not_started)):
         assert (manager.paths.owners_dir / str(8000 + index)).read_text() == (
             "active\n"
         )
-        assert client.snapshot(manager.paths.pipe_dir) == foreign_clients[
-            manager.gpu_uuid
-        ]
+        assert (
+            client.snapshot(manager.paths.pipe_dir) == foreign_clients[manager.gpu_uuid]
+        )
         assert client.daemon_process_alive(9000 + index)
 
     later_lease = not_started.acquire({"later": "later-owner"})

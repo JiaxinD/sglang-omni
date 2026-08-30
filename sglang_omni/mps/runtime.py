@@ -76,8 +76,7 @@ def _resolve_physical_plans(
         return {}
 
     placement_ordinals_by_process: dict[str, set[int]] = {
-        fact.process_name: set(fact.placement_gpu_ids)
-        for fact in potential_clients
+        fact.process_name: set(fact.placement_gpu_ids) for fact in potential_clients
     }
 
     gpu_ids = tuple(
@@ -123,9 +122,7 @@ def _resolve_physical_plans(
         if len(physical_uuids) > 1:
             unresolved = sorted(process_gpu_ids - resolved.keys())
             unresolved_detail = (
-                f"; unresolved CUDA ordinals: {unresolved}"
-                if unresolved
-                else ""
+                f"; unresolved CUDA ordinals: {unresolved}" if unresolved else ""
             )
             raise MpsError(
                 f"process {process_name!r} resolves CUDA ordinals to multiple "
@@ -141,8 +138,7 @@ def _resolve_physical_plans(
                 "mps=on could not resolve the physical GPU mapping: " + detail
             )
         logger.warning(
-            "MPS auto: physical GPU mapping is incomplete (%s); running "
-            "without MPS",
+            "MPS auto: physical GPU mapping is incomplete (%s); running " "without MPS",
             detail,
         )
         return {}
@@ -156,10 +152,7 @@ def _resolve_physical_plans(
             blocked.setdefault(gpu_uuid, []).append(reason)
 
     for fact in potential_clients:
-        placement_uuids = {
-            uuid_for[gpu_id]
-            for gpu_id in fact.placement_gpu_ids
-        }
+        placement_uuids = {uuid_for[gpu_id] for gpu_id in fact.placement_gpu_ids}
         (placement_uuid,) = placement_uuids
         names = clients_by_uuid.setdefault(placement_uuid, [])
         if fact.process_name not in names:
@@ -284,8 +277,7 @@ class MpsPipelineRuntime:
             for name in plan.client_process_names
         }
         self._client_tokens = {
-            process_name: secrets.token_hex(16)
-            for process_name in self._client_uuid
+            process_name: secrets.token_hex(16) for process_name in self._client_uuid
         }
 
     @property
@@ -303,9 +295,7 @@ class MpsPipelineRuntime:
         state_root: Path | None = None,
     ) -> MpsPipelineRuntime | None:
         if mode not in MPS_MODES:
-            raise MpsDecisionError(
-                f"invalid mps mode {mode!r}; expected {MPS_MODES}"
-            )
+            raise MpsDecisionError(f"invalid mps mode {mode!r}; expected {MPS_MODES}")
         if mode == "off":
             return None
         process_specs = list(process_specs)
@@ -402,9 +392,7 @@ class MpsPipelineRuntime:
             self._mode,
             {
                 gpu_uuid: {
-                    "logical_gpus": list(
-                        self._plans[gpu_uuid].logical_gpu_ids
-                    ),
+                    "logical_gpus": list(self._plans[gpu_uuid].logical_gpu_ids),
                     "daemon_pid": self._leases[gpu_uuid].daemon_pid,
                     "clients": sorted(self._names_on(gpu_uuid)),
                 }
@@ -414,16 +402,11 @@ class MpsPipelineRuntime:
 
     def _names_on(self, gpu_uuid: str) -> list[str]:
         return [
-            name
-            for name, physical in self._client_uuid.items()
-            if physical == gpu_uuid
+            name for name, physical in self._client_uuid.items() if physical == gpu_uuid
         ]
 
     def _tokens_on(self, gpu_uuid: str) -> dict[str, str]:
-        return {
-            name: self._client_tokens[name]
-            for name in self._names_on(gpu_uuid)
-        }
+        return {name: self._client_tokens[name] for name in self._names_on(gpu_uuid)}
 
     def env_for_process(self, process_name: str) -> dict[str, str]:
         gpu_uuid = self._client_uuid.get(process_name)
@@ -478,9 +461,7 @@ class MpsPipelineRuntime:
         for gpu_uuid in reversed(list(self._leases)):
             clients_could_have_attached = (
                 process_start_attempts is None
-                or not process_start_attempts.isdisjoint(
-                    self._names_on(gpu_uuid)
-                )
+                or not process_start_attempts.isdisjoint(self._names_on(gpu_uuid))
             )
             error = self._release_one(
                 gpu_uuid,
@@ -491,8 +472,7 @@ class MpsPipelineRuntime:
                 errors.append((gpu_uuid, error))
         if errors:
             details = "; ".join(
-                f"physical GPU {gpu_uuid}: {error}"
-                for gpu_uuid, error in errors
+                f"physical GPU {gpu_uuid}: {error}" for gpu_uuid, error in errors
             )
             error_type = (
                 MpsDirtyStateError
@@ -546,9 +526,7 @@ class MpsPipelineRuntime:
         except MpsError as exc:
             error = exc
             if suppress_errors:
-                logger.error(
-                    "MPS rollback incomplete on GPU %s: %s", gpu_uuid, exc
-                )
+                logger.error("MPS rollback incomplete on GPU %s: %s", gpu_uuid, exc)
         finally:
             # A released owner fd means the token no longer carries cleanup
             # authority, even when later daemon cleanup failed.
@@ -588,9 +566,7 @@ def create_for_pipeline(
     if not current_platform.is_cuda():
         if mode == "on":
             raise MpsError("mps=on requires an NVIDIA CUDA platform")
-        logger.warning(
-            "MPS auto: platform is not NVIDIA CUDA; running without MPS"
-        )
+        logger.warning("MPS auto: platform is not NVIDIA CUDA; running without MPS")
         return None
 
     if shutil.which("nvidia-cuda-mps-control") is None:

@@ -24,7 +24,6 @@ from sglang_omni.pipeline.stage_workers import (
 )
 from tests.unit_test.mps.test_mps_manager import FakeControlClient
 
-
 _FACTORY = f"{__name__}.unused_factory"
 
 
@@ -81,9 +80,7 @@ def test_mps_overlay_is_visible_only_during_spawn(monkeypatch):
 
 
 def test_no_mps_overlay_keeps_existing_stage_default_behavior(monkeypatch):
-    spec = _process_spec(
-        _launch_stage(env_defaults={"WORKER_DEFAULT": "stage-value"})
-    )
+    spec = _process_spec(_launch_stage(env_defaults={"WORKER_DEFAULT": "stage-value"}))
     monkeypatch.delenv("WORKER_DEFAULT", raising=False)
 
     with _patched_spawn_env(spec):

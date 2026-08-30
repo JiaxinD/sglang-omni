@@ -120,9 +120,7 @@ class NvmlDeviceInfo:
                 handle = pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid.encode())
                 nvml_uuid = pynvml.nvmlDeviceGetUUID(handle)
                 physical_uuid = (
-                    nvml_uuid.decode()
-                    if isinstance(nvml_uuid, bytes)
-                    else nvml_uuid
+                    nvml_uuid.decode() if isinstance(nvml_uuid, bytes) else nvml_uuid
                 )
                 if physical_uuid.startswith("MIG-"):
                     devices[ordinal] = MpsPhysicalDevice(

@@ -69,6 +69,7 @@ class MpsGpuPaths:
     def control_socket(self) -> Path:
         return self.pipe_dir / "control"
 
+
 def _ensure_private_state_root(root: Path) -> None:
     """Create a private state root, or validate an existing caller path."""
 
