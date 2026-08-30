@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from sglang_omni.pipeline.mp_runner import (
     _resolve_same_process_targets,
 )
 from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
+from sglang_omni.pipeline.stage_workers import _prepare_accelerator_environment
 from sglang_omni.platforms.cuda import CUDAOmniPlatform
 from tests.unit_test.fixtures.pipeline_fakes import FakeMpContext, fake_factory_path
 from tests.unit_test.pipeline.helpers import stage
@@ -246,6 +248,20 @@ def test_tp_specs_carry_typed_gpu_id_to_single_visible_device_child(
     assert [spec.gpu_id for spec in specs] == [2, 4]
     assert [spec.typed_kwargs["gpu_id"] for spec in specs] == [4, 4]
     assert all("gpu_id" not in spec.factory_kwargs for spec in specs)
+
+    # The parent specs above prove nothing about normalization: only the child
+    # narrows the device, and factory_kwargs must survive that narrowing.
+    monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4")
+    for spec in specs:
+        spec.factory_kwargs["max_new_tokens"] = 2048
+        spec.factory_kwargs["gpu_id"] = 4
+        _prepare_accelerator_environment(spec, logging.getLogger(__name__))
+
+    assert [spec.gpu_id for spec in specs] == [0, 0]
+    assert [spec.typed_kwargs["gpu_id"] for spec in specs] == [0, 0]
+    assert [spec.factory_kwargs["gpu_id"] for spec in specs] == [4, 4]
+    assert all(spec.factory_kwargs["max_new_tokens"] == 2048 for spec in specs)
 
 
 def test_runner_specs_wire_same_process_targets_only_for_local_edges() -> None:
