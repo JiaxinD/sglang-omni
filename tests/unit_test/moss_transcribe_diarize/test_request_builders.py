@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import wave
 
 import numpy as np
@@ -202,6 +204,68 @@ def _request_builder(
         audio_encoder_service=audio_encoder_service,
     )
     return request_builder
+
+
+def _scheduler_adapters(processor: FakeProcessor | None = None):
+    processor = processor or FakeProcessor()
+    return make_moss_transcribe_diarize_scheduler_adapters(
+        processor=processor,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=32,
+        context_length=TEST_CONTEXT_LENGTH,
+    )
+
+
+def test_result_adapter_omits_termination_for_normal_completion() -> None:
+    request_builder, result_adapter = _scheduler_adapters()
+    data = request_builder(_payload())
+
+    result = result_adapter(data)
+
+    assert "termination" not in result.data
+
+
+def test_result_adapter_logs_bounded_diagnostics_without_public_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_builder, result_adapter = _scheduler_adapters()
+    data = request_builder(_payload())
+    data.output_ids = [10, 11, 12]
+    data.no_progress_termination_reason = "moss_td_no_progress_marker_loop"
+    data.no_progress_completed_segments = 41
+    data.no_progress_marker_only_segments = 32
+    data.no_progress_repeated_segments = 0
+    data.no_progress_detected_completion_tokens = 3
+    data.no_progress_marker_limit = 32
+    data.no_progress_repeat_limit = 3
+    data.no_progress_response_mode = "buffered"
+
+    with caplog.at_level("WARNING"):
+        result = result_adapter(data)
+
+    assert "termination" not in result.data
+    record_line = next(
+        message
+        for message in caplog.messages
+        if message.startswith("MOSS_TD_TERMINATION_JSON ")
+    )
+    record = json.loads(record_line.removeprefix("MOSS_TD_TERMINATION_JSON "))
+    assert record == {
+        "schema_version": 1,
+        "server_request_id": "req-1",
+        "output_sha256": hashlib.sha256(result.data["text"].encode()).hexdigest(),
+        "reason": "moss_td_no_progress_marker_loop",
+        "completed_segments": 41,
+        "marker_only_segments": 32,
+        "repeated_segments": 0,
+        "detected_completion_tokens": 3,
+        "raw_completion_tokens": 3,
+        "applied_max_new_tokens": 32,
+        "marker_limit": 32,
+        "repeat_limit": 3,
+        "response_mode": "buffered",
+        "complete_boundary": True,
+    }
 
 
 def test_streamlined_request_builder_preserves_exact_input_ids() -> None:

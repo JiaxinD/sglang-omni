@@ -50,6 +50,8 @@ def _make_moss_engine_builder() -> MossTranscribeDiarizeEngineBuilder:
         request_build_max_workers=8,
         request_build_max_pending=16,
         stream_emit_interval_s=0.05,
+        buffered_no_progress_marker_segments=0,
+        buffered_no_progress_repeat_segments=0,
     )
 
 
@@ -79,6 +81,8 @@ def test_moss_transcribe_diarize_config_uses_single_batched_stage() -> None:
     assert factory.prefill_coalesce_when_idle is True
     assert factory.prefill_coalesce_requires_pending_builds is True
     assert factory.prefill_coalesce_after_builds_during_decode is True
+    assert factory.buffered_no_progress_marker_segments == 0
+    assert factory.buffered_no_progress_repeat_segments == 0
     assert (
         PIPELINE_CONFIG_REGISTRY.get_config(
             "MossTranscribeDiarizeForConditionalGeneration"
@@ -213,6 +217,8 @@ def test_moss_transcribe_diarize_stage_reserves_encoder_headroom() -> None:
     assert signature.parameters["mm_embedding_cache_size_bytes"].default == 0
     assert signature.parameters["encoder_chunk_buckets"].default is None
     assert signature.parameters["encoder_torch_compile"].default is False
+    assert signature.parameters["buffered_no_progress_marker_segments"].default == 0
+    assert signature.parameters["buffered_no_progress_repeat_segments"].default == 0
 
 
 def test_compile_encoder_sets_runner_and_warms_each_bucket(
