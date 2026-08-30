@@ -94,9 +94,7 @@ def test_qwen3_tts_replica_launch_specs_keep_deterministic_factory_kwargs(
         model_path="model",
         enable_deterministic_inference=True,
         endpoints=EndpointsConfig(base_path=str(tmp_path)),
-        processes={
-            "pipeline": ProcessConfig(num_replicas=2, replica_devices=[0, 1])
-        },
+        processes={"pipeline": ProcessConfig(num_replicas=2, replica_devices=[0, 1])},
     )
     prep = prepare_pipeline_runtime(config)
     try:
@@ -112,17 +110,13 @@ def test_qwen3_tts_replica_launch_specs_keep_deterministic_factory_kwargs(
     finally:
         prep.runtime_dir.close()
 
-    specs = {
-        spec.stage_name: spec
-        for group in groups
-        for spec in group.specs
-    }
+    specs = {spec.stage_name: spec for group in groups for spec in group.specs}
     for replica_id in range(2):
         suffix = f"@r{replica_id}"
         assert specs[f"preprocessing{suffix}"].factory_kwargs["max_concurrency"] == 1
-        assert specs[f"tts_engine{suffix}"].factory_kwargs[
-            "server_args_overrides"
-        ]["enable_deterministic_inference"]
+        assert specs[f"tts_engine{suffix}"].factory_kwargs["server_args_overrides"][
+            "enable_deterministic_inference"
+        ]
         vocoder_kwargs = specs[f"vocoder{suffix}"].factory_kwargs
         assert vocoder_kwargs["enable_deterministic_inference"]
         assert vocoder_kwargs["initial_cuda_graph"] is False
