@@ -133,6 +133,14 @@ class SubprocessMpsControlClient:
                 clients.add(MpsClientRef(server_pid, client_pid))
         return clients
 
+    def terminate_client(self, pipe_dir: Path, client: MpsClientRef) -> None:
+        command = f"terminate_client {client.server_pid} {client.client_pid}"
+        output = self._query(pipe_dir, command).strip()
+        if output != "0":
+            raise MpsControlError(
+                f"{_CONTROL_BINARY} {command!r} returned {output!r}, expected '0'"
+            )
+
     def quit_daemon(self, pipe_dir: Path) -> None:
         self._query(pipe_dir, "quit")
 

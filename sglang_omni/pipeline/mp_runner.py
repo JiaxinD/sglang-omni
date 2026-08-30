@@ -724,8 +724,9 @@ class MultiProcessPipelineRunner:
             logger.warning("shutdown_stages error: %s", e)
 
         # Shutdown all groups
+        before_signal = self._retire_mps_clients if self._mps is not None else None
         await asyncio.gather(
-            *(g.shutdown() for g in self._groups),
+            *(g.shutdown(before_signal=before_signal) for g in self._groups),
             return_exceptions=True,
         )
 
@@ -753,8 +754,10 @@ class MultiProcessPipelineRunner:
     async def _cleanup_on_failure(self) -> None:
         """Best-effort cleanup after a failed start()."""
         for group in self._groups:
-            for p in group.processes:
+            for spec, p in zip(group.process_specs, group.processes):
                 if p.is_alive():
+                    if self._mps is not None:
+                        await self._retire_mps_clients(spec.process_name)
                     p.terminate()
             for p in group.processes:
                 p.join(timeout=5)
@@ -774,6 +777,28 @@ class MultiProcessPipelineRunner:
             self._coordinator = None
 
         self._close_runtime_dir()
+
+    async def _retire_mps_clients(self, process_name: str) -> None:
+        """Destroy a stuck process's CUDA contexts before any OS signal."""
+
+        if self._mps is None:
+            return
+        try:
+            retired = await self._mps.retire_process_clients(process_name)
+        except Exception as exc:
+            logger.error(
+                "Could not retire MPS clients for %s before signalling it; a "
+                "colocated serve sharing this daemon may be affected: %s",
+                process_name,
+                exc,
+            )
+            return
+        if retired:
+            logger.warning(
+                "Retired MPS clients %s for stuck process %s before signalling it",
+                sorted(retired),
+                process_name,
+            )
 
     async def _close_mps(
         self,

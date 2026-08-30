@@ -132,6 +132,7 @@ class _FakeGroup:
         self.shutdown_gate = shutdown_gate
         self.processes = [_FakeProcess(events)] if direct_process else []
         self.spawn_env = object()
+        self.before_signal = object()
         self.dead = False
         self.process_specs = [
             StageWorkerProcessSpec(
@@ -168,7 +169,8 @@ class _FakeGroup:
     def process_start_attempts(self) -> set[str]:
         return {"pipeline"} if "spawn" in self.events else set()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, before_signal=None) -> None:
+        self.before_signal = before_signal
         self.events.append("process shutdown")
         if self.shutdown_gate is not None:
             entered, release = self.shutdown_gate
@@ -197,6 +199,7 @@ class _FakeMps:
         self.started = False
         self.verified = False
         self.close_process_start_attempts: set[str] | None = None
+        self.retired: list[str] = []
 
     @property
     def has_leases(self) -> bool:
@@ -214,6 +217,11 @@ class _FakeMps:
     async def verify(self) -> None:
         self.events.append("MPS verify")
         self.verified = True
+
+    async def retire_process_clients(self, process_name: str) -> set:
+        self.retired.append(process_name)
+        self.events.append(f"MPS retire {process_name}")
+        return {process_name}
 
     async def probe_failures(self) -> dict[str, str]:
         if self.probe_gate is not None:
@@ -625,3 +633,91 @@ async def test_stop_cancelled_before_mps_close_still_releases_the_lease(
 
     assert not fake.has_leases
     assert "MPS close" in events
+
+
+class _StuckProcess:
+    """A stage process that never exits on its own."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.pid = 4321
+        self.name = "stuck"
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout=None) -> None:
+        del timeout
+
+    def terminate(self) -> None:
+        self.events.append("SIGTERM")
+        self._alive = False
+
+    def kill(self) -> None:
+        self.events.append("SIGKILL")
+        self._alive = False
+
+
+@pytest.mark.asyncio
+async def test_stuck_process_is_retired_from_mps_before_any_signal():
+    """Signalling a client with work in flight breaks the shared MPS server.
+
+    A colocated serve stays attached to the same daemon, so the stuck process
+    must lose its CUDA contexts through the control daemon first.
+    """
+
+    events: list[str] = []
+    spec = StageWorkerProcessSpec(
+        process_name="pipeline",
+        stage_specs=[
+            StageLaunchConfig(
+                stage_name="preprocessing",
+                factory=f"{__name__}.noop_factory",
+                placement_gpu_id=0,
+                gpu_id=0,
+                recv_endpoint="ipc://preprocessing",
+            )
+        ],
+    )
+    group = StageGroup("group", [spec])
+    group._processes = [_StuckProcess(events)]
+
+    async def before_signal(process_name: str) -> None:
+        events.append(f"retire {process_name}")
+
+    await group.shutdown(join_timeout=0, before_signal=before_signal)
+
+    assert "SIGTERM" in events
+    assert events.index("retire pipeline") < events.index("SIGTERM")
+
+
+@pytest.mark.asyncio
+async def test_runner_supplies_the_retirement_hook_only_with_mps(
+    short_base,
+    monkeypatch,
+):
+    events: list[str] = []
+    group = _FakeGroup(events)
+    fake = _FakeMps(events)
+    _patch_runner(monkeypatch, events, group, fake)
+
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
+    await runner.start()
+    await runner.stop()
+    assert group.before_signal is not None
+
+    events.clear()
+    off_group = _FakeGroup(events)
+    _patch_runner(monkeypatch, events, off_group, None)
+    monkeypatch.setattr(
+        mp_runner,
+        "create_for_pipeline",
+        lambda mode, specs: None,
+    )
+    off_runner = mp_runner.MultiProcessPipelineRunner(
+        _make_config(short_base, mps="off")
+    )
+    await off_runner.start()
+    await off_runner.stop()
+    assert off_group.before_signal is None

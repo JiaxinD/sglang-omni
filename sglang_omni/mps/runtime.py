@@ -25,6 +25,7 @@ from sglang_omni.mps.decision import (
 from sglang_omni.mps.devices import MpsPhysicalDevice
 from sglang_omni.mps.manager import (
     MPS_CLIENT_TOKEN_ENV,
+    MpsClientRef,
     MpsControlClient,
     MpsDirtyStateError,
     MpsError,
@@ -425,6 +426,22 @@ class MpsPipelineRuntime:
     def _verify(self) -> None:
         for gpu_uuid, lease in self._leases.items():
             self.managers[gpu_uuid].verify(lease)
+
+    async def retire_process_clients(self, process_name: str) -> set[MpsClientRef]:
+        """Retire one process's MPS clients before the runner signals it."""
+
+        async with self._operation_lock:
+            return await self._run_blocking(
+                self._retire_process_clients,
+                process_name,
+            )
+
+    def _retire_process_clients(self, process_name: str) -> set[MpsClientRef]:
+        gpu_uuid = self._client_uuid.get(process_name)
+        lease = self._leases.get(gpu_uuid) if gpu_uuid is not None else None
+        if lease is None:
+            return set()
+        return self.managers[gpu_uuid].retire_clients_for(lease, process_name)
 
     async def probe_failures(self) -> dict[str, str]:
         async with self._operation_lock:

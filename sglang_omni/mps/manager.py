@@ -75,6 +75,8 @@ class MpsControlClient(Protocol):
 
     def snapshot(self, pipe_dir: Path) -> set[MpsClientRef]: ...
 
+    def terminate_client(self, pipe_dir: Path, client: MpsClientRef) -> None: ...
+
     def quit_daemon(self, pipe_dir: Path) -> None: ...
 
     def daemon_process_alive(self, pid: int) -> bool: ...
@@ -437,6 +439,32 @@ class MpsManager:
                     f"preserved for inspection: {self.paths.state_dir}"
                 )
             time.sleep(self.poll_interval)
+
+    def retire_clients_for(
+        self,
+        lease: MpsLease,
+        process_name: str,
+    ) -> set[MpsClientRef]:
+        """Destroy one managed process's CUDA contexts through the daemon.
+
+        # Note (Jiaxin Deng): NVIDIA documents signalling a client that still has
+        # work in flight as leaving the MPS server and its other clients in an
+        # undefined state, so our own SIGTERM escalation must not reach a client
+        # that a colocated serve is sharing a daemon with.
+        """
+
+        self._require_live_lease(lease)
+        token = lease.client_tokens.get(process_name)
+        if token is None:
+            return set()
+        targets = {
+            client
+            for client in self.client.snapshot(self.paths.pipe_dir)
+            if self.client.client_token(client.client_pid) == token
+        }
+        for client in sorted(targets):
+            self.client.terminate_client(self.paths.pipe_dir, client)
+        return targets
 
     def probe(self, lease: MpsLease) -> str | None:
         """Return the first failed health proof, or ``None`` when healthy."""

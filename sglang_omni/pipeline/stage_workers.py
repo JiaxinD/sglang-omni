@@ -10,7 +10,7 @@ import os
 import queue
 import sys
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
@@ -367,9 +367,13 @@ class StageGroup:
             ):
                 _close_queue(q)
 
-    async def shutdown(self, join_timeout: float = 30.0) -> None:
+    async def shutdown(
+        self,
+        join_timeout: float = 30.0,
+        before_signal: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         try:
-            for p in self._processes:
+            for spec, p in zip(self.process_specs, self._processes):
                 p.join(timeout=join_timeout)
                 if p.is_alive():
                     logger.warning(
@@ -377,6 +381,8 @@ class StageGroup:
                         p.name,
                         p.pid,
                     )
+                    if before_signal is not None:
+                        await before_signal(spec.process_name)
                     p.terminate()
                     p.join(timeout=5)
                     if p.is_alive():

@@ -42,6 +42,8 @@ class FakeControlClient:
         self.quit_error: str | None = None
         self.quit_works = True
         self.unsafe_daemon_signals: list[tuple[int, bool]] = []
+        self.terminated: list[MpsClientRef] = []
+        self.terminate_error: str | None = None
 
     def start_daemon(self, pipe_dir, log_dir, gpu_uuid):
         del log_dir, gpu_uuid
@@ -80,6 +82,13 @@ class FakeControlClient:
             for server_pid, client_pids in clients.items()
             for client_pid in client_pids
         }
+
+    def terminate_client(self, pipe_dir, client):
+        if self.terminate_error is not None:
+            raise MpsControlError(self.terminate_error)
+        self.terminated.append(client)
+        remaining = self.snapshots.get(str(pipe_dir), set()) - {client}
+        self.snapshots[str(pipe_dir)] = remaining
 
     def quit_daemon(self, pipe_dir):
         if self.quit_error is not None:
@@ -790,3 +799,31 @@ def test_daemon_liveness_rejects_zombie_proc_entries(monkeypatch):
     assert not client.daemon_process_alive(430465)
     assert client.daemon_process_alive(53748)
     assert not client.daemon_process_alive(7)
+
+
+def test_retire_targets_only_the_named_process_clients(short_root):
+    """Retirement must reach this process's clients and nobody else's."""
+
+    client = FakeControlClient()
+    manager = make_manager(short_root, client)
+    lease = manager.acquire({"a": "token-a", "b": "token-b"})
+    client.set_clients(manager.paths.pipe_dir, {7000: [201, 202, 301, 999]})
+    client.client_tokens.update(
+        {201: "token-a", 202: "token-a", 301: "token-b", 999: "other-serve"}
+    )
+
+    retired = manager.retire_clients_for(lease, "a")
+
+    assert {ref.client_pid for ref in retired} == {201, 202}
+    assert {ref.client_pid for ref in client.terminated} == {201, 202}
+
+
+def test_retire_is_a_noop_for_an_unmanaged_process(short_root):
+    client = FakeControlClient()
+    manager = make_manager(short_root, client)
+    lease = manager.acquire({"a": "token-a"})
+    client.set_clients(manager.paths.pipe_dir, {7000: [201]})
+    client.client_tokens[201] = "token-a"
+
+    assert manager.retire_clients_for(lease, "not-managed") == set()
+    assert client.terminated == []
