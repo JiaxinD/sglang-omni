@@ -38,11 +38,18 @@ HEALTH_INTERVAL = 5
 # other tenants' resident memory while still catching our own leaks.
 DRAIN_BASE_MIB = int(os.environ.get("MPS_NATIVE_CI_DRAIN_BASE_MIB", "2000"))
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("nvidia-cuda-mps-control") is None
-    or shutil.which("nvidia-smi") is None,
-    reason="requires an NVIDIA host with MPS tooling",
-)
+# Marked like tests/test_ci/test_tts_mps_dp2.py: both markers are needed to stay
+# out of the default PR command, which runs "not benchmark and not accelerator"
+# and then "accelerator and not benchmark".
+pytestmark = [
+    pytest.mark.benchmark,
+    pytest.mark.accelerator,
+    pytest.mark.skipif(
+        shutil.which("nvidia-cuda-mps-control") is None
+        or shutil.which("nvidia-smi") is None,
+        reason="requires an NVIDIA host with MPS tooling",
+    ),
+]
 
 
 def _serve(port: int, mps: str) -> subprocess.Popen:
