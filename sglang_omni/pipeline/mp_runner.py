@@ -427,6 +427,28 @@ class _NcclPortAllocator:
                 continue
 
 
+async def _finish_despite_cancellation(coro) -> None:
+    """Run *coro* to completion, then re-raise any cancellation it absorbed."""
+
+    task = asyncio.ensure_future(coro)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+        except BaseException:
+            break
+    try:
+        task.result()
+    except BaseException as error:
+        if cancelled is not None and not isinstance(error, asyncio.CancelledError):
+            raise cancelled from error
+        raise
+    if cancelled is not None:
+        raise cancelled
+
+
 class MultiProcessPipelineRunner:
 
     def __init__(self, config: PipelineConfig):
@@ -689,6 +711,12 @@ class MultiProcessPipelineRunner:
                 self._monitor_task.cancel()
             self._monitor_task = None
 
+        # Note (Jiaxin Deng): _started is already false, so a cancellation that
+        # lands mid teardown would make every later stop() a no-op and strand
+        # the MPS lease, its flock and the state dir for the next serve.
+        await _finish_despite_cancellation(self._teardown())
+
+    async def _teardown(self) -> None:
         # Send shutdown to stages via coordinator
         try:
             await self._coordinator.shutdown_stages()
@@ -756,9 +784,7 @@ class MultiProcessPipelineRunner:
             return
         runtime = self._mps
         try:
-            await runtime.close(
-                process_start_attempts=process_start_attempts
-            )
+            await runtime.close(process_start_attempts=process_start_attempts)
         finally:
             if not runtime.has_leases:
                 self._mps = None

@@ -191,9 +191,7 @@ class _FakeMps:
     ) -> None:
         self.events = events
         self.close_error = close_error
-        self.spawn_env = spawn_env or {
-            "CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"
-        }
+        self.spawn_env = spawn_env or {"CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"}
         self.probe_result = probe_result or {}
         self.probe_gate = probe_gate
         self.started = False
@@ -228,9 +226,7 @@ class _FakeMps:
         process_start_attempts: set[str] | None = None,
     ) -> None:
         self.close_process_start_attempts = (
-            None
-            if process_start_attempts is None
-            else set(process_start_attempts)
+            None if process_start_attempts is None else set(process_start_attempts)
         )
         self.events.append("MPS close")
         self.started = False
@@ -266,10 +262,7 @@ def _patch_runner(
 
 class _OneGpuDeviceInfo:
     def inspect(self, gpu_ids):
-        return {
-            gpu_id: MpsPhysicalDevice(GPU_UUID, None)
-            for gpu_id in gpu_ids
-        }
+        return {gpu_id: MpsPhysicalDevice(GPU_UUID, None) for gpu_id in gpu_ids}
 
 
 class _SpawnQueue:
@@ -363,9 +356,7 @@ async def test_mps_hooks_follow_resolved_spawn_lifecycle(short_base, monkeypatch
     assert events.index("MPS acquire") < events.index("spawn")
     assert events.index("spawn") < events.index("ready")
     assert events.index("ready") < events.index("MPS verify")
-    assert group.spawn_env == {
-        "pipeline": {"CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"}
-    }
+    assert group.spawn_env == {"pipeline": {"CUDA_MPS_PIPE_DIRECTORY": "/tmp/mps-pipe"}}
     assert fake_mps.verified
     assert coordinator.registered == {"preprocessing": "ipc://preprocessing"}
 
@@ -456,9 +447,7 @@ async def test_failure_before_first_mps_process_start_rolls_back_cleanly(
         "get_context",
         lambda _method: _PreStartFailureContext(),
     )
-    runner = mp_runner.MultiProcessPipelineRunner(
-        _make_config(short_base, mps="on")
-    )
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base, mps="on"))
 
     with pytest.raises(OSError, match="synchronization resource exhausted"):
         await runner.start()
@@ -490,9 +479,7 @@ async def test_attempted_mps_process_start_keeps_fail_closed_cleanup(
         "get_context",
         lambda _method: _ProcessStartFailureContext(),
     )
-    runner = mp_runner.MultiProcessPipelineRunner(
-        _make_config(short_base, mps="on")
-    )
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base, mps="on"))
 
     with pytest.raises(OSError, match="Process.start failed") as exc_info:
         await runner.start()
@@ -586,9 +573,7 @@ async def test_mps_off_keeps_merge_base_spawn_and_failure_order(
         raise AssertionError("mps=off must not create an MPS runtime")
 
     monkeypatch.setattr(mp_runner, "create_for_pipeline", unexpected_mps)
-    runner = mp_runner.MultiProcessPipelineRunner(
-        _make_config(short_base, mps="off")
-    )
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base, mps="off"))
     await runner.start()
     assert group.spawn_env is None
 
@@ -600,3 +585,43 @@ async def test_mps_off_keeps_merge_base_spawn_and_failure_order(
         await waiter
     release.set()
     assert "MPS close" not in events
+
+
+@pytest.mark.asyncio
+async def test_stop_cancelled_before_mps_close_still_releases_the_lease(
+    short_base,
+    monkeypatch,
+):
+    """Teardown must finish even when cancellation lands before the MPS close.
+
+    A second interrupt during the launcher's shutdown can cancel stop() at an
+    earlier await. _started is already false by then, so a stranded lease keeps
+    its flock and state dir and only the next serve discovers it.
+    """
+
+    events: list[str] = []
+    group = _FakeGroup(events)
+    fake = _FakeMps(events)
+    coordinator = _patch_runner(monkeypatch, events, group, fake)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_shutdown_stages() -> None:
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(coordinator, "shutdown_stages", blocking_shutdown_stages)
+
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
+    await runner.start()
+
+    stopping = asyncio.create_task(runner.stop())
+    await entered.wait()
+    stopping.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert not fake.has_leases
+    assert "MPS close" in events
