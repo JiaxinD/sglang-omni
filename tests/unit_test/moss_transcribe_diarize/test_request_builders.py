@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import wave
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -97,6 +98,18 @@ class FastFakeTokenizer(FakeTokenizer):
         raise AssertionError(f"Unexpected prompt fragment: {text!r}")
 
 
+class SegmentFakeTokenizer(FastFakeTokenizer):
+    _segments = {
+        201: "[0.00][S01][0.10]",
+        202: "[0.11][S02][0.20]",
+    }
+
+    def decode(self, token_ids, **kwargs) -> str:
+        if all(token_id in self._segments for token_id in token_ids):
+            return "".join(self._segments[token_id] for token_id in token_ids)
+        return super().decode(token_ids, **kwargs)
+
+
 class FakeProcessor:
     audio_token = "<|audio_pad|>"
     audio_token_id = 151671
@@ -157,12 +170,13 @@ def _payload(
     prompt: str | None = None,
     params: dict | None = None,
     metadata: dict | None = None,
+    request_id: str = "req-1",
 ) -> StagePayload:
     request_params = dict(params or {})
     if prompt is not None:
         request_params["prompt"] = prompt
     return StagePayload(
-        request_id="req-1",
+        request_id=request_id,
         request=OmniRequest(
             inputs={"audio_bytes": _wav_bytes()},
             params=request_params,
@@ -252,7 +266,7 @@ def test_result_adapter_logs_bounded_diagnostics_without_public_metadata(
     record = json.loads(record_line.removeprefix("MOSS_TD_TERMINATION_JSON "))
     assert record == {
         "schema_version": 1,
-        "server_request_id": "req-1",
+        "server_request_id_sha256": hashlib.sha256(b"req-1").hexdigest(),
         "output_sha256": hashlib.sha256(result.data["text"].encode()).hexdigest(),
         "reason": "moss_td_no_progress_marker_loop",
         "completed_segments": 41,
@@ -263,6 +277,72 @@ def test_result_adapter_logs_bounded_diagnostics_without_public_metadata(
         "applied_max_new_tokens": 32,
         "marker_limit": 32,
         "repeat_limit": 3,
+        "response_mode": "buffered",
+        "complete_boundary": True,
+    }
+
+
+def test_guard_termination_reaches_bounded_result_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_request_id = "request-id-with-newline\nsecret-" * 300
+    request_id_sha256 = hashlib.sha256(raw_request_id.encode()).hexdigest()
+    processor = FakeProcessor()
+    processor.tokenizer = SegmentFakeTokenizer()
+    request_builder, result_adapter = make_moss_transcribe_diarize_scheduler_adapters(
+        processor=processor,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=32,
+        context_length=TEST_CONTEXT_LENGTH,
+    )
+    data = request_builder(
+        _payload(params={"stream": False}, request_id=raw_request_id)
+    )
+    stream_output_builder = (
+        request_builders.make_moss_transcribe_diarize_stream_output_builder(
+            tokenizer=processor.tokenizer,
+            buffered_no_progress_marker_segments=2,
+            buffered_no_progress_repeat_segments=7,
+        )
+    )
+
+    with caplog.at_level("WARNING"):
+        for token_id in (201, 202):
+            assert (
+                stream_output_builder(
+                    raw_request_id,
+                    data,
+                    SimpleNamespace(data=token_id),
+                )
+                == []
+            )
+            data.req.output_ids.append(token_id)
+        data.output_ids = [201, 202]
+        result = result_adapter(data)
+
+    assert "termination" not in result.data
+    output_text = "[0.00][S01][0.10][0.11][S02][0.20]"
+    assert result.data["text"] == output_text
+    record_line = next(
+        message
+        for message in caplog.messages
+        if message.startswith("MOSS_TD_TERMINATION_JSON ")
+    )
+    record = json.loads(record_line.removeprefix("MOSS_TD_TERMINATION_JSON "))
+    assert raw_request_id not in "\n".join(caplog.messages)
+    assert record == {
+        "schema_version": 1,
+        "server_request_id_sha256": request_id_sha256,
+        "output_sha256": hashlib.sha256(output_text.encode()).hexdigest(),
+        "reason": "moss_td_no_progress_marker_loop",
+        "completed_segments": 2,
+        "marker_only_segments": 2,
+        "repeated_segments": 0,
+        "detected_completion_tokens": 2,
+        "raw_completion_tokens": 2,
+        "applied_max_new_tokens": 32,
+        "marker_limit": 2,
+        "repeat_limit": 7,
         "response_mode": "buffered",
         "complete_boundary": True,
     }

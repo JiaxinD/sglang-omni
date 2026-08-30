@@ -53,6 +53,7 @@ MOSS_TD_MARKER_LOOP_REASON = "moss_td_no_progress_marker_loop"
 MOSS_TD_REPEATED_SEGMENT_REASON = "moss_td_no_progress_repeated_segment"
 _NO_PROGRESS_MAX_PENDING_TOKEN_IDS = 256
 _NO_PROGRESS_MAX_INCOMPLETE_CHARS = 65536
+_NO_PROGRESS_MAX_INCOMPLETE_DECODE_STEPS = 256
 
 # note (db-ol): dense multi speaker meetings decode to about 4.5 output
 # tokens per audio second including time markers, so 10 leaves roughly 2x
@@ -88,6 +89,7 @@ class _MossTDNoProgressState:
     marker_only_segments: int = 0
     repeated_segments: int = 0
     observed_tokens: int = 0
+    incomplete_decode_steps: int = 0
     last_content_signature: tuple[str, str, str, str] | None = None
     disabled: bool = False
 
@@ -105,7 +107,15 @@ class _MossTDNoProgressState:
             self._disable()
             return None
         self.pending_token_ids.append(token_id)
-        decoded = decode_fn(self.pending_token_ids)
+        try:
+            decoded = decode_fn(self.pending_token_ids)
+        except Exception:
+            # note (JiaxinD): tokenizer plugins can surface different ordinary
+            # exception types for malformed IDs. The optional detector must
+            # fail open instead of escalating one request into a batch failure;
+            # process-control BaseException subclasses are intentionally not caught.
+            self._disable()
+            return None
         if decoded.endswith("\ufffd"):
             return None
         if "\ufffd" in decoded:
@@ -153,10 +163,16 @@ class _MossTDNoProgressState:
         # ends exactly on a segment boundary. Streaming output cannot retract
         # an incomplete suffix, so a partial next segment postpones the stop.
         if not self.buffer.strip():
+            self.incomplete_decode_steps = 0
             return self._decision(pending_reason) if pending_reason else None
-        if len(self.buffer) > _NO_PROGRESS_MAX_INCOMPLETE_CHARS:
+        self.incomplete_decode_steps += 1
+        if (
+            len(self.buffer) > _NO_PROGRESS_MAX_INCOMPLETE_CHARS
+            or self.incomplete_decode_steps >= _NO_PROGRESS_MAX_INCOMPLETE_DECODE_STEPS
+        ):
             # note (JiaxinD): unknown output is not loop evidence. Disable the
-            # detector for this request instead of attempting a lossy resync.
+            # detector for this request instead of attempting a lossy resync
+            # or repeatedly rescanning an ever-growing incomplete segment.
             self._disable()
         return None
 
@@ -166,6 +182,7 @@ class _MossTDNoProgressState:
         self.buffer = ""
         self.marker_only_segments = 0
         self.repeated_segments = 0
+        self.incomplete_decode_steps = 0
         self.last_content_signature = None
 
     def _decision(self, reason: str) -> _NoProgressDecision:
@@ -674,7 +691,9 @@ def make_moss_transcribe_diarize_scheduler_adapters(
         if data.no_progress_termination_reason is not None:
             termination_record = {
                 "schema_version": 1,
-                "server_request_id": payload.request_id,
+                "server_request_id_sha256": hashlib.sha256(
+                    str(payload.request_id).encode("utf-8")
+                ).hexdigest(),
                 "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "reason": data.no_progress_termination_reason,
                 "completed_segments": data.no_progress_completed_segments,
@@ -777,6 +796,13 @@ def make_moss_transcribe_diarize_stream_output_builder(
                     )
                     req._moss_no_progress_state = state
                 decision = state.observe_token_id(token_id, decode_no_progress_ids)
+                if decision is not None and not getattr(req, "output_ids", None):
+                    # note (JiaxinD): the scheduler callback precedes SGLang's
+                    # first prefill-token commit. Finishing at this point makes
+                    # the result processor drop the boundary token. Suppress
+                    # only this decision; a later complete decode boundary can
+                    # safely confirm the same no-progress sequence.
+                    decision = None
                 if decision is not None and getattr(req, "to_finish", None) is None:
                     req.to_finish = FINISH_MATCHED_STR(matched=decision.reason)
                     req_data.no_progress_termination_reason = decision.reason
@@ -794,10 +820,10 @@ def make_moss_transcribe_diarize_stream_output_builder(
                     req_data.no_progress_repeat_limit = repeat_limit
                     req_data.no_progress_response_mode = "buffered"
                     logger.warning(
-                        "MOSS-TD no-progress termination request_id=%s "
+                        "MOSS-TD no-progress termination request_id_sha256=%s "
                         "reason=%s completion_tokens=%d completed_segments=%d "
                         "marker_only_segments=%d repeated_segments=%d",
-                        request_id,
+                        hashlib.sha256(str(request_id).encode("utf-8")).hexdigest(),
                         decision.reason,
                         decision.detected_completion_tokens,
                         decision.completed_segments,

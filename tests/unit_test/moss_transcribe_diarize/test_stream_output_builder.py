@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 
 from sglang_omni.models.moss_transcribe_diarize.request_builders import (
+    MOSS_TD_MARKER_LOOP_REASON,
     make_moss_transcribe_diarize_stream_output_builder,
 )
 from sglang_omni.proto import OmniRequest, StagePayload
@@ -331,6 +333,28 @@ def test_marker_only_loop_stops_at_complete_segment_boundary() -> None:
     assert deltas == []
 
 
+def test_first_prefill_marker_decision_waits_for_a_decode_boundary() -> None:
+    builder = _guarded_builder(
+        {1: b"[0.00][S01][0.10]"},
+        marker_segments=1,
+    )
+    rd = _make_req_data(stream=False)
+
+    # OmniScheduler invokes the callback before SGLang commits the first
+    # prefill token to output_ids. Finishing here would make SGLang drop it.
+    assert rd.req.output_ids == []
+    assert builder("r", rd, _make_req_output(1)) == []
+
+    assert rd.req.to_finish is None
+    assert rd.no_progress_termination_reason is None
+    assert rd.req._moss_no_progress_state.disabled is False
+
+    rd.req.output_ids.append(1)
+    assert builder("r", rd, _make_req_output(1)) == []
+    assert rd.req.to_finish is not None
+    assert rd.no_progress_termination_reason == MOSS_TD_MARKER_LOOP_REASON
+
+
 def test_content_segment_resets_marker_only_progress_counter() -> None:
     vocab = {
         1: b"[0.00][S01][0.10]",
@@ -468,6 +492,42 @@ def test_interior_replacement_disables_repeat_detection() -> None:
 
     assert rd.req.to_finish is None
     assert rd.req._moss_no_progress_state.disabled is True
+
+
+@pytest.mark.parametrize("error_type", [ValueError, AttributeError, OSError])
+def test_decode_exception_disables_guard_fail_open_without_escaping(
+    error_type: type[Exception],
+) -> None:
+    class _RaisingTokenizer:
+        eos_token_id = _EOS
+
+        def __init__(self) -> None:
+            self.decode_calls = 0
+
+        def decode(self, ids, **kwargs) -> str:
+            self.decode_calls += 1
+            raise error_type("malformed token sequence")
+
+    tokenizer = _RaisingTokenizer()
+    builder = make_moss_transcribe_diarize_stream_output_builder(
+        tokenizer=tokenizer,
+        buffered_no_progress_marker_segments=2,
+    )
+    rd = _make_req_data(stream=False)
+    escaped: Exception | None = None
+
+    try:
+        builder("r", rd, _make_req_output(1))
+    except Exception as error:
+        escaped = error
+
+    assert escaped is None
+    assert rd.req.to_finish is None
+    assert rd.req._moss_no_progress_state.disabled is True
+    assert tokenizer.decode_calls == 1
+
+    assert builder("r", rd, _make_req_output(1)) == []
+    assert tokenizer.decode_calls == 1
 
 
 def test_incomplete_utf8_waits_for_byte_faithful_valid_decode() -> None:
@@ -668,3 +728,50 @@ def test_oversized_unrecognized_suffix_disables_guard_fail_open() -> None:
 
     assert rd.req.to_finish is None
     assert rd.req._moss_no_progress_state.disabled is True
+
+
+def test_many_small_incomplete_tokens_exhaust_decode_work_budget() -> None:
+    class _CountingTokenizer(_ByteTokenizer):
+        def __init__(self) -> None:
+            super().__init__({1: b"x"})
+            self.decode_calls = 0
+
+        def decode(self, ids, **kwargs) -> str:
+            self.decode_calls += 1
+            return super().decode(ids, **kwargs)
+
+    tokenizer = _CountingTokenizer()
+    builder = make_moss_transcribe_diarize_stream_output_builder(
+        tokenizer=tokenizer,
+        buffered_no_progress_marker_segments=2,
+    )
+    rd = _make_req_data(stream=False)
+
+    _observe(builder, rd, *([1] * 300))
+
+    state = rd.req._moss_no_progress_state
+    assert state.disabled is True
+    assert tokenizer.decode_calls <= 256
+    decode_calls = tokenizer.decode_calls
+
+    _observe(builder, rd, 1)
+    assert tokenizer.decode_calls == decode_calls
+
+
+def test_guard_warning_hashes_unbounded_request_id(caplog) -> None:
+    raw_request_id = "request-id-with-newline\nsecret-" * 300
+    request_id_sha256 = hashlib.sha256(raw_request_id.encode("utf-8")).hexdigest()
+    builder = _guarded_builder(
+        {1: b"[0.00][S01][0.10]"},
+        marker_segments=2,
+    )
+    rd = _make_req_data(stream=False)
+
+    _observe(builder, rd, 1)
+    builder(raw_request_id, rd, _make_req_output(1))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert raw_request_id not in "\n".join(messages)
+    assert any(
+        f"request_id_sha256={request_id_sha256}" in message for message in messages
+    )
