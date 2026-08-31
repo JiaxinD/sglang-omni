@@ -33,6 +33,7 @@ from sglang_omni.models.qwen3_tts.request_builders import (
 )
 from sglang_omni.models.qwen3_tts.streaming_vocoder import (
     Qwen3TTSStreamingVocoderScheduler,
+    _decode_graph_batch_sizes,
     _Qwen3TTSDecodePlan,
     _Qwen3TTSInitialDecodeGraphs,
     _Qwen3TTSInvalidCodeRows,
@@ -1650,6 +1651,37 @@ def test_qwen3_tts_streaming_vocoder_followup_graphs_can_be_disabled() -> None:
 
     assert scheduler._followup_decode_graphs._enabled is False
     assert scheduler._initial_decode_graphs is not scheduler._followup_decode_graphs
+
+
+@pytest.mark.parametrize(
+    ("max_batch_size", "expected"),
+    [
+        (1, (1,)),
+        (2, (1, 2)),
+        (3, (1, 2, 4)),
+        (4, (1, 2, 4)),
+        (5, (1, 2, 4, 8)),
+        (8, (1, 2, 4, 8)),
+        (32, (1, 2, 4, 8)),
+    ],
+)
+def test_qwen3_tts_decode_graph_batch_sizes_cover_worker_limit(
+    max_batch_size: int,
+    expected: tuple[int, ...],
+) -> None:
+    assert _decode_graph_batch_sizes(max_batch_size) == expected
+
+
+def test_qwen3_tts_vocoder_skips_unreachable_decode_graph_batch_sizes() -> None:
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        initial_max_batch_size=1,
+        followup_max_batch_size=3,
+    )
+
+    assert scheduler._initial_decode_graphs._batch_sizes == (1,)
+    assert scheduler._followup_decode_graphs._batch_sizes == (1, 2, 4)
 
 
 def test_qwen3_tts_vocoder_warms_graphs_before_serving_start(

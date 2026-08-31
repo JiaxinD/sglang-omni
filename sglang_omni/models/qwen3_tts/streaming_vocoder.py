@@ -33,6 +33,15 @@ DEFAULT_QWEN3_TTS_STREAM_INITIAL_FOLLOWUP_STRIDE = 8
 DEFAULT_QWEN3_TTS_INITIAL_CHUNK_FRAMES = 8
 DEFAULT_QWEN3_TTS_LEFT_CONTEXT_FRAMES = 16
 _QWEN3_TTS_CODEBOOK_SIZE = 2048
+_QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES = (1, 2, 4, 8)
+
+
+def _decode_graph_batch_sizes(max_batch_size: int) -> tuple[int, ...]:
+    """Keep the smallest existing bucket that can cover the worker limit."""
+    for index, batch_size in enumerate(_QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES):
+        if batch_size >= max_batch_size:
+            return _QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES[: index + 1]
+    return _QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES
 
 
 @dataclass
@@ -391,7 +400,11 @@ class Qwen3TTSStreamingVocoderScheduler(
             device=self._device,
             num_quantizers=num_quantizers,
             input_frames=int(stream_left_context_frames) + int(initial_chunk_frames),
-            batch_sizes=(1,) if self._deterministic_inference else (1, 2, 4, 8),
+            batch_sizes=(
+                (1,)
+                if self._deterministic_inference
+                else _decode_graph_batch_sizes(initial_max_batch_size)
+            ),
             enabled=bool(initial_cuda_graph and num_quantizers > 0),
         )
         followup_frames = (
@@ -411,7 +424,11 @@ class Qwen3TTSStreamingVocoderScheduler(
             device=self._device,
             num_quantizers=num_quantizers,
             input_frames=followup_frames,
-            batch_sizes=(1,) if self._deterministic_inference else (1, 2, 4, 8),
+            batch_sizes=(
+                (1,)
+                if self._deterministic_inference
+                else _decode_graph_batch_sizes(followup_max_batch_size)
+            ),
             enabled=bool(followup_cuda_graph and num_quantizers > 0),
         )
         self._samples_per_frame = int(self._decoder.total_upsample)
