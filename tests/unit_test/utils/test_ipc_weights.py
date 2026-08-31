@@ -267,6 +267,24 @@ def test_handle_file_for_model_uses_class_name(tmp_path):
     )
 
 
+def test_reduction_compat_covers_processes_without_a_share_role(monkeypatch):
+    """A relay-only stage unpickles the engine's tensors and needs the patch."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "sglang.srt.utils.patch_torch.monkey_patch_torch_reductions",
+        lambda: calls.append(1),
+    )
+    monkeypatch.delenv(ipc_weights.ENV_WEIGHT_SHARE, raising=False)
+
+    monkeypatch.delenv(ipc_weights.ENV_WEIGHT_SHARE_COMPAT, raising=False)
+    ipc_weights.prepare_weight_share_process_compat()
+    assert calls == []
+
+    monkeypatch.setenv(ipc_weights.ENV_WEIGHT_SHARE_COMPAT, "1")
+    ipc_weights.prepare_weight_share_process_compat()
+    assert calls == [1]
+
+
 def test_validate_weight_share_architecture_allows_and_rejects():
     # Note (Jiaxin Deng): exact-set locks so an arch cannot enter or leave
     # either registry without updating the expectations here. Supported means

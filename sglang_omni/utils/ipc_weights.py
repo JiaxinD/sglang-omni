@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 ENV_WEIGHT_SHARE = "SGLANG_OMNI_WEIGHT_SHARE"
 ENV_WEIGHT_SHARE_TIMEOUT_S = "SGLANG_OMNI_WEIGHT_SHARE_TIMEOUT_S"
 ENV_WEIGHT_SHARE_RUN_ID = "SGLANG_OMNI_WEIGHT_SHARE_RUN_ID"
+ENV_WEIGHT_SHARE_COMPAT = "SGLANG_OMNI_WEIGHT_SHARE_COMPAT"
 DEFAULT_ATTACH_TIMEOUT_S = 1800.0
 # Note (Jiaxin Deng): version 2 added per-tensor share/private classification;
 # version-1 handles predate it and must not be attached.
@@ -115,8 +116,15 @@ def get_weight_share_config(environ=None) -> WeightShareConfig | None:
 
 
 def prepare_weight_share_process_compat() -> None:
-    """Install UUID-safe CUDA reductions in every weight-sharing stage process."""
-    if get_weight_share_config() is None:
+    """Install UUID-safe CUDA reductions in every weight-sharing stage process.
+
+    # Note (Jiaxin Deng): a stage that only relays CUDA tensors never carries a
+    # weight-share role, yet it unpickles tensors reduced by a patched producer
+    # and dies without the same patch, so the whole pipeline is flagged through
+    # ENV_WEIGHT_SHARE_COMPAT rather than the sharing engines alone.
+    """
+    compat = (os.environ.get(ENV_WEIGHT_SHARE_COMPAT) or "").strip() == "1"
+    if get_weight_share_config() is None and not compat:
         return
 
     from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
