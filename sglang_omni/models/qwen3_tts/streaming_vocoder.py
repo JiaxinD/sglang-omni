@@ -265,7 +265,7 @@ class _Qwen3TTSInitialDecodeGraphs:
         device: torch.device,
         num_quantizers: int,
         input_frames: int | tuple[int, ...],
-        batch_sizes: tuple[int, ...] = (1, 2, 4, 8),
+        batch_sizes: tuple[int, ...] = _QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES,
         enabled: bool = True,
     ) -> None:
         self._decoder = decoder
