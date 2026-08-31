@@ -59,6 +59,15 @@ Start replicas one after another and give each an explicit memory budget
 reasons described under the script recipe below. Route traffic with the
 [Omni Router](omni_router.md).
 
+Process-level replicas can size their pools in bytes instead, with
+`engine.kv_cache_bytes` per stage and `total_reserve_bytes` for the replica's
+full footprint. The budgets are then checked against the card before any
+replica is spawned: colocation requires a declared footprint, the summed
+reserves and fractions must fit the card, and the summed KV pools alone must
+too. `engine.kv_cache_bytes` and `engine.max_total_tokens` are mutually
+exclusive on one stage, since the lower token cap would silently shrink the
+byte-derived pool.
+
 The runtime owns the full lifecycle. Every managed process is verified against
 the daemon's client list before serving starts, because a process that misses
 the pipe directory silently falls back to time slicing. A watchdog fails the

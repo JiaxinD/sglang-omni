@@ -198,3 +198,10 @@ def test_stage_rejects_kv_above_total_reserve() -> None:
             total_reserve_bytes="2GiB",
             engine=EngineArgs(kv_cache_bytes="4GiB"),
         )
+
+
+def test_engine_kv_cache_bytes_rejects_max_total_tokens() -> None:
+    from sglang_omni.config import EngineArgs
+
+    with pytest.raises(ValueError, match="cannot be set together"):
+        EngineArgs(kv_cache_bytes="2GiB", max_total_tokens=4096)

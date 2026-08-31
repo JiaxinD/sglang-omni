@@ -342,3 +342,58 @@ def test_placement_policy_hook_runs_after_generic_plan() -> None:
 
     with pytest.raises(ValueError, match="policy rejected thinker"):
         build_stage_placement_plan(config)
+
+
+def test_gpu_capacity_check_rejects_kv_pools_over_vram(monkeypatch) -> None:
+    import sglang_omni.utils.gpu_memory as gpu_memory
+    from sglang_omni.config.placement import validate_gpu_capacity
+
+    config = PipelineConfig(
+        model_path="dummy",
+        stages=[
+            _stage("thinker", gpu=0, kv_cache_bytes=100 * 1024**3, terminal=True),
+        ],
+    )
+    plan = build_stage_placement_plan(config)
+    monkeypatch.setattr(
+        gpu_memory,
+        "get_gpu_device_info",
+        lambda gpu_id: SimpleNamespace(total_memory_bytes=80 * 1024**3),
+    )
+
+    with pytest.raises(ValueError, match="KV pools alone exceed physical memory"):
+        validate_gpu_capacity(plan)
+
+
+def test_gpu_capacity_check_sums_replica_kv_pools(monkeypatch) -> None:
+    import sglang_omni.utils.gpu_memory as gpu_memory
+    from sglang_omni.config.placement import validate_gpu_capacity
+    from sglang_omni.config.schema import ProcessConfig
+    from sglang_omni.config.topology import compile_logical_processes
+    from sglang_omni.pipeline.replicas import expand_replica_stages
+
+    config = PipelineConfig(
+        model_path="dummy",
+        stages=[
+            _stage("thinker", gpu=0, kv_cache_bytes=60 * 1024**3, terminal=True),
+        ],
+        processes={
+            "pipeline": ProcessConfig(num_replicas=2, replica_devices=[0, 0]),
+        },
+    )
+    logical_plan, stages_cfg = compile_logical_processes(config)
+    stages_cfg, replica_topology = expand_replica_stages(stages_cfg, logical_plan)
+    plan = build_stage_placement_plan(
+        config,
+        stages_cfg=stages_cfg,
+        replica_instances=replica_topology.replicas,
+    )
+    monkeypatch.setattr(
+        gpu_memory,
+        "get_gpu_device_info",
+        lambda gpu_id: SimpleNamespace(total_memory_bytes=80 * 1024**3),
+    )
+
+    assert plan.gpus[0].total_kv_cache_bytes == 120 * 1024**3
+    with pytest.raises(ValueError, match="KV pools alone exceed physical memory"):
+        validate_gpu_capacity(plan)

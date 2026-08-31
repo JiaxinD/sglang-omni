@@ -134,7 +134,7 @@ class SGLangGenerationEngineBuilder(ABC):
                 logger.info(
                     f"{self.model_name}: clearing builder default "
                     f"mem_fraction_static={builder_default_fraction} because the "
-                    "stage declares runtime.memory.kv_cache_bytes"
+                    "stage declares engine.kv_cache_bytes"
                 )
         # Left unset, SGLang re-detects off a CUDA-first ladder that can contradict
         # placement. It owns the type, not the index.

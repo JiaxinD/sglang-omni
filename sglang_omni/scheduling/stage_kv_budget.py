@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deliver a stage's declared KV byte budget to its SGLang engine bootstrap.
 
-A stage's ``runtime.memory.kv_cache_bytes`` must reach the KV-cache
+A stage's ``engine.kv_cache_bytes`` must reach the KV-cache
 configurator without threading a new keyword argument through every model's
 factory and engine-builder signature. The stage worker scopes the budget
 around the single factory invocation choke point, and
@@ -36,7 +36,7 @@ def stage_kv_cache_budget(stage_name: str, kv_cache_bytes: int):
     """Scope a declared KV byte budget around one stage factory invocation.
 
     Raises on exit when the budget was never consumed: the stage declared
-    ``runtime.memory.kv_cache_bytes`` but its factory did not construct an
+    ``engine.kv_cache_bytes`` but its factory did not construct an
     SGLang engine, so honoring the budget is impossible and silently ignoring
     it would fake a guarantee the deployment relies on.
     """
@@ -54,7 +54,7 @@ def stage_kv_cache_budget(stage_name: str, kv_cache_bytes: int):
         _local.budget = None
     if not budget.consumed:
         raise RuntimeError(
-            f"Stage {stage_name!r} declares runtime.memory.kv_cache_bytes but its "
+            f"Stage {stage_name!r} declares engine.kv_cache_bytes but its "
             "factory did not build an SGLang engine that consumes a KV byte "
             "budget; remove the setting or place it on a stage with a KV cache"
         )
@@ -72,7 +72,7 @@ def consume_stage_kv_cache_bytes() -> int | None:
     if budget.consumed:
         raise RuntimeError(
             f"Stage {budget.stage_name!r} declares one "
-            "runtime.memory.kv_cache_bytes budget but its factory constructed "
+            "engine.kv_cache_bytes budget but its factory constructed "
             "a second SGLang engine; a stage byte budget covers exactly one "
             "engine's KV pool"
         )

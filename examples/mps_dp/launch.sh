@@ -403,7 +403,7 @@ up() {
     engine_stage=${ENGINE_STAGE:-tts_engine}
   fi
   if [ "$n" -gt 1 ] && [ -z "$expected_max_total_tokens" ] && [ -z "$kv_cache_bytes" ]; then
-    die "MAX_TOTAL_TOKENS is required for N=$n so every replica has the same KV capacity (or declare runtime.memory.kv_cache_bytes in CONFIG)"
+    die "MAX_TOTAL_TOKENS is required for N=$n so every replica has the same KV capacity (or declare engine.kv_cache_bytes in CONFIG)"
   fi
   if [ -n "$expected_max_total_tokens" ]; then
     [[ "$expected_max_total_tokens" =~ ^[1-9][0-9]*$ ]] \

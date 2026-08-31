@@ -120,13 +120,16 @@ def validate_gpu_capacity(plan: StagePlacementPlan) -> None:
 
     Fractions and byte reserves are combined in the byte domain, so mixed
     fraction/byte colocation cannot overcommit a card while each domain's own
-    sum still looks fine. Skipped when device metadata is unavailable.
+    sum still looks fine. The KV pools summed over every stage instance on a
+    card, replica instances included, are a hard lower bound on their own, so
+    they are checked even when no stage declares a total reserve. Skipped when
+    device metadata is unavailable.
     """
 
     from sglang_omni.utils.gpu_memory import format_bytes_gib, get_gpu_device_info
 
     for gpu_id, gpu in sorted(plan.gpus.items()):
-        if gpu.total_reserve_bytes <= 0:
+        if gpu.total_reserve_bytes <= 0 and gpu.total_kv_cache_bytes <= 0:
             continue
         info = get_gpu_device_info(gpu_id)
         if info.total_memory_bytes is None:
@@ -135,7 +138,7 @@ def validate_gpu_capacity(plan: StagePlacementPlan) -> None:
             gpu.total_gpu_memory_fraction * info.total_memory_bytes
             + gpu.total_reserve_bytes
         )
-        if declared > info.total_memory_bytes:
+        if gpu.total_reserve_bytes > 0 and declared > info.total_memory_bytes:
             raise ValueError(
                 f"GPU {gpu_id} declared budgets exceed physical memory: "
                 f"fraction {gpu.total_gpu_memory_fraction:.3f} of "
@@ -143,6 +146,19 @@ def validate_gpu_capacity(plan: StagePlacementPlan) -> None:
                 f"total_reserve_bytes {format_bytes_gib(gpu.total_reserve_bytes)} "
                 f"= {format_bytes_gib(int(declared))}. Lower the stage budgets "
                 "or move a stage to another GPU."
+            )
+        if gpu.total_kv_cache_bytes > info.total_memory_bytes:
+            kv_stages = sorted(
+                placement.stage_name
+                for placement in plan.stages.values()
+                if placement.kv_cache_bytes and gpu_id in placement.gpu_ids
+            )
+            raise ValueError(
+                f"GPU {gpu_id} declared KV pools alone exceed physical memory: "
+                f"{format_bytes_gib(info.total_memory_bytes)} of VRAM against "
+                f"{format_bytes_gib(gpu.total_kv_cache_bytes)} summed over "
+                f"engine.kv_cache_bytes of {', '.join(kv_stages)}. Lower "
+                "engine.kv_cache_bytes or reduce the replica count."
             )
 
 

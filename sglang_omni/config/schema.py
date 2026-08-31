@@ -151,6 +151,13 @@ class EngineArgs(BaseModel):
                 "pipeline's built-in defaults, set mem_fraction_static: null "
                 "on the same stage"
             )
+        if self.kv_cache_bytes is not None and self.max_total_tokens is not None:
+            raise ValueError(
+                "engine.kv_cache_bytes cannot be set together with "
+                "engine.max_total_tokens; both pin the generation stage's KV "
+                "capacity, and the lower token cap silently shrinks the "
+                "byte-derived pool"
+            )
 
     def overrides(self) -> dict[str, Any]:
         """Return the keys set on this block, declared and free-form alike.

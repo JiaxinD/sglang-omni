@@ -1292,7 +1292,7 @@ class OmniScheduler:
         )
         mem_fraction = self.server_args.mem_fraction_static
         if kv_cache_bytes is not None:
-            mem_hint = " Try raising runtime.memory.kv_cache_bytes."
+            mem_hint = " Try raising engine.kv_cache_bytes."
         elif mem_fraction is not None:
             mem_hint = (
                 f" Current mem_fraction_static is {mem_fraction:.3f}; try setting "
