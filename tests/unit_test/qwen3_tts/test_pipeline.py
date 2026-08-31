@@ -1162,7 +1162,10 @@ def test_qwen3_tts_stream_codec_output_request_override_disables_streaming(
     payload = make_payload(
         inputs="target",
         params=overrides if source == "params" else None,
-        tts_params={"task_type": "CustomVoice", **(overrides if source == "tts_params" else {})},
+        tts_params={
+            "task_type": "CustomVoice",
+            **(overrides if source == "tts_params" else {}),
+        },
     )
 
     state = build_qwen3_tts_state(payload)
