@@ -307,7 +307,7 @@ def test_sample_seeded_fused_hash_endpoint() -> None:
     a = sample_seeded_branchless(logits, **params)
     b = sample_seeded_fused(logits, **params)
     assert torch.equal(a, b)
-    assert a.item() == 0
+    assert a.item() == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -358,9 +358,9 @@ def test_sample_seeded_fused_input_hardening() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_sample_seeded_fused_masked_lane_hash_endpoint() -> None:
     """A top-k-masked token whose Gumbel hash hits UINT32_MAX yields
-    -inf + inf = NaN; the baseline's NaN-first rule then selects it. The fused
-    kernel must reproduce that baseline quirk exactly (parity, not top-k
-    membership, is the contract)."""
+    a capped gumbel, so the masked lane stays at -inf instead of the NaN the
+    uncapped endpoint used to produce. The fused kernel must follow the baseline
+    either way (parity, not top-k membership, is the contract)."""
     from sglang_omni.models.moss_tts.sampling_kernels import (
         sample_seeded_branchless,
         sample_seeded_fused,

@@ -151,6 +151,9 @@ def multinomial_with_seed_and_token_ids(
 
 
 _F64_MIN = tl.constexpr(-1.7976931348623157e308)
+# Note (Jiaxin Deng): sglang caps log(uniform) at both ends, so a hash of
+# UINT32_MAX no longer yields +inf gumbel; the fused draw follows the cap.
+_F64_LOG_CAP = tl.constexpr(-(2.0**-32))
 
 # Note (Jiaxin Deng): single-block cap; larger vocabularies keep the sort-based
 # path because one program can no longer hold the row.
@@ -243,9 +246,8 @@ def _fused_seeded_sample_kernel(
     hash_value ^= 16
     hash_value = fmix32(hash_value)
     uniform = hash_value.to(tl.float64) / _UINT32_MAX_F64
-    log_uniform = libdevice.log(uniform)
-    neg_log_uniform = -tl.maximum(log_uniform, _F64_MIN)
-    gumbel = -libdevice.log(neg_log_uniform)
+    log_uniform = tl.minimum(tl.maximum(libdevice.log(uniform), _F64_MIN), _F64_LOG_CAP)
+    gumbel = -libdevice.log(-log_uniform)
     value = final_sorted.to(tl.float64) + gumbel
 
     is_nan = value != value
