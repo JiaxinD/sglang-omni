@@ -1665,7 +1665,7 @@ def test_qwen3_tts_streaming_vocoder_followup_graphs_can_be_disabled() -> None:
         (32, (1, 2, 4, 8)),
     ],
 )
-def test_qwen3_tts_decode_graph_batch_sizes_cover_worker_limit(
+def test_qwen3_tts_decode_graph_batch_sizes_select_expected_prefix(
     max_batch_size: int,
     expected: tuple[int, ...],
 ) -> None:

@@ -37,7 +37,7 @@ _QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES = (1, 2, 4, 8)
 
 
 def _decode_graph_batch_sizes(max_batch_size: int) -> tuple[int, ...]:
-    """Keep the smallest existing bucket that can cover the worker limit."""
+    """Return the shortest bucket prefix that preserves graph-covered batches."""
     for index, batch_size in enumerate(_QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES):
         if batch_size >= max_batch_size:
             return _QWEN3_TTS_DECODE_GRAPH_BATCH_SIZES[: index + 1]
