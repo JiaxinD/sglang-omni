@@ -1820,6 +1820,20 @@ def test_qwen3_tts_vocoder_skips_unreachable_decode_graph_batch_sizes() -> None:
     assert scheduler._followup_decode_graphs._batch_sizes == (1, 2, 4)
 
 
+def test_qwen3_tts_vocoder_normalizes_batch_limits_before_graph_pruning() -> None:
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        initial_max_batch_size=1.1,
+        followup_max_batch_size=2.1,
+    )
+
+    assert scheduler._initial_max_batch_size == 1
+    assert scheduler._initial_decode_graphs._batch_sizes == (1,)
+    assert scheduler._followup_max_batch_size == 2
+    assert scheduler._followup_decode_graphs._batch_sizes == (1, 2)
+
+
 def test_qwen3_tts_vocoder_warms_graphs_before_serving_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

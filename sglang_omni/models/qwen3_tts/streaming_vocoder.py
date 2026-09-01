@@ -461,7 +461,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             batch_sizes=(
                 (1,)
                 if self._deterministic_inference
-                else _decode_graph_batch_sizes(initial_max_batch_size)
+                else _decode_graph_batch_sizes(int(initial_max_batch_size))
             ),
             enabled=bool(
                 initial_cuda_graph
@@ -484,7 +484,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             batch_sizes=(
                 (1,)
                 if self._deterministic_inference
-                else _decode_graph_batch_sizes(followup_max_batch_size)
+                else _decode_graph_batch_sizes(int(followup_max_batch_size))
             ),
             enabled=bool(
                 followup_cuda_graph
