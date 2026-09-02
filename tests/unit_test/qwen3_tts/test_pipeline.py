@@ -267,7 +267,7 @@ def test_qwen3_tts_config_and_registry_contracts() -> None:
     ]
     assert config.stages[1].factory_path.endswith("create_sglang_tts_engine_executor")
     assert config.terminal_stages == ["vocoder"]
-    assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
+    assert config.gpu_placement == {"preprocessing": 0, "tts_engine": 0, "vocoder": 0}
     assert config.stages[1].factory.device is None
     assert config.stages[2].factory.device is None
     assert {stage.process for stage in config.stages} == {"pipeline"}
@@ -5783,7 +5783,11 @@ def test_qwen3_tts_prepared_payload_round_trips_tensors_and_clears_fields() -> N
     payload = make_payload(inputs="target")
     stored = qwen3_request_builders._store_prepared_qwen3_tts_payload(payload, prepared)
     assert qwen3_request_builders._QWEN3_TTS_PREPARED_MARKER not in stored.data
-    assert isinstance(stored.data["prepared_prompt_embeds_bytes"], bytes)
+    # tensor_cpu keeps the tensor on the relay in its own dtype instead of widening
+    # it and packing it into the control-plane message.
+    shipped = stored.data["prepared_prompt_embeds"]
+    assert isinstance(shipped, torch.Tensor)
+    assert shipped.dtype == torch.bfloat16 and shipped.device.type == "cpu"
     assert stored.data["prepared_input_ids"] == [11, 12, 13, 14, 15]
 
     engine_model = SimpleNamespace(
@@ -5919,22 +5923,85 @@ def test_qwen3_tts_standalone_preprocessing_ships_tensors_without_registry(
 
 
 def test_qwen3_tts_config_loads_frontend_only_outside_engine_process() -> None:
+    from sglang_omni.config.placement import build_stage_placement_plan
+    from tests.unit_test.pipeline.helpers import build_compiled_process_topology
+
     config = Qwen3TTSPipelineConfig(model_path="model")
     assert Qwen3TTSPipelineConfig.process_local_edges() == frozenset()
     assert config.preprocessing_in_own_process() is False
     assert config.stage_factory_kwargs("preprocessing") == {}
 
     split = config.model_copy(deep=True)
-    split.stages[0] = split.stages[0].model_copy(update={"process": "tts_frontend"})
+    split.stages[0] = split.stages[0].model_copy(
+        update={"process": "tts_frontend", "gpu_memory_fraction": 0.05}
+    )
+    split.stages[1] = split.stages[1].model_copy(update={"gpu_memory_fraction": 0.75})
+    split.stages[2] = split.stages[2].model_copy(update={"gpu_memory_fraction": 0.12})
     assert split.preprocessing_in_own_process() is True
     assert split.stage_factory_kwargs("preprocessing") == {"load_frontend": True}
     assert split.stage_factory_kwargs("tts_engine") == {}
+    # The edge this change unpins: compiling it used to raise because
+    # process_local_edges pinned preprocessing to the engine process.
+    topology = build_compiled_process_topology(split)
+    assert topology.stage_to_process == {
+        "preprocessing": "tts_frontend",
+        "tts_engine": "pipeline",
+        "vocoder": "pipeline",
+    }
+    placement = build_stage_placement_plan(split)
+    assert placement.gpus[0].total_gpu_memory_fraction == pytest.approx(0.92)
+    assert placement.gpus[0].missing_fraction_stage_names == ()
 
     split.enable_deterministic_inference = True
     assert split.stage_factory_kwargs("preprocessing") == {
         "load_frontend": True,
         "max_concurrency": 1,
     }
+
+
+def test_qwen3_tts_prompt_frontend_builds_a_custom_voice_prompt() -> None:
+    """The frontend must satisfy the prompt builders it inherits, not just load weights."""
+    from sglang_omni.models.qwen3_tts import prompt_frontend
+
+    talker = SimpleNamespace(
+        vocab_size=6,
+        hidden_size=4,
+        text_vocab_size=9,
+        text_hidden_size=3,
+        num_code_groups=3,
+        code_predictor_config=SimpleNamespace(vocab_size=5),
+        spk_id={"vivian": 3},
+        codec_language_id={"en": 1},
+        codec_pad_id=0,
+        codec_bos_id=1,
+        codec_nothink_id=2,
+        codec_think_id=3,
+        codec_think_bos_id=4,
+        codec_think_eos_id=5,
+    )
+    root = SimpleNamespace(
+        talker_config=talker,
+        tts_model_type="custom_voice",
+        tts_bos_token_id=0,
+        tts_eos_token_id=1,
+        tts_pad_token_id=2,
+    )
+    frontend = prompt_frontend.Qwen3TTSPromptFrontend(
+        root, device="cpu", dtype=torch.float32
+    )
+    input_id = torch.arange(12, dtype=torch.long).unsqueeze(0) % 9
+    embeds, attention_mask, trailing, ref_code = frontend.build_custom_voice_inputs(
+        input_id=input_id,
+        voice="vivian",
+        language="en",
+        non_streaming_mode=False,
+        instruct_id=None,
+    )
+    assert ref_code is None
+    assert embeds.shape[0] == 1 and embeds.shape[-1] == talker.hidden_size
+    assert attention_mask.shape == (1, embeds.shape[1])
+    assert trailing.shape[-1] == talker.hidden_size
+    assert torch.isfinite(embeds).all()
 
 
 def test_qwen3_tts_prompt_frontend_loads_only_prompt_weights(tmp_path) -> None:

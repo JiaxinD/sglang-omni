@@ -1206,14 +1206,11 @@ def preprocess_qwen3_tts_payload(
     )
 
 
-_PREPARED_PAYLOAD_TENSOR_FIELDS = (
+_PREPARED_PAYLOAD_FIELDS = (
     "prepared_prompt_embeds",
     "prepared_text_tail",
     "prepared_ref_code",
     "prepared_pad_embed",
-)
-_PREPARED_PAYLOAD_FIELDS = (
-    *_PREPARED_PAYLOAD_TENSOR_FIELDS,
     "prepared_input_ids",
     "prepared_gen_kwargs",
 )
@@ -1252,7 +1249,7 @@ def _load_prepared_qwen3_tts_request(
     prompt_input_embeds = state.prepared_prompt_embeds.to(device=device, dtype=dtype)
     trailing_text_hidden = state.prepared_text_tail.to(device=device, dtype=dtype)
     ref_code = (
-        state.prepared_ref_code.to(device=device)
+        state.prepared_ref_code.to(device=device, dtype=torch.long)
         if state.prepared_ref_code is not None
         else None
     )
@@ -1262,9 +1259,6 @@ def _load_prepared_qwen3_tts_request(
     for name in _PREPARED_PAYLOAD_FIELDS:
         setattr(state, name, None)
         data.pop(name, None)
-    for name in _PREPARED_PAYLOAD_TENSOR_FIELDS:
-        for suffix in ("_bytes", "_shape", "_dtype"):
-            data.pop(name + suffix, None)
     return Qwen3TTSPreparedRequest(
         state=state,
         input_ids_list=input_ids_list,

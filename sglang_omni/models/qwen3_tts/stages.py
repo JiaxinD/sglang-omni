@@ -159,9 +159,7 @@ def _load_standalone_preprocessing_context(
         raise RuntimeError(_QWEN_TTS_INSTALL_HINT) from exc
 
     checkpoint_dir = _resolve_checkpoint(model_path)
-    if gpu_id is not None:
-        device = f"cuda:{gpu_id}"
-    device = resolve_device_spec(device or "cuda")
+    device = resolve_device_spec(device, gpu_id)
     torch_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
     logger.info(f"Loading Qwen3-TTS prompt frontend from {checkpoint_dir} on {device}")
     frontend = load_qwen3_tts_prompt_frontend(

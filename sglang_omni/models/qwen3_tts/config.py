@@ -49,6 +49,7 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
             name="preprocessing",
             process="pipeline",
             factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            gpu=0,
             next="tts_engine",
         ),
         EngineStageConfig(
