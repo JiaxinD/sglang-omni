@@ -5761,3 +5761,247 @@ def test_qwen3_tts_decode_isolates_rows_with_out_of_range_codes(
 
     scheduler._launch_decode_plans([_plan(7), _plan(8)], stream=None).resolve()
     assert [int(item.max()) for item in seen] == ([7, 8] if deterministic else [8])
+
+
+def _prepared_request_fixture(*, dtype: torch.dtype) -> Qwen3TTSPreparedRequest:
+    prompt = torch.randn(5, 4).to(dtype)
+    return Qwen3TTSPreparedRequest(
+        state=Qwen3TTSState(text="hello", seed=3),
+        input_ids_list=[11, 12, 13, 14, 15],
+        input_ids=torch.tensor([11, 12, 13, 14, 15], dtype=torch.long),
+        attention_mask=torch.ones((1, 5), dtype=torch.long),
+        trailing_text_hidden=torch.randn(2, 4).to(dtype),
+        ref_code=torch.tensor([[1, 2000], [3, 4]], dtype=torch.long),
+        prompt_input_embeds=prompt,
+        tts_pad_embed=torch.randn(4).to(dtype),
+        gen_kwargs={"max_new_tokens": 8, "top_k": 7},
+    )
+
+
+def test_qwen3_tts_prepared_payload_round_trips_tensors_and_clears_fields() -> None:
+    prepared = _prepared_request_fixture(dtype=torch.bfloat16)
+    payload = make_payload(inputs="target")
+    stored = qwen3_request_builders._store_prepared_qwen3_tts_payload(payload, prepared)
+    assert qwen3_request_builders._QWEN3_TTS_PREPARED_MARKER not in stored.data
+    assert isinstance(stored.data["prepared_prompt_embeds_bytes"], bytes)
+    assert stored.data["prepared_input_ids"] == [11, 12, 13, 14, 15]
+
+    engine_model = SimpleNamespace(
+        model=SimpleNamespace(_feedback_buffer=torch.zeros(1, 4, dtype=torch.bfloat16))
+    )
+    loaded = qwen3_request_builders._load_prepared_qwen3_tts_request(
+        stored, model=engine_model
+    )
+    assert loaded is not None
+    assert loaded.prompt_input_embeds.dtype == torch.bfloat16
+    assert torch.equal(loaded.prompt_input_embeds, prepared.prompt_input_embeds)
+    assert torch.equal(loaded.trailing_text_hidden, prepared.trailing_text_hidden)
+    assert torch.equal(loaded.tts_pad_embed, prepared.tts_pad_embed)
+    assert loaded.ref_code.dtype == torch.long
+    assert torch.equal(loaded.ref_code, prepared.ref_code)
+    assert loaded.input_ids_list == prepared.input_ids_list
+    assert torch.equal(loaded.input_ids, prepared.input_ids)
+    assert loaded.attention_mask.shape == (1, 5)
+    assert loaded.gen_kwargs == prepared.gen_kwargs
+    assert loaded.state.text == "hello" and loaded.state.seed == 3
+    assert loaded.state.prepared_input_ids is None
+    assert not [key for key in stored.data if key.startswith("prepared_")]
+    assert (
+        qwen3_request_builders._load_prepared_qwen3_tts_request(
+            stored, model=engine_model
+        )
+        is None
+    )
+
+
+def test_qwen3_tts_request_builder_consumes_prepared_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sglang(monkeypatch)
+    prepared = _prepared_request_fixture(dtype=torch.float32)
+    prepared.ref_code = None
+    payload = qwen3_request_builders._store_prepared_qwen3_tts_payload(
+        make_payload(inputs="target"), prepared
+    )
+    data = build_sglang_qwen3_tts_request(
+        payload,
+        model=SimpleNamespace(
+            config=SimpleNamespace(codec_eos_token_id=42, vocab_size=1200),
+            model=SimpleNamespace(_feedback_buffer=torch.zeros(1, 4)),
+        ),
+        wrapper=object(),
+    )
+    assert torch.equal(data.prompt_input_embeds, prepared.prompt_input_embeds)
+    assert data.prefill_input_embeds is data.prompt_input_embeds
+    assert data.ref_code is None and data.ref_code_len == 0
+    assert data.req.origin_input_ids == [11, 12, 13, 14, 15]
+    assert data.max_new_tokens == 8
+    assert data.req.sampling_params.top_k == 7
+    assert torch.equal(data.pending_text_queue.rows, prepared.trailing_text_hidden)
+    assert not [key for key in payload.data if key.startswith("prepared_")]
+
+
+def test_qwen3_tts_standalone_preprocessing_ships_tensors_without_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_speaker_artifact_cache().clear()
+    qwen3_request_builders.clear_qwen3_tts_preprocessing_context()
+
+    class FakeWrapper:
+        def _tokenize_texts(self, texts):
+            return [torch.arange(len(texts[0]), dtype=torch.long).unsqueeze(0)]
+
+        def _build_assistant_text(self, text):
+            return text
+
+        def _build_ref_text(self, text):
+            return text
+
+        def _merge_generate_kwargs(self, **kwargs):
+            return kwargs
+
+    class FakeModel:
+        device = torch.device("cpu")
+        root_config = SimpleNamespace(tts_pad_token_id=0)
+        model = SimpleNamespace(_feedback_buffer=torch.empty((1, 4)))
+        speech_tokenizer = object()
+        speaker_encoder_sample_rate = 24000
+
+        def build_voice_clone_inputs(self, **kwargs):
+            del kwargs
+            return (
+                torch.arange(8, dtype=torch.float32).view(1, 2, 4),
+                torch.ones((1, 2), dtype=torch.long),
+                torch.ones((1, 1, 4)),
+                torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
+            )
+
+    monkeypatch.setattr(
+        qwen3_request_builders,
+        "_get_qwen3_tts_adhoc_reference_service_locked",
+        lambda model, wrapper: None,
+    )
+    monkeypatch.setattr(
+        qwen3_request_builders,
+        "_prepare_qwen3_tts_base_request",
+        lambda *, state, model, wrapper: model.build_voice_clone_inputs(),
+    )
+    monkeypatch.setattr(
+        qwen3_request_builders,
+        "_build_qwen3_tts_pad_embed",
+        lambda model: torch.zeros(4),
+    )
+    qwen3_request_builders.set_qwen3_tts_preprocessing_context(
+        model=FakeModel(), wrapper=FakeWrapper(), standalone=True
+    )
+    try:
+        payload = make_payload(
+            inputs="target",
+            tts_params={"ref_audio": "ref.wav", "ref_text": "ref"},
+        )
+        out = qwen3_request_builders.preprocess_qwen3_tts_payload(payload)
+        with qwen3_request_builders._PREPARED_REQUESTS_LOCK:
+            assert not qwen3_request_builders._PREPARED_REQUESTS
+    finally:
+        qwen3_request_builders.clear_qwen3_tts_preprocessing_context()
+
+    assert qwen3_request_builders._QWEN3_TTS_PREPARED_MARKER not in out.data
+    assert qwen3_request_builders.pop_prepared_qwen3_tts_request(out) is None
+    loaded = qwen3_request_builders._load_prepared_qwen3_tts_request(
+        out, model=FakeModel()
+    )
+    assert loaded is not None
+    assert torch.equal(
+        loaded.prompt_input_embeds, torch.arange(8, dtype=torch.float32).view(2, 4)
+    )
+    assert torch.equal(loaded.ref_code, torch.tensor([[1, 2], [3, 4]]))
+    assert len(loaded.input_ids_list) == 2
+
+
+def test_qwen3_tts_config_loads_frontend_only_outside_engine_process() -> None:
+    config = Qwen3TTSPipelineConfig(model_path="model")
+    assert Qwen3TTSPipelineConfig.process_local_edges() == frozenset()
+    assert config.preprocessing_in_own_process() is False
+    assert config.stage_factory_kwargs("preprocessing") == {}
+
+    split = config.model_copy(deep=True)
+    split.stages[0] = split.stages[0].model_copy(update={"process": "tts_frontend"})
+    assert split.preprocessing_in_own_process() is True
+    assert split.stage_factory_kwargs("preprocessing") == {"load_frontend": True}
+    assert split.stage_factory_kwargs("tts_engine") == {}
+
+    split.enable_deterministic_inference = True
+    assert split.stage_factory_kwargs("preprocessing") == {
+        "load_frontend": True,
+        "max_concurrency": 1,
+    }
+
+
+def test_qwen3_tts_prompt_frontend_loads_only_prompt_weights(tmp_path) -> None:
+    from safetensors.torch import save_file
+
+    from sglang_omni.models.qwen3_tts import prompt_frontend
+
+    talker = SimpleNamespace(
+        vocab_size=6,
+        hidden_size=4,
+        text_vocab_size=9,
+        text_hidden_size=3,
+        num_code_groups=3,
+        code_predictor_config=SimpleNamespace(vocab_size=5),
+    )
+    root = SimpleNamespace(talker_config=talker, tts_model_type="custom_voice")
+    frontend = prompt_frontend.Qwen3TTSPromptFrontend(
+        root, device="cpu", dtype=torch.float32
+    )
+    assert frontend.speaker_encoder is None
+    assert frontend.device.type == "cpu" and frontend.dtype == torch.float32
+    assert frontend.model._feedback_buffer.shape == (1, 4)
+
+    names = frontend.checkpoint_weight_names()
+    assert names == {
+        "talker.model.codec_embedding.weight",
+        "talker.model.text_embedding.weight",
+        "talker.text_projection.linear_fc1.weight",
+        "talker.text_projection.linear_fc1.bias",
+        "talker.text_projection.linear_fc2.weight",
+        "talker.text_projection.linear_fc2.bias",
+        "talker.code_predictor.model.codec_embedding.0.weight",
+        "talker.code_predictor.model.codec_embedding.1.weight",
+    }
+    tensors = {
+        name: torch.randn(
+            dict(frontend.named_parameters())[name[len("talker.") :]].shape
+        )
+        for name in names
+    }
+    tensors["talker.model.layers.0.self_attn.q_proj.weight"] = torch.zeros(2, 2)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+
+    frontend.load_weights(prompt_frontend.iter_checkpoint_tensors(str(tmp_path), names))
+    assert torch.equal(
+        frontend.model.text_embedding.weight,
+        tensors["talker.model.text_embedding.weight"],
+    )
+    assert torch.equal(
+        frontend.code_predictor.model.codec_embedding[1].weight,
+        tensors["talker.code_predictor.model.codec_embedding.1.weight"],
+    )
+    hidden = torch.randn(1, 2, 3)
+    fc1 = tensors["talker.text_projection.linear_fc1.weight"]
+    fc2 = tensors["talker.text_projection.linear_fc2.weight"]
+    expected = (
+        torch.nn.functional.silu(
+            hidden @ fc1.T + tensors["talker.text_projection.linear_fc1.bias"]
+        )
+        @ fc2.T
+        + tensors["talker.text_projection.linear_fc2.bias"]
+    )
+    assert torch.allclose(frontend.text_projection(hidden), expected)
+
+    with pytest.raises(RuntimeError, match="missing 1 weights"):
+        frontend.load_weights(
+            prompt_frontend.iter_checkpoint_tensors(
+                str(tmp_path), names - {"talker.model.text_embedding.weight"}
+            )
+        )

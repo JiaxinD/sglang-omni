@@ -34,3 +34,11 @@ class Qwen3TTSState(DeclarativeStateBase):
     finish_reason: str | None = None
     ref_code_len: int = wire(0, emit="truthy", codec="int")
     audio_samples: Any | None = wire(None, codec="tensor_list")
+    # Note (Jiaxin Deng): set only by a preprocessing stage that runs outside the
+    # engine process; the AR request builder consumes and clears them.
+    prepared_prompt_embeds: Any | None = wire(None, codec="typed_tensor")
+    prepared_text_tail: Any | None = wire(None, codec="typed_tensor")
+    prepared_ref_code: Any | None = wire(None, codec="typed_tensor")
+    prepared_pad_embed: Any | None = wire(None, codec="typed_tensor")
+    prepared_input_ids: list[int] | None = None
+    prepared_gen_kwargs: dict[str, Any] | None = None
