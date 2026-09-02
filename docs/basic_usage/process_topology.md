@@ -197,15 +197,11 @@ config_cls: Qwen3OmniSpeechPipelineConfig
 name: qwen3-omni-speech-replica2
 model_path: Qwen/Qwen3-Omni-30B-A3B-Instruct
 
-stage_overrides:
+stages:
   talker_ar:
-    runtime:
-      resources:
-        total_gpu_memory_fraction: 0.123
+    gpu_memory_fraction: 0.123
   code2wav:
-    runtime:
-      resources:
-        total_gpu_memory_fraction: 0.014
+    gpu_memory_fraction: 0.014
 
 processes:
   talker_ar:
@@ -230,22 +226,40 @@ examples/configs/qwen3_omni_speech_replica2.yaml --port 8091`; the full file is
 
 ### Replicas on one GPU
 
-Repeat the device id and declare the memory budget. Without `--mps`, the
-replicas time-slice the GPU:
+Repeat the device id and declare the memory budget for every GPU stage on
+that card. Without `--mps`, the replicas time-slice the GPU. MOSS TTS local is
+used here because its engine factory accepts `gpu_id` and its architecture is
+on the weight-share allowlist, so the same file also serves the next example:
 
 ```yaml
+config_cls: MossTTSLocalPipelineConfig
+name: mossl
+model_path: OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5
+
 stages:
-  talker_ar:
-    gpu_memory_fraction: 0.45
+  preprocessing:
+    gpu: 0
+    gpu_memory_fraction: 0.05
+  tts_engine:
+    gpu: 0
+    gpu_memory_fraction: 0.35
+    engine:
+      mem_fraction_static: 0.30
+      max_total_tokens: 30000
+  vocoder:
+    gpu: 0
+    gpu_memory_fraction: 0.15
+
 processes:
-  talker_ar:
+  pipeline:
     num_replicas: 2
-    replica_devices: [1, 1]
+    replica_devices: [0, 0]
 ```
 
 ### Replicas on one GPU with MPS and weight sharing
 
-Same config, plus the two runtime flags:
+Same config, plus the two runtime flags. `max_total_tokens` above is what
+weight sharing requires of the engine stage:
 
 ```bash
 sgl-omni serve --config <config.yaml> --mps on --weight-share on --port 8091

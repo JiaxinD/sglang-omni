@@ -31,9 +31,12 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+
+from tests.test_ci.test_mps_native import _signal_test_sessions
 
 # Note (Jiaxin Deng): process replicas need an engine factory that declares
 # gpu_id, which rules out Higgs and Whisper today; MOSS TTS local is both
@@ -209,9 +212,31 @@ def _terminate(proc: subprocess.Popen, timeout: float = 180.0) -> None:
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        # The serve is a session leader, so its pgid reaches every stage worker;
+        # killing only the parent would leave them holding GPU memory.
+        _signal_test_sessions({proc.pid}, signal.SIGKILL)
         proc.wait(timeout=30)
         raise AssertionError("serve did not exit on SIGTERM")
+
+
+def _session_members(session_ids: Iterable[int]) -> dict[int, str]:
+    """Pids still holding resources in one of *session_ids*, from /proc.
+
+    # Note (Jiaxin Deng): a zombie is an unreaped exit status, not a worker; it
+    # holds no GPU memory and no MPS client, and this container runs without a
+    # reaping init, so counting it would fail every clean run.
+    """
+    wanted = set(session_ids)
+    members: dict[int, str] = {}
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+            state, pgrp = fields[0], int(fields[2])
+        except (OSError, IndexError, ValueError):
+            continue
+        if pgrp in wanted and state != "Z":
+            members[int(stat.parent.name)] = state
+    return members
 
 
 def _free_port() -> int:
@@ -221,9 +246,35 @@ def _free_port() -> int:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_log():
+def _scoped_serves(monkeypatch):
+    """Track every serve this test starts and reap its whole session afterwards.
+
+    A failed lifecycle assertion must not leave stage workers holding GPU
+    memory and MPS clients for the next test; the serve parent may already be
+    gone by then, so cleanup keys on the session id, not the parent pid.
+    """
     LOG.unlink(missing_ok=True)
+    session_ids: set[int] = set()
+    serve = _serve
+
+    def tracked_serve(*args, **kwargs) -> subprocess.Popen:
+        proc = serve(*args, **kwargs)
+        session_ids.add(proc.pid)
+        return proc
+
+    monkeypatch.setattr(sys.modules[__name__], "_serve", tracked_serve)
     yield
+    _signal_test_sessions(session_ids, signal.SIGTERM)
+    deadline = time.monotonic() + 60
+    while _session_members(session_ids) and time.monotonic() < deadline:
+        time.sleep(1)
+    leftovers = _session_members(session_ids)
+    if leftovers:
+        _signal_test_sessions(session_ids, signal.SIGKILL)
+        time.sleep(2)
+    assert not _session_members(
+        session_ids
+    ), f"stage workers outlived their serve and had to be killed: {leftovers}"
 
 
 def _boot_and_measure(tmp_path, *, weight_share: str) -> tuple[int, str]:

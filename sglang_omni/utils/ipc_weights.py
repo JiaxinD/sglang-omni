@@ -128,8 +128,29 @@ def prepare_weight_share_process_compat() -> None:
         return
 
     from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+    from torch.multiprocessing import reductions
 
     monkey_patch_torch_reductions()
+    # The NPU branch of the SGLang patch never installs a CUDA reducer.
+    original = getattr(reductions, "_reduce_tensor_original", None)
+    if original is None or hasattr(reductions, "_sglang_omni_cpu_reduce_original"):
+        return
+
+    # Note (Jiaxin Deng): the SGLang patch rewrites reduction argument 6 to a
+    # device UUID unconditionally, but a CPU tensor reduces to three arguments,
+    # so any CPU tensor crossing a multiprocessing queue (TP leader fanout)
+    # raised IndexError and the message was silently dropped. Keep the original
+    # reducer for anything that is not a CUDA tensor.
+    patched = reductions.reduce_tensor
+
+    def reduce_tensor(tensor, *args, **kwargs):
+        if tensor.device.type != "cuda":
+            return original(tensor, *args, **kwargs)
+        return patched(tensor, *args, **kwargs)
+
+    reductions._sglang_omni_cpu_reduce_original = original
+    reductions.reduce_tensor = reduce_tensor
+    reductions.init_reductions()
 
 
 def handle_file_for_model(dir_path: str, model: torch.nn.Module) -> str:
