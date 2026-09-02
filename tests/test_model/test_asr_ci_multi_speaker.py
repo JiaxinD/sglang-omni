@@ -45,7 +45,9 @@ MOSS_TD_CI_MODEL_PATH = os.environ.get(
     MODEL_PATH,
 )
 MOSS_TD_CONCURRENCY = 32
-MOSS_TD_WARMUP_REQUESTS = 0
+# Note (Jiaxin Deng): a cold JIT cache otherwise lands inside the timed
+# window, so the first run on a fresh CI home measures about 20% low.
+MOSS_TD_WARMUP_REQUESTS = MOSS_TD_CONCURRENCY
 MOSS_TD_CI_SAMPLES = 800
 MOSS_TD_AISHELL4_LONG_CI_SAMPLES = 20
 MOSS_TD_GOOGLETIME_CI_SAMPLES = 25
