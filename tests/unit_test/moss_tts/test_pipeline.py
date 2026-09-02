@@ -180,7 +180,9 @@ def test_moss_tts_production_config_resolves_codec_memory_policy() -> None:
 def test_moss_tts_32gb_config_bounds_runtime_memory() -> None:
     config = ConfigManager.from_file("examples/configs/moss_tts_32gb.yaml").config
 
-    assert isinstance(config, MossTTSPipelineConfig)
+    # The measured budgets in these files describe the single-process layout.
+    assert isinstance(config, MossTTSSingleProcessPipelineConfig)
+    assert {stage.process for stage in config.stages} == {"pipeline"}
     stages = {stage.name: stage for stage in config.stages}
     preprocessing_args = resolve_stage_factory_args(
         stages["preprocessing"], config, gpu_id=0
@@ -206,7 +208,9 @@ def test_moss_tts_32gb_config_bounds_runtime_memory() -> None:
 def test_moss_tts_24gb_config_bounds_runtime_memory() -> None:
     config = ConfigManager.from_file("examples/configs/moss_tts_24gb.yaml").config
 
-    assert isinstance(config, MossTTSPipelineConfig)
+    # The measured budgets in these files describe the single-process layout.
+    assert isinstance(config, MossTTSSingleProcessPipelineConfig)
+    assert {stage.process for stage in config.stages} == {"pipeline"}
     stages = {stage.name: stage for stage in config.stages}
     preprocessing_args = resolve_stage_factory_args(
         stages["preprocessing"], config, gpu_id=0
@@ -2503,6 +2507,9 @@ def test_default_topology_isolates_vocoder_process() -> None:
         "tts_engine": "pipeline",
         "vocoder": "vocoder",
     }
+    # A declared fraction only reserves the card on paper unless the engine is told.
+    engine_args = resolve_stage_factory_args(stages["tts_engine"], config, gpu_id=0)
+    assert engine_args["total_gpu_memory_fraction"] == pytest.approx(0.72)
 
 
 def test_single_process_variant_keeps_legacy_topology() -> None:
