@@ -71,9 +71,9 @@ startup:
 Not every handoff tolerates a process boundary: some stages exchange state
 through process-local registries a second process cannot read (for example,
 MOSS-TTS pipelines hand prepared requests from preprocessing to the AR engine
-through a process-local queue). Splitting such an edge fails at serving time
-rather than at config validation — keep those stages in one process as the
-shipped configs do.
+through a process-local queue). A model declares those edges through
+`PipelineConfig.process_local_edges`, and splitting one is refused during
+topology compilation, before any worker starts.
 
 Qwen3-TTS keeps prepared requests in process-local module state only while
 `preprocessing` and `tts_engine` share a process; placed in its own process the
