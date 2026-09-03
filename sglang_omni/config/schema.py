@@ -339,6 +339,19 @@ class StageConfig(BaseModel):
             "that process's budget."
         ),
     )
+    sm_cap: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Cap this stage's process to at most this many SMs, using a CUDA "
+            "Green Context. Must be a multiple of the device's SM group size "
+            "(8 on H100/H200). A cap is an upper bound, not a reservation: "
+            "caps may overlap, and an uncapped stage still sees the whole "
+            "device. Stages sharing an OS process share one cap and may not "
+            "disagree. Whether a cap helps and which stage to cap must be "
+            "measured per pipeline; see docs/basic_usage/stage_sm_cap.md."
+        ),
+    )
     total_reserve_bytes: int | None = Field(
         default=None,
         description=(

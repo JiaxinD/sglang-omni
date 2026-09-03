@@ -21,6 +21,7 @@ from sglang_omni.config.runtime import (
 )
 from sglang_omni.pipeline.control_plane import StageControlPlane
 from sglang_omni.pipeline.local_dispatch import LocalStageDispatcher
+from sglang_omni.pipeline.sm_cap import resolve_bootstrap_path, verify_sm_cap
 from sglang_omni.pipeline.stage.input import AggregatedInput, DirectInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
@@ -400,6 +401,15 @@ class StageGroup:
             self._startup_error_channels.clear()
 
 
+def _verify_sm_cap(spec: StageWorkerProcessSpec, log: logging.Logger) -> None:
+    """Fail closed when this process was capped but is not running capped."""
+    requested = os.environ.get("GREEN_CTX_SM", "").strip()
+    if not requested:
+        return
+    actual = verify_sm_cap(resolve_bootstrap_path(), int(requested))
+    log.info("process %s capped to %d SMs", spec.process_name, actual)
+
+
 def stage_process_main(
     spec: StageWorkerProcessSpec,
     ready_event: multiprocessing.Event,
@@ -415,6 +425,7 @@ def stage_process_main(
         for stage_spec in spec.stage_specs:
             _prepare_accelerator_environment(stage_spec, log)
         apply_gpu_compat_env_defaults()
+        _verify_sm_cap(spec, log)
         prepare_weight_share_process_compat()
         _run_process(spec, ready_event, log)
     except (KeyboardInterrupt, SystemExit):
