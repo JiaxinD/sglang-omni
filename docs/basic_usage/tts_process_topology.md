@@ -78,7 +78,9 @@ topology compilation, before any worker starts.
 Qwen3-TTS keeps prepared requests in process-local module state only while
 `preprocessing` and `tts_engine` share a process; placed in its own process the
 preprocessing stage loads a prompt frontend and ships the prepared prompt
-tensors through `typed_tensor` payload fields, so that edge can cross too.
+tensors through `tensor_cpu` payload fields, so that edge can cross too. The
+`tensor_cpu` codec keeps each tensor's own dtype and lets the relay carry it
+outside the control plane, which `typed_tensor` would not do.
 
 Ming-Omni-TTS carries preprocessing fields in `StagePayload.data` and serializes the reference encoder's `spk_emb` and `prompt_latent` tensors with the `typed_tensor` wire codec. Both `preprocessing -> reference_encode` and `reference_encode -> tts_engine` can therefore cross process boundaries.
 

@@ -1228,6 +1228,9 @@ def _store_prepared_qwen3_tts_payload(
     state.prepared_pad_embed = prepared.tts_pad_embed
     state.prepared_input_ids = list(prepared.input_ids_list)
     state.prepared_gen_kwargs = dict(prepared.gen_kwargs)
+    # Note (Jiaxin Deng): the reference clip is consumed here and read by nothing
+    # downstream, so it would otherwise ride every later hop as raw media.
+    state.ref_audio = None
     return StagePayload(
         request_id=payload.request_id,
         request=payload.request,

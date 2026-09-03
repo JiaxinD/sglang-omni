@@ -5778,6 +5778,15 @@ def _prepared_request_fixture(*, dtype: torch.dtype) -> Qwen3TTSPreparedRequest:
     )
 
 
+def test_qwen3_tts_prepared_payload_drops_the_consumed_reference_clip() -> None:
+    prepared = _prepared_request_fixture(dtype=torch.bfloat16)
+    prepared.state.ref_audio = "data:audio/wav;base64,UklGRiQ="
+    stored = qwen3_request_builders._store_prepared_qwen3_tts_payload(
+        make_payload(inputs="target"), prepared
+    )
+    assert stored.data.get("ref_audio") is None
+
+
 def test_qwen3_tts_prepared_payload_round_trips_tensors_and_clears_fields() -> None:
     prepared = _prepared_request_fixture(dtype=torch.bfloat16)
     payload = make_payload(inputs="target")
