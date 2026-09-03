@@ -214,7 +214,13 @@ then declare a memory fraction, and the engine's static fraction has to agree
 with the one it declares:
 
 ```bash
-sgl-omni serve   --model-path Qwen/Qwen3-TTS-12Hz-1.7B-Base   --preprocessing.process tts_frontend   --preprocessing.gpu_memory_fraction 0.05   --tts_engine.gpu_memory_fraction 0.75   --tts_engine.engine.mem_fraction_static 0.75   --vocoder.gpu_memory_fraction 0.12
+sgl-omni serve \
+  --model-path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --preprocessing.process tts_frontend \
+  --preprocessing.gpu_memory_fraction 0.05 \
+  --tts_engine.gpu_memory_fraction 0.75 \
+  --tts_engine.engine.mem_fraction_static 0.75 \
+  --vocoder.gpu_memory_fraction 0.12
 ```
 
 `--vocoder.process vocoder` composes with it (lower `tts_engine` to 0.72 and
