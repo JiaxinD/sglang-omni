@@ -10,8 +10,8 @@ from sglang_omni.pipeline.sm_cap import (
     merged_ld_preload,
     resolve_bootstrap_path,
     sm_cap_env,
-    stage_sm_cap_env,
     validate_capped_process,
+    validate_stage_sm_cap,
 )
 
 
@@ -78,43 +78,58 @@ def test_inherited_ld_preload_is_kept_and_bootstrap_prepended():
     assert merged_ld_preload("/b.so", "/a.so /b.so") == "/a.so /b.so"
 
 
-def test_stage_with_cap_preserves_parent_ld_preload(bootstrap, monkeypatch):
-    monkeypatch.setenv("LD_PRELOAD", "/opt/other.so")
-
-    env = stage_sm_cap_env(_stage(sm_cap=72))
+def test_cap_env_preserves_parent_ld_preload(bootstrap):
+    env = sm_cap_env(72, bootstrap, inherited_preload="/opt/other.so")
 
     assert env["LD_PRELOAD"] == f"{bootstrap} /opt/other.so"
 
 
-def test_stage_without_cap_contributes_no_env(bootstrap):
-    assert stage_sm_cap_env(_stage()) == {}
+def test_stage_without_cap_needs_no_bootstrap(bootstrap):
+    assert validate_stage_sm_cap(_stage()) is None
 
 
-def test_stage_with_cap_contributes_bootstrap_env(bootstrap):
-    env = stage_sm_cap_env(_stage(sm_cap=72))
+def test_stage_with_cap_resolves_the_bootstrap(bootstrap):
+    assert validate_stage_sm_cap(_stage(sm_cap=72)) == bootstrap
+
+
+def test_capped_process_env_overrides_an_inherited_ld_preload(bootstrap, monkeypatch):
+    """env_defaults never override os.environ, so the cap must not ride on them."""
+    from sglang_omni.pipeline.stage_workers import (
+        StageLaunchConfig,
+        StageWorkerProcessSpec,
+        _get_worker_process_env,
+    )
+
+    monkeypatch.setenv("LD_PRELOAD", "/opt/other.so")
+    spec = StageWorkerProcessSpec(
+        process_name="vocoder",
+        stage_specs=[StageLaunchConfig(stage_name="vocoder", sm_cap=72)],
+    )
+
+    env = _get_worker_process_env(spec)
 
     assert env["GREEN_CTX_SM"] == "72"
-    assert env["LD_PRELOAD"] == bootstrap
+    assert env["LD_PRELOAD"] == f"{bootstrap} /opt/other.so"
 
 
 @pytest.mark.parametrize("name", RESERVED_ENV)
 def test_cap_rejects_derived_variables_set_by_hand(name, bootstrap):
     with pytest.raises(SmCapError, match="may not be set directly"):
-        stage_sm_cap_env(_stage(sm_cap=72, env={name: "16"}))
+        validate_stage_sm_cap(_stage(sm_cap=72, env={name: "16"}))
 
 
 @pytest.mark.parametrize("name", RESERVED_ENV)
 def test_cap_rejects_derived_variables_inherited(name, bootstrap, monkeypatch):
     monkeypatch.setenv(name, "16")
     with pytest.raises(SmCapError, match="parent environment"):
-        stage_sm_cap_env(_stage(sm_cap=72))
+        validate_stage_sm_cap(_stage(sm_cap=72))
 
 
 def test_cap_rejects_mps_active_thread_percentage(bootstrap, monkeypatch):
     """MPS may scale a client past the provisioned SMs, making the cap advisory."""
     monkeypatch.setenv("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", "50")
     with pytest.raises(SmCapError, match="ACTIVE_THREAD_PERCENTAGE"):
-        stage_sm_cap_env(_stage(sm_cap=72))
+        validate_stage_sm_cap(_stage(sm_cap=72))
 
 
 def test_stage_config_rejects_non_positive_cap():

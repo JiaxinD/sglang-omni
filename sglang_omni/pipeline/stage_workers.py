@@ -21,7 +21,12 @@ from sglang_omni.config.runtime import (
 )
 from sglang_omni.pipeline.control_plane import StageControlPlane
 from sglang_omni.pipeline.local_dispatch import LocalStageDispatcher
-from sglang_omni.pipeline.sm_cap import resolve_bootstrap_path, verify_sm_cap
+from sglang_omni.pipeline.sm_cap import (
+    SmCapError,
+    resolve_bootstrap_path,
+    sm_cap_env,
+    verify_sm_cap,
+)
 from sglang_omni.pipeline.stage.input import AggregatedInput, DirectInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
@@ -69,6 +74,7 @@ class StageLaunchConfig:
     factory_arg_defaults: dict[str, Any] = field(default_factory=dict)
     require_factory_gpu_id: bool = False
     env_defaults: dict[str, str] = field(default_factory=dict)
+    sm_cap: int | None = None
     # Note (Jiaxin Deng): the byte budgets are first-class fields, never
     # factory kwargs, so no factory signature can accidentally absorb them.
     kv_cache_bytes: int | None = None
@@ -143,6 +149,25 @@ class StageWorkerProcessSpec:
     stage_specs: list[StageLaunchConfig]
 
 
+def _sm_cap_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
+    """Green-context env for a capped process, empty when it has no cap."""
+    caps = {stage_spec.sm_cap for stage_spec in spec.stage_specs}
+    if len(caps) > 1:
+        raise SmCapError(
+            f"process {spec.process_name!r} mixes stages with different "
+            f"sm_cap values ({sorted(cap for cap in caps if cap is not None)}); "
+            "a green context is process-wide"
+        )
+    sm_cap = caps.pop()
+    if sm_cap is None:
+        return {}
+    return sm_cap_env(
+        sm_cap,
+        resolve_bootstrap_path(),
+        inherited_preload=os.environ.get("LD_PRELOAD"),
+    )
+
+
 def _get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
     """Return the spawn-time env overrides for *spec*.
 
@@ -151,16 +176,20 @@ def _get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
     tenant, so mixing a TP stage with any other stage in the same process group
     is a placement bug.
     """
+    # Note (Jiaxin Deng): the cap belongs here rather than in env_defaults,
+    # which never override os.environ: an LD_PRELOAD inherited from the parent
+    # would otherwise drop the bootstrap and leave the stage uncapped.
+    env = _sm_cap_process_env(spec)
     tp_stages = [s for s in spec.stage_specs if s.tp_size > 1]
     if not tp_stages:
-        return {}
+        return env
     if len(tp_stages) > 1 or len(spec.stage_specs) > 1:
         raise AssertionError(
             f"Process {spec.process_name!r} mixes a TP stage with other "
             "stages; TP stages must own their OS process exclusively. "
             f"stage_specs={[s.stage_name for s in spec.stage_specs]}"
         )
-    return current_platform.get_stage_process_env(tp_stages[0])
+    return {**env, **current_platform.get_stage_process_env(tp_stages[0])}
 
 
 @contextmanager

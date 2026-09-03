@@ -95,10 +95,15 @@ def validate_capped_process(stages: list[StageConfig]) -> None:
         )
 
 
-def stage_sm_cap_env(stage_cfg: StageConfig) -> dict[str, str]:
-    """Green-context env for *stage_cfg*, empty when it declares no cap."""
+def validate_stage_sm_cap(stage_cfg: StageConfig) -> str | None:
+    """Check a stage's cap at config time and return the bootstrap path.
+
+    Returns ``None`` when the stage declares no cap. The env itself is built at
+    spawn time by :func:`sm_cap_env`, because it has to override the parent
+    environment rather than default under it.
+    """
     if stage_cfg.sm_cap is None:
-        return {}
+        return None
     declared = [name for name in RESERVED_ENV if name in stage_cfg.env]
     if declared:
         raise SmCapError(
@@ -120,11 +125,10 @@ def stage_sm_cap_env(stage_cfg: StageConfig) -> dict[str, str]:
             "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE is set; MPS may then run "
             "kernels on more SMs than the cap provisions"
         )
-    return sm_cap_env(
-        stage_cfg.sm_cap,
-        resolve_bootstrap_path(),
-        inherited_preload=os.environ.get("LD_PRELOAD"),
-    )
+    bootstrap = resolve_bootstrap_path()
+    # Surface a bad cap size now rather than at stage startup.
+    sm_cap_env(stage_cfg.sm_cap, bootstrap)
+    return bootstrap
 
 
 def verify_sm_cap(bootstrap: str, expected_sm: int) -> int:
