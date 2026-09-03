@@ -17,11 +17,16 @@ if TYPE_CHECKING:
     from sglang_omni.config.schema import StageConfig
 
 # Note (Jiaxin Deng): the driver splits a device into groups of at least this
-# many SMs; H100 and H200 both quantize to 8. Devices that split differently
-# need GREEN_CTX_SPLIT set through the stage's `env` block.
+# many SMs; H100 and H200 both quantize to 8. Other granularities are not
+# supported, because the group count is derived here rather than negotiated
+# with the driver.
 SM_GROUP_SIZE = 8
 
 BOOTSTRAP_ENV = "SGLANG_OMNI_SM_CAP_BOOTSTRAP"
+
+# Derived from `sm_cap`, so a value arriving from anywhere else would silently
+# describe a different partition than the one that was asked for.
+RESERVED_ENV = ("GREEN_CTX_SM", "GREEN_CTX_SPLIT", "GREEN_CTX_GROUP_COUNT")
 
 
 class SmCapError(ValueError):
@@ -41,11 +46,22 @@ def resolve_bootstrap_path(explicit: str | None = None) -> str:
     return path
 
 
-def sm_cap_env(sm_cap: int, bootstrap: str) -> dict[str, str]:
+def merged_ld_preload(bootstrap: str, inherited: str | None) -> str:
+    """Return an ``LD_PRELOAD`` that keeps *inherited* entries and adds *bootstrap*."""
+    entries = [entry for entry in (inherited or "").replace(",", " ").split() if entry]
+    if bootstrap in entries:
+        return " ".join(entries)
+    return " ".join([bootstrap, *entries])
+
+
+def sm_cap_env(
+    sm_cap: int, bootstrap: str, inherited_preload: str | None = None
+) -> dict[str, str]:
     """Return the spawn env that caps a stage process to *sm_cap* SMs.
 
-    The cap is an upper bound, not a reservation: two capped stages may cover
-    overlapping SMs, and an uncapped stage still sees the whole device.
+    The cap bounds the provisioned SM set; it is not a reservation. Two capped
+    stages may cover overlapping SMs, and an uncapped stage still sees the
+    whole device.
     """
     if sm_cap <= 0 or sm_cap % SM_GROUP_SIZE:
         raise SmCapError(
@@ -55,20 +71,71 @@ def sm_cap_env(sm_cap: int, bootstrap: str) -> dict[str, str]:
         "GREEN_CTX_SM": str(sm_cap),
         "GREEN_CTX_SPLIT": str(SM_GROUP_SIZE),
         "GREEN_CTX_GROUP_COUNT": str(sm_cap // SM_GROUP_SIZE),
-        "LD_PRELOAD": bootstrap,
-        # Note (Jiaxin Deng): kept separately because the verification below
-        # must name the library it expects, not whatever LD_PRELOAD ended up as.
+        "LD_PRELOAD": merged_ld_preload(bootstrap, inherited_preload),
+        # Note (Jiaxin Deng): kept separately because verification must name the
+        # library it expects, not whatever LD_PRELOAD ended up as.
         BOOTSTRAP_ENV: bootstrap,
     }
+
+
+def validate_capped_process(stages: list[StageConfig]) -> None:
+    """Reject placements where a cap would apply to more than it names.
+
+    A green context is process-wide, so every stage sharing an OS process with
+    a capped stage runs capped too. Requiring them to agree keeps the config
+    honest about what is capped.
+    """
+    caps = {stage.sm_cap for stage in stages}
+    if len(caps) > 1:
+        listed = ", ".join(f"{stage.name}={stage.sm_cap}" for stage in stages)
+        raise SmCapError(
+            f"stages sharing one process disagree about sm_cap ({listed}); a "
+            "green context is process-wide, so every stage in the process must "
+            "declare the same cap, or the capped stage must own its process"
+        )
+
+
+def stage_sm_cap_env(stage_cfg: StageConfig) -> dict[str, str]:
+    """Green-context env for *stage_cfg*, empty when it declares no cap."""
+    if stage_cfg.sm_cap is None:
+        return {}
+    declared = [name for name in RESERVED_ENV if name in stage_cfg.env]
+    if declared:
+        raise SmCapError(
+            f"stage {stage_cfg.name!r} sets both sm_cap and {declared}; these "
+            "are derived from sm_cap and may not be set directly"
+        )
+    inherited = [name for name in RESERVED_ENV if name in os.environ]
+    if inherited:
+        raise SmCapError(
+            f"stage {stage_cfg.name!r} sets sm_cap but {inherited} is already "
+            "set in the parent environment, where it would shadow the derived "
+            "value; unset it"
+        )
+    # Note (Jiaxin Deng): MPS can scale a client's SM set beyond the green
+    # context's provisioned groups, which would make the cap advisory.
+    if "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" in os.environ:
+        raise SmCapError(
+            f"stage {stage_cfg.name!r} sets sm_cap but "
+            "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE is set; MPS may then run "
+            "kernels on more SMs than the cap provisions"
+        )
+    return sm_cap_env(
+        stage_cfg.sm_cap,
+        resolve_bootstrap_path(),
+        inherited_preload=os.environ.get("LD_PRELOAD"),
+    )
 
 
 def verify_sm_cap(bootstrap: str, expected_sm: int) -> int:
     """Check that this process really runs capped, and return its SM count.
 
-    Raises ``SmCapError`` when the cap did not take effect. The check runs on a
-    freshly created thread: the bootstrap binds new threads through its
-    ``pthread_create`` interposer, so a thread that sees the cap proves the
-    library was preloaded rather than merely loadable.
+    Raises ``SmCapError`` when the cap did not take effect. Both the calling
+    thread and a freshly created one are checked, against the capped context's
+    identity rather than its SM count: an extension that rebound the main
+    thread to the primary context would otherwise stay invisible, and a library
+    merely ``dlopen``-ed instead of preloaded does not interpose
+    ``pthread_create`` and so cannot bind a new thread.
     """
     import ctypes
     import threading
@@ -76,39 +143,35 @@ def verify_sm_cap(bootstrap: str, expected_sm: int) -> int:
     library = ctypes.CDLL(bootstrap)
     library.green_ctx_actual_sm.restype = ctypes.c_uint
     library.green_ctx_current_sm.restype = ctypes.c_uint
+    library.green_ctx_current_is_capped.restype = ctypes.c_int
 
     actual = int(library.green_ctx_actual_sm())
     if actual != expected_sm:
         raise SmCapError(
             f"sm_cap={expected_sm} requested but the green context has {actual} SMs"
         )
+    if not int(library.green_ctx_current_is_capped()):
+        raise SmCapError(
+            f"sm_cap={expected_sm} is not current on the stage's main thread; "
+            "something rebound it to another context after startup"
+        )
 
-    observed: list[int] = []
-    thread = threading.Thread(
-        target=lambda: observed.append(int(library.green_ctx_current_sm())),
-        name="sm-cap-verify",
-    )
+    observed: list[tuple[int, int]] = []
+
+    def probe() -> None:
+        observed.append(
+            (
+                int(library.green_ctx_current_is_capped()),
+                int(library.green_ctx_current_sm()),
+            )
+        )
+
+    thread = threading.Thread(target=probe, name="sm-cap-verify")
     thread.start()
     thread.join()
-    if observed != [actual]:
+    if observed != [(1, actual)]:
         raise SmCapError(
-            f"sm_cap={expected_sm} did not reach a new thread (it sees "
-            f"{observed[0] if observed else 'no'} SMs); check that LD_PRELOAD "
-            f"names {bootstrap}"
+            f"sm_cap={expected_sm} did not reach a new thread (observed "
+            f"{observed}); check that LD_PRELOAD names {bootstrap}"
         )
     return actual
-
-
-def stage_sm_cap_env(stage_cfg: StageConfig) -> dict[str, str]:
-    """Green-context env for *stage_cfg*, empty when it declares no cap."""
-    if stage_cfg.sm_cap is None:
-        return {}
-    # Note (Jiaxin Deng): stage env defaults never override os.environ, so an
-    # LD_PRELOAD inherited from the parent would silently drop the cap.
-    if "LD_PRELOAD" in os.environ:
-        raise SmCapError(
-            f"stage {stage_cfg.name!r} sets sm_cap but LD_PRELOAD is already "
-            "set in the parent environment, which would shadow the "
-            "green-context bootstrap; unset it or add the bootstrap to it"
-        )
-    return sm_cap_env(stage_cfg.sm_cap, resolve_bootstrap_path())

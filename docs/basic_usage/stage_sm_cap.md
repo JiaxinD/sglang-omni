@@ -18,10 +18,16 @@ first, with the procedure in [Choosing the cap](#choosing-the-cap).
 
 A preloaded bootstrap library creates a green context covering the requested number of SMs and
 makes it current for the stage process before CUDA is initialized, including every thread the
-process creates later. The stage then cannot use more than that many SMs.
+process creates later. The stage is then provisioned that many SMs instead of the whole device.
+
+Two cases documented by NVIDIA let a green context exceed its provisioned set, so treat the cap as
+a strong bound rather than a hard one: with `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` set, MPS may scale
+the SM set up to the client's share (serving refuses to start in that combination), and on compute
+capability 9.x, loading a module that uses dynamic parallelism grants all green contexts 2 extra
+shared SMs.
 
 Nothing about scheduling changes: no new scheduler, no added synchronization, no change to the
-request path. The only effect is an upper bound on one process's SM footprint.
+request path. The only effect is on how many SMs one process is provisioned.
 
 A cap is an upper bound, not a reservation. Two capped stages may cover overlapping SMs, and an
 uncapped stage still sees the whole device.
@@ -34,8 +40,12 @@ uncapped stage still sees the whole device.
   processes.
 - A driver with the Green Context API (`cuGreenCtxCreate`), and CUDA MPS, as with any same-GPU
   multi-process serving. See [MPS data parallel](mps_dp.md).
-- `sm_cap` must be a multiple of the device's SM group size, which is 8 on H100 and H200.
-  Other devices need `GREEN_CTX_SPLIT` set through the stage's `env` block.
+- `sm_cap` must be a multiple of 8, the SM group size on H100 and H200. Other granularities are
+  not supported yet: the group count is derived from that constant rather than negotiated with the
+  driver.
+- The capped process must see exactly one CUDA device, so that the cap cannot land on a different
+  device than the stage runs on. Narrow `CUDA_VISIBLE_DEVICES` per worker, as
+  [MPS data parallel](mps_dp.md) already does.
 
 ## Build the bootstrap
 
@@ -67,10 +77,12 @@ stages:
     sm_cap: 80
 ```
 
-At startup the capped process verifies, on a freshly created thread, that it really is running in
-a context with the requested number of SMs, and **fails closed** if it is not. A stage that
-silently ignored its cap would look identical to a working one in every metric except throughput,
-which is the failure this check exists to prevent.
+At startup the capped process verifies that it really is running in the capped context, on its
+main thread and on a freshly created one, comparing context identity rather than SM count, and
+**fails closed** if either check fails. A stage that silently ignored its cap would look identical
+to a working one in every metric except throughput, which is the failure this check exists to
+prevent. The fresh thread matters because a library that was merely loaded, rather than preloaded,
+does not interpose `pthread_create` and so cannot bind one.
 
 ## Choosing the cap
 
@@ -99,8 +111,15 @@ requests per replica and +14.8% at 20. Measure your own operating point.
 
 ## Measured example
 
-H200 (132 SM), single card, Seed-TTS EN, closed-loop fixed concurrency, arms interleaved within
-one session. Throughput in req/s. Note that the stage worth capping differs between pipelines:
+H200 (132 SM), single card, Seed-TTS EN (`benchmarks.eval.benchmark_tts_seedtts`, 1088 requests,
+`--stream --response-format pcm`), closed-loop fixed concurrency, arms interleaved within one
+session, throughput corrected for runaway requests. Every arm ran with 0 failed requests.
+
+These runs predate this change and set the same `GREEN_CTX_*` variables through each stage's `env`
+block, which is exactly what `sm_cap` now derives; the mechanism is identical but the numbers were
+not re-measured through this surface. What was re-measured on it is correctness: a capped
+Qwen3-TTS run completes with the cap verified and 0 failures. Throughput in req/s. Note that the
+stage worth capping differs between pipelines:
 
 | Pipeline | Topology | Uncapped | Capped | Delta | RTF p95 |
 | --- | --- | --- | --- | --- | --- |
@@ -122,7 +141,15 @@ stages need most of the device.
 - The bootstrap only activates in `python` processes. Helper binaries a stage spawns (for example
   `ldconfig` from `torch.inductor`) inherit `LD_PRELOAD`; initializing CUDA inside them fails and
   their non-zero exit would break the caller.
-- `LD_PRELOAD` already set in the parent environment shadows the bootstrap, so serving refuses to
-  start in that case; add the bootstrap to it or unset it.
+- An `LD_PRELOAD` inherited from the parent is preserved: the bootstrap is prepended to it.
+  `GREEN_CTX_*` variables are derived from `sm_cap` and are rejected if set by hand, in the parent
+  environment or in a stage's `env` block.
+- NVIDIA documents that "a green context can be current to only one thread at a time" and that
+  there is no internal synchronization for concurrent access. This bootstrap converts the green
+  context with `cuGreenCtxCreate` plus `cuCtxFromGreenCtx` and makes the resulting ordinary
+  `CUcontext` current on every thread, which is how a multi-threaded stage can use it at all.
+  Measurements across the pipelines above ran without failures or output corruption, and the
+  corruption we did see came from threads landing on *different* contexts, not from sharing one.
+  Even so, this usage sits in a documented grey area and is worth a maintainer's judgement.
 - The bootstrap writes its startup line to stderr. Under Nsight Systems that output is buffered,
   so do not gate a profiled run on scraping it; the in-process check above does not depend on it.

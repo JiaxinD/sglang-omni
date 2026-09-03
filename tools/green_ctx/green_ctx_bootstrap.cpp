@@ -14,6 +14,10 @@
 // cudaSetDevice. Interposing only one of pthread_create / cudaSetDevice leaves
 // part of the process on the full device and splits it across two contexts,
 // which breaks stream ordering between them; both interposers are required.
+//
+// Note (Jiaxin Deng): every failure here exits the process. A stage that
+// silently ran uncapped would be indistinguishable from a working one in every
+// metric except throughput, which is the failure this library exists to catch.
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -35,28 +39,6 @@ unsigned int requested_sm = 0;
 unsigned int actual_sm = 0;
 int device_ordinal = 0;
 
-[[noreturn]] void fail(const char *expression, CUresult result) {
-  const char *name = nullptr;
-  const char *message = nullptr;
-  cuGetErrorName(result, &name);
-  cuGetErrorString(result, &message);
-  std::fprintf(stderr, "green-ctx: %s failed: %s (%s)\n", expression,
-               name ? name : "unknown", message ? message : "unknown");
-  std::fflush(stderr);
-  // Note (Jiaxin Deng): exit rather than continue uncapped. A stage that
-  // silently ignores its cap looks identical to a working one in every metric
-  // except throughput, which is exactly the bug this library exists to avoid.
-  std::_Exit(125);
-}
-
-void check(CUresult result, const char *expression) {
-  if (result != CUDA_SUCCESS) {
-    fail(expression, result);
-  }
-}
-
-#define CU_CHECK(expression) check((expression), #expression)
-
 [[noreturn]] void fail_message(const char *format, ...) {
   va_list args;
   va_start(args, format);
@@ -67,6 +49,20 @@ void check(CUresult result, const char *expression) {
   std::fflush(stderr);
   std::_Exit(125);
 }
+
+void check(CUresult result, const char *expression) {
+  if (result == CUDA_SUCCESS) {
+    return;
+  }
+  const char *name = nullptr;
+  const char *message = nullptr;
+  cuGetErrorName(result, &name);
+  cuGetErrorString(result, &message);
+  fail_message("%s failed: %s (%s)", expression, name ? name : "unknown",
+               message ? message : "unknown");
+}
+
+#define CU_CHECK(expression) check((expression), #expression)
 
 unsigned int env_uint(const char *name, unsigned int fallback) {
   const char *text = std::getenv(name);
@@ -94,7 +90,6 @@ __attribute__((constructor)) void initialize_capped_context() {
       static_cast<unsigned int>(std::strtoul(requested_text, nullptr, 10));
   unsigned int split = env_uint("GREEN_CTX_SPLIT", 0);
   unsigned int group_count = env_uint("GREEN_CTX_GROUP_COUNT", 0);
-  device_ordinal = static_cast<int>(env_uint("GREEN_CTX_DEVICE", 0));
   if (requested_sm == 0 || split == 0 || group_count == 0) {
     fail_message("GREEN_CTX_SM, GREEN_CTX_SPLIT and GREEN_CTX_GROUP_COUNT must "
                  "all be positive");
@@ -103,10 +98,16 @@ __attribute__((constructor)) void initialize_capped_context() {
   CU_CHECK(cuInit(0));
   int device_total = 0;
   CU_CHECK(cuDeviceGetCount(&device_total));
-  if (device_ordinal < 0 || device_ordinal >= device_total) {
-    fail_message("GREEN_CTX_DEVICE=%d outside [0,%d)", device_ordinal,
+  // Note (Jiaxin Deng): a cap names one device, but a stage placed on a
+  // different ordinal would be capped on the wrong one and run unrestricted
+  // while still passing verification. Requiring a single visible device makes
+  // ordinal 0 unambiguous; narrow CUDA_VISIBLE_DEVICES per worker instead.
+  if (device_total != 1) {
+    fail_message("a capped process must see exactly one CUDA device, sees %d; "
+                 "narrow CUDA_VISIBLE_DEVICES for this stage",
                  device_total);
   }
+  device_ordinal = 0;
   CUdevice device;
   CU_CHECK(cuDeviceGet(&device, device_ordinal));
 
@@ -143,6 +144,16 @@ __attribute__((constructor)) void initialize_capped_context() {
   std::fflush(stderr);
 }
 
+void bind_or_die(const char *where) {
+  CUresult result = cuCtxSetCurrent(capped_context);
+  if (result != CUDA_SUCCESS) {
+    const char *name = nullptr;
+    cuGetErrorName(result, &name);
+    fail_message("%s could not bind the capped context: %s", where,
+                 name ? name : "unknown");
+  }
+}
+
 struct ThreadStart {
   void *(*entry)(void *);
   void *argument;
@@ -152,7 +163,7 @@ void *bind_then_run(void *raw) {
   ThreadStart *boxed = static_cast<ThreadStart *>(raw);
   ThreadStart call = *boxed;
   delete boxed;
-  cuCtxSetCurrent(capped_context);
+  bind_or_die("new thread");
   return call.entry(call.argument);
 }
 
@@ -160,13 +171,21 @@ using pthread_create_fn = int (*)(pthread_t *, const pthread_attr_t *,
                                   void *(*)(void *), void *);
 using cuda_set_device_fn = cudaError_t (*)(int);
 
+void *next_symbol(const char *name) {
+  void *symbol = dlsym(RTLD_NEXT, name);
+  if (symbol == nullptr) {
+    fail_message("could not resolve the real %s: %s", name, dlerror());
+  }
+  return symbol;
+}
+
 } // namespace
 
 extern "C" int pthread_create(pthread_t *thread,
                               const pthread_attr_t *attributes,
                               void *(*entry)(void *), void *argument) {
   static pthread_create_fn real =
-      reinterpret_cast<pthread_create_fn>(dlsym(RTLD_NEXT, "pthread_create"));
+      reinterpret_cast<pthread_create_fn>(next_symbol("pthread_create"));
   if (capped_context == nullptr) {
     return real(thread, attributes, entry, argument);
   }
@@ -180,13 +199,14 @@ extern "C" int pthread_create(pthread_t *thread,
 
 extern "C" cudaError_t cudaSetDevice(int device) {
   static cuda_set_device_fn real =
-      reinterpret_cast<cuda_set_device_fn>(dlsym(RTLD_NEXT, "cudaSetDevice"));
+      reinterpret_cast<cuda_set_device_fn>(next_symbol("cudaSetDevice"));
   cudaError_t status = real(device);
-  // Note (Jiaxin Deng): only rebind for the capped device, so a multi-GPU
-  // process touching another device keeps that device's own context.
-  if (capped_context != nullptr && device == device_ordinal) {
-    cuCtxSetCurrent(capped_context);
+  if (capped_context == nullptr || status != cudaSuccess) {
+    return status;
   }
+  // A capped process sees one device, so any successful cudaSetDevice selected
+  // the capped one and left the primary context current.
+  bind_or_die("cudaSetDevice");
   return status;
 }
 
@@ -194,6 +214,16 @@ extern "C" cudaError_t cudaSetDevice(int device) {
 extern "C" unsigned int green_ctx_requested_sm() { return requested_sm; }
 
 extern "C" unsigned int green_ctx_actual_sm() { return actual_sm; }
+
+// 1 when the calling thread is bound to the capped context itself, not merely
+// to some context reporting the same SM count.
+extern "C" int green_ctx_current_is_capped() {
+  CUcontext current = nullptr;
+  if (capped_context == nullptr || cuCtxGetCurrent(&current) != CUDA_SUCCESS) {
+    return 0;
+  }
+  return current == capped_context ? 1 : 0;
+}
 
 extern "C" unsigned int green_ctx_current_sm() {
   CUcontext current = nullptr;

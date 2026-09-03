@@ -343,9 +343,10 @@ class StageConfig(BaseModel):
         default=None,
         gt=0,
         description=(
-            "Cap this stage's process to at most this many SMs, using a CUDA "
-            "Green Context. Must be a multiple of the device's SM group size "
-            "(8 on H100/H200). A cap is an upper bound, not a reservation: "
+            "Provision this stage's process with this many SMs instead of the "
+            "whole device, using a CUDA Green Context. Must be a multiple of 8, "
+            "the SM group size on H100/H200. A cap bounds the stage, it does "
+            "not reserve: "
             "caps may overlap, and an uncapped stage still sees the whole "
             "device. Stages sharing an OS process share one cap and may not "
             "disagree. Whether a cap helps and which stage to cap must be "
