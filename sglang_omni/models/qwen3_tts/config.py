@@ -49,7 +49,10 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
             name="preprocessing",
             process="pipeline",
             factory_path=f"{_PKG}.stages.create_preprocessing_executor",
-            gpu=0,
+            # Note (Jiaxin Deng): no gpu declaration here. Sharing the engine's
+            # process the stage holds no GPU budget of its own, and declaring one
+            # makes every layout that shares the card demand a fraction for it. A
+            # split frontend passes --preprocessing.gpu with its own fraction.
             next="tts_engine",
         ),
         EngineStageConfig(

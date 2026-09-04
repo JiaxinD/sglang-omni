@@ -217,6 +217,7 @@ with the one it declares:
 sgl-omni serve \
   --model-path Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --preprocessing.process tts_frontend \
+  --preprocessing.gpu 0 \
   --preprocessing.gpu_memory_fraction 0.05 \
   --tts_engine.gpu_memory_fraction 0.75 \
   --tts_engine.engine.mem_fraction_static 0.75 \

@@ -267,7 +267,7 @@ def test_qwen3_tts_config_and_registry_contracts() -> None:
     ]
     assert config.stages[1].factory_path.endswith("create_sglang_tts_engine_executor")
     assert config.terminal_stages == ["vocoder"]
-    assert config.gpu_placement == {"preprocessing": 0, "tts_engine": 0, "vocoder": 0}
+    assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
     assert config.stages[1].factory.device is None
     assert config.stages[2].factory.device is None
     assert {stage.process for stage in config.stages} == {"pipeline"}
@@ -5941,8 +5941,9 @@ def test_qwen3_tts_config_loads_frontend_only_outside_engine_process() -> None:
     assert config.stage_factory_kwargs("preprocessing") == {}
 
     split = config.model_copy(deep=True)
+    # A split frontend declares its own gpu, the way the documented recipe does.
     split.stages[0] = split.stages[0].model_copy(
-        update={"process": "tts_frontend", "gpu_memory_fraction": 0.05}
+        update={"process": "tts_frontend", "gpu": 0, "gpu_memory_fraction": 0.05}
     )
     split.stages[1] = split.stages[1].model_copy(update={"gpu_memory_fraction": 0.75})
     split.stages[2] = split.stages[2].model_copy(update={"gpu_memory_fraction": 0.12})
@@ -5966,6 +5967,22 @@ def test_qwen3_tts_config_loads_frontend_only_outside_engine_process() -> None:
         "load_frontend": True,
         "max_concurrency": 1,
     }
+
+
+def test_qwen3_tts_shared_gpu_layout_demands_no_preprocessing_fraction() -> None:
+    """Sharing the engine's process, preprocessing has no GPU budget to declare.
+
+    Declaring one would make every layout that puts a second process group on the
+    card refuse to start until preprocessing is given a fraction it does not use.
+    """
+    from sglang_omni.config.placement import build_stage_placement_plan
+
+    config = Qwen3TTSPipelineConfig(model_path="model")
+    shared = config.model_copy(deep=True)
+    shared.stages[2] = shared.stages[2].model_copy(update={"process": "vocoder"})
+
+    placement = build_stage_placement_plan(shared)
+    assert placement.gpus[0].missing_fraction_stage_names == ("tts_engine", "vocoder")
 
 
 def test_qwen3_tts_prompt_frontend_builds_a_custom_voice_prompt() -> None:
