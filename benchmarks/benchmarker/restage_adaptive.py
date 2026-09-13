@@ -59,8 +59,8 @@ async def execute_adaptive_campaign(
         raise ValueError("Adaptive max_rate must cover the initial rates")
     duration = settings.target_arrival_duration_s
     if duration is not None:
-        if task != "asr":
-            raise ValueError("Automatic corpus duration currently requires ASR")
+        if task not in ("asr", "tts"):
+            raise ValueError("Automatic corpus duration requires ASR or TTS")
         if not trial_options.get("samples"):
             raise ValueError("Automatic corpus duration requires samples")
         corpus_repeats = trial_options.get("corpus_repeats", 1)

@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from benchmarks.benchmarker.restage_corpus import repeat_corpus
 from benchmarks.benchmarker.restage_quality import evaluate_tts_quality
 from benchmarks.benchmarker.restage_trial import (
     TrialMeasurement,
@@ -49,6 +50,7 @@ async def execute_tts_trial(
     arrival_seed: int | None = None,
     profile: bool = False,
     defer_quality: bool = False,
+    corpus_repeats: int = 1,
 ) -> Evaluation | TrialMeasurement:
     """Measure one admitted configuration, then transcribe its saved audio.
 
@@ -64,9 +66,8 @@ async def execute_tts_trial(
         "stream", False
     ):
         raise ValueError("A playback SLO requires a streaming sender")
+    samples, request_sources = repeat_corpus(samples, corpus_repeats)
     targets = {sample.sample_id: sample.target_text for sample in samples}
-    if len(targets) != len(samples):
-        raise ValueError("Sample IDs must be unique")
 
     async def transcribe(valid_samples):
         if not valid_samples:
@@ -108,6 +109,14 @@ async def execute_tts_trial(
             json.dumps(
                 {
                     "samples": [asdict(sample) for sample in samples],
+                    **(
+                        {
+                            "corpus_repeats": corpus_repeats,
+                            "request_sources": request_sources,
+                        }
+                        if corpus_repeats > 1
+                        else {}
+                    ),
                     **(
                         {"warmup_sample": asdict(warmup_sample)}
                         if warmup_sample is not None
@@ -206,6 +215,7 @@ async def evaluate_tts_batch(
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     asr_concurrency: int = 8,
+    corpus_repeats: int = 1,
 ) -> None:
     """Finalize each measurement using one lazily started ASR service.
 
@@ -213,9 +223,8 @@ async def evaluate_tts_batch(
     across trials, with distinct saved audio paths; ASR timing is not a serving
     measurement. The callback checkpoints every completed quality decision.
     """
+    samples, _ = repeat_corpus(samples, corpus_repeats)
     targets = {sample.sample_id: sample.target_text for sample in samples}
-    if len(targets) != len(samples):
-        raise ValueError("Sample IDs must be unique")
     started = False
     with ExitStack() as stack:
 

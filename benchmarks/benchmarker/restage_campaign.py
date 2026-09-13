@@ -342,6 +342,7 @@ async def _execute_campaign(
                             name: trial_options[name]
                             for name in (
                                 "samples",
+                                "corpus_repeats",
                                 "asr_config_path",
                                 "asr_model_path",
                                 "port",

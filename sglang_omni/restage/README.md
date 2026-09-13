@@ -115,12 +115,12 @@ It stops when every candidate fails the latest rate or `max_rate` is reached.
 Every candidate retains the same measured grid and paired arrival seeds.
 There is no binary refinement or inference about rates between measured points.
 
-`target_arrival_duration_s` is optional and currently supports ASR only. It
+`target_arrival_duration_s` is optional for ASR and TTS campaigns. It
 increases `corpus_repeats` to supply at least `rate * duration` requests,
 rounded to a whole corpus. This targets the nominal arrival window; Poisson
-arrivals and final draining change actual duration. Repeated audio is not
-new independent data and may change cache behavior. Other tasks can use
-adaptive search with their supplied corpus by omitting this setting.
+arrivals and final draining change actual duration. Repeated inputs are not
+new independent data and may change cache behavior. Omit this setting to
+keep the supplied corpus repetition count at every rate.
 
 The parent records `adaptive-campaign.json`, `adaptive-search.json` and the
 aggregate recommendation. Each `rate-*` directory is a regular campaign with
@@ -166,11 +166,13 @@ and actual reuse counts separately; changing request IDs does not change audio
 fingerprints. Disabling result storage also avoids cache-write costs, so its
 capacity is specific to that configuration, not a guaranteed production bound.
 
-ASR campaigns can set `trial_options.corpus_repeats` to a positive integer
+ASR and TTS campaigns can set `trial_options.corpus_repeats` to a positive integer
 (default `1`) to send the supplied corpus in order that many times. Repeated
 requests receive unique IDs; `workload.json` records their original sample IDs
-in `request_sources`, and each response is scored against its original reference.
-Warmup stays separate. This increases request count, not distinct audio count,
+in `request_sources`. ASR responses use their original reference transcripts;
+TTS outputs use their original target texts, including deferred batch quality.
+Each generated output retains its own quality verdict. Warmup stays separate.
+This increases request count, not distinct input count,
 and does not clear caches. At rate `r`, `N` samples repeated `k` times provide
 an expected offered interval of approximately `N*k/r` seconds; Poisson arrivals
 and draining change the actual duration. Report measured time and queue behavior

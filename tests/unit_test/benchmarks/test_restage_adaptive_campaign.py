@@ -8,7 +8,10 @@ from sglang_omni.restage.evaluation import SLO, Observation, evaluate
 
 
 @pytest.mark.asyncio
-async def test_adaptive_campaign_shared_grid_duration_and_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task", ["asr", "tts"])
+async def test_adaptive_campaign_shared_grid_duration_and_resume(
+    tmp_path, monkeypatch, task
+):
     configs = {}
     for name in ("single", "dual"):
         path = tmp_path / f"{name}.yaml"
@@ -32,9 +35,9 @@ async def test_adaptive_campaign_shared_grid_duration_and_resume(tmp_path, monke
             elapsed_s=1,
         )
 
-    monkeypatch.setattr(restage_campaign, "execute_asr_trial", trial)
+    monkeypatch.setattr(restage_campaign, f"execute_{task}_trial", trial)
     options = dict(
-        task="asr",
+        task=task,
         configs=configs,
         baseline="single",
         rates=[1],

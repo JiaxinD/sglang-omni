@@ -3,9 +3,10 @@
 
 import json
 import math
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 
+from benchmarks.benchmarker.restage_corpus import repeat_corpus
 from benchmarks.benchmarker.restage_trial import execute_trial
 from benchmarks.dataset.seedtts import SampleInput
 from benchmarks.metrics.wer import SampleOutput
@@ -42,19 +43,7 @@ async def execute_asr_trial(
         raise ValueError("ASR does not support audio-output SLOs")
     if not math.isfinite(max_wer) or max_wer < 0:
         raise ValueError("max_wer must be finite and nonnegative")
-    if type(corpus_repeats) is not int or corpus_repeats < 1:
-        raise ValueError("corpus_repeats must be a positive integer")
-    if len({sample.sample_id for sample in samples}) != len(samples):
-        raise ValueError("Sample IDs must be unique")
-    request_sources = {}
-    if corpus_repeats > 1:
-        expanded = []
-        for cycle in range(corpus_repeats):
-            for index, sample in enumerate(samples):
-                request_id = f"restage-repeat-{cycle}-{index}"
-                expanded.append(replace(sample, sample_id=request_id))
-                request_sources[request_id] = sample.sample_id
-        samples = expanded
+    samples, request_sources = repeat_corpus(samples, corpus_repeats)
     targets = {sample.sample_id: sample.ref_text for sample in samples}
 
     async def quality(results):
