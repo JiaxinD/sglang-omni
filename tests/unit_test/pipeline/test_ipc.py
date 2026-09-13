@@ -438,6 +438,11 @@ async def _run_launcher_with_fake_runner(
             )
             runner_ref = self
 
+        def request_profile_inventory(self):
+            return [
+                {"stage": "preprocessing", "pid": 12345, "role": "single", "tp_rank": 0}
+            ]
+
         async def start(self, timeout: float) -> None:
             del timeout
             self.started = True
@@ -551,6 +556,13 @@ async def test_launcher_uses_runner_and_mounts_profiler_routes(
         assert profiler_calls.starts[0]["enable_torch"] is False
         assert profiler_calls.starts[0]["event_dir"] == str(tmp_path / "events")
         assert profiler_calls.stops == [{"run_id": None}]
+        import json
+
+        inventory = json.loads(
+            next((tmp_path / "events").glob("inventory_*.json")).read_text()
+        )
+        assert inventory["workers"][1] == runner.request_profile_inventory()[0]
+        assert inventory["workers"][0]["stage"] == "coordinator"
     finally:
         rec = get_recorder()
         if rec.is_active():

@@ -5,6 +5,82 @@ import pytest
 from benchmarks.benchmarker import restage_profile
 from benchmarks.benchmarker.data import RequestResult
 from benchmarks.benchmarker.restage_profile import write_profile_report
+from sglang_omni.profiler.event_recorder import RequestEventRecorder
+
+
+def test_profile_reports_missing_rank_and_unobserved_close(tmp_path):
+    import os
+
+    from sglang_omni.profiler.lifecycle import write_inventory
+
+    worker = dict(stage="engine", pid=os.getpid(), role="leader", tp_rank=0)
+    write_inventory(
+        tmp_path,
+        "run",
+        [worker, {**worker, "pid": 99999, "role": "follower", "tp_rank": 1}],
+    )
+    rec = RequestEventRecorder()
+    rec.start("run", str(tmp_path), "engine", worker={"role": "leader", "tp_rank": 0})
+    output = tmp_path / "report.json"
+    try:
+        write_profile_report([], source=tmp_path, run_id="run", output=output)
+        report = json.loads(output.read_text())
+        coverage = report["recorder_coverage"]
+        assert [w["status"] for w in coverage["workers"]] == [
+            "recorder_observed",
+            "recorder_missing",
+        ]
+        assert coverage["sessions"][0]["close_status"] == "unobserved"
+        assert report["calibration_ready"] is False
+    finally:
+        rec.stop()
+    write_profile_report([], source=tmp_path, run_id="run", output=output)
+    session = json.loads(output.read_text())["recorder_coverage"]["sessions"][0]
+    assert session["close_status"] == "clean"
+    assert session["events_written"] == session["events_parsed"] == 0
+
+
+def test_profile_lifecycle_reports_parse_damage_and_absent_inventory(tmp_path):
+    rec = RequestEventRecorder()
+    path = rec.start("run", str(tmp_path), "engine")
+    rec.emit(request_id="a", stage="engine", event_name="encoder_start")
+    # Simulate a damaged line on disk, distinct from a writer exception.
+    rec._fp.write("broken json\n")
+    rec.stop()
+    output = tmp_path / "report.json"
+    write_profile_report([], source=tmp_path, run_id="run", output=output)
+    coverage = json.loads(output.read_text())["recorder_coverage"]
+    assert coverage["inventory_status"] == "unavailable"
+    assert coverage["sessions"][0]["events_written"] == 1
+    assert coverage["sessions"][0]["events_parsed"] == 1
+    assert coverage["sessions"][0]["unparsed_lines"] == 1
+    assert coverage["sessions"][0]["write_failures"] == 0
+
+
+def test_profile_preserves_restarts_and_sessions_with_unavailable_event_bytes(tmp_path):
+    import os
+    from pathlib import Path
+
+    from sglang_omni.profiler.lifecycle import recorder_coverage, write_inventory
+
+    worker = dict(stage="engine", pid=os.getpid(), role="single", tp_rank=0)
+    write_inventory(tmp_path, "run", [worker])
+    write_inventory(tmp_path, "run", [worker])
+    rec = RequestEventRecorder()
+    for _ in range(2):
+        path = rec.start(
+            "run", str(tmp_path), "engine", worker={"role": "single", "tp_rank": 0}
+        )
+        rec.emit(request_id="a", stage="engine", event_name="encoder_start")
+        rec.stop()
+    Path(path).write_text("")
+    report = recorder_coverage(tmp_path, "run")
+    assert report["inventory_status"] == "available"
+    assert len(report["workers"][0]["sessions"]) == 2
+    assert len(report["sessions"]) == len(report["read_errors"]) == 2
+    assert all(s["events_parsed"] is None for s in report["sessions"])
+    write_inventory(tmp_path, "run", [{**worker, "pid": 99999}])
+    assert recorder_coverage(tmp_path, "run")["inventory_status"] == "ambiguous"
 
 
 def test_profile_report_excludes_warmup_and_pairs_within_worker(tmp_path):

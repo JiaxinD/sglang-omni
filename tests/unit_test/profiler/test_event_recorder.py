@@ -38,6 +38,52 @@ def _read_events(path: str) -> list[dict]:
         return [json.loads(line) for line in fp if line.strip()]
 
 
+def test_lifecycle_rotation_keeps_session_counts_and_colocated_identity(tmp_path):
+    rec = RequestEventRecorder()
+    path = rec.start("first", str(tmp_path), "encoder", worker={"tp_rank": 0})
+    rec.start("first", str(tmp_path), "decoder", worker={"tp_rank": 0})
+    rec.start("first", str(tmp_path), "decoder", worker={"tp_rank": 0})
+    rec.emit(request_id="a", stage="encoder", event_name="encoder_start")
+    rec.start("second/unsafe", str(tmp_path), "encoder", worker={"tp_rank": 0})
+    rec.emit(request_id="b", stage="encoder", event_name="encoder_start")
+    rec.stop()
+    sessions = [_read_events(str(p)) for p in tmp_path.glob("lifecycle_*.jsonl")]
+    assert len(sessions) == 2
+    sessions.sort(key=lambda events: events[0]["monotonic_ns"])
+    first, second = sessions
+    assert [e["kind"] for e in first] == ["open", "join", "join", "close"]
+    assert [e["stage"] for e in first if e["kind"] == "join"] == ["encoder", "decoder"]
+    assert first[-1]["reason"] == "rotated"
+    assert second[-1]["reason"] == "stop"
+    assert second[0]["events_start_bytes"] == first[-1]["events_end_bytes"]
+    assert second[-1]["events_end_bytes"] == Path(path).stat().st_size
+    assert all(s[-1]["events_written"] == 1 for s in sessions)
+    assert all(s[-1]["write_failures"] == 0 for s in sessions)
+    assert all(s[-1]["close_ok"] for s in sessions)
+    assert [e["request_id"] for e in _read_events(path)] == ["a", "b"]
+
+
+def test_lifecycle_records_failed_close_without_claiming_clean_file(tmp_path):
+    rec = RequestEventRecorder()
+    rec.start("run", str(tmp_path), "encoder")
+    actual = rec._fp
+
+    class FailedFlush:
+        def flush(self):
+            raise OSError("disk flush failed")
+
+        def close(self):
+            actual.close()
+
+    rec._fp = FailedFlush()
+    rec.stop()
+    records = _read_events(str(next(tmp_path.glob("lifecycle_*.jsonl"))))
+    assert records[-1]["kind"] == "close"
+    assert records[-1]["close_ok"] is False
+    assert "disk flush failed" in records[-1]["close_error"]
+    assert actual.closed
+
+
 def test_event_dataclass_roundtrip() -> None:
     ev = RequestEvent(
         request_id="r1",

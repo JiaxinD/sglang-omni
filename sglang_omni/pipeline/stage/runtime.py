@@ -116,6 +116,9 @@ class Stage:
     ):
         self.name = name
         self.role = role
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.placement_gpu_id = placement_gpu_id
         self.get_next = get_next
         self.gpu_id = gpu_id
         self.endpoints = endpoints
@@ -1801,7 +1804,16 @@ class Stage:
         if msg.event_dir is not None:
             try:
                 _get_recorder().start(
-                    run_id=run_id, event_dir=msg.event_dir, stage=self.name
+                    run_id=run_id,
+                    event_dir=msg.event_dir,
+                    stage=self.name,
+                    worker={
+                        "role": self.role,
+                        "tp_rank": self.tp_rank,
+                        "tp_size": self.tp_size,
+                        "gpu_id": self.gpu_id,
+                        "placement_gpu_id": self.placement_gpu_id,
+                    },
                 )
             except Exception:
                 logger.warning(

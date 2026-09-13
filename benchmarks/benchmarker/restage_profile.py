@@ -10,6 +10,7 @@ from pathlib import Path
 import aiohttp
 
 from benchmarks.benchmarker.data import RequestResult
+from sglang_omni.profiler.lifecycle import recorder_coverage
 from sglang_omni.profiler.views import (
     RequestTimeline,
     compute_stage_intervals,
@@ -78,6 +79,7 @@ def write_profile_report(
             {
                 "run_id": run_id,
                 "requests": requests,
+                "recorder_coverage": recorder_coverage(source, run_id),
                 "calibration_ready": False,
                 "scope": "Observed event pairs only; no proof of full stage coverage, isolation or GPU service time.",
             },

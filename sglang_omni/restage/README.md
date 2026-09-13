@@ -209,6 +209,18 @@ preserving separate worker timelines and requests without correlated events.
 ASR child intervals retain their own IDs, so overlapping chunks and retries
 are not paired with one another or collapsed into a single service duration.
 
+`recorder_coverage` compares recorder joins against the launched process/stage
+inventory, including colocated stages and TP ranks. Separate `lifecycle_*.jsonl`
+files record host/process identity, wall and monotonic timestamps, joins, write
+failures and the observed close outcome. Event counts use session byte offsets
+because request files append across runs. A missing close is `unobserved`;
+`clean` describes flush/close calls, not complete instrumentation. Writer counts,
+parsed records and damaged lines are reported separately. GPU indices are runtime
+metadata, not proof of physical device binding. Older runs without an inventory
+report it as unavailable. Identical inventory snapshots are combined; different
+snapshots for the same run are labeled ambiguous. Each worker lists its observed
+sessions so restarts remain visible. Use a distinct run ID for each trial.
+
 This is diagnostic collection, not an isolated calibration or a readiness
 acknowledgement from every worker. Event pairs do not prove complete stage
 coverage or GPU service time; the report explicitly leaves `calibration_ready`

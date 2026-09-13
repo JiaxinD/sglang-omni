@@ -33,6 +33,7 @@ import socket
 import threading
 import time
 from contextlib import contextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -44,6 +45,7 @@ from sglang_omni.config import PipelineConfig
 from sglang_omni.models.model_capabilities import get_model_capabilities
 from sglang_omni.pipeline.mp_runner import MultiProcessPipelineRunner
 from sglang_omni.profiler.event_recorder import get_recorder as _get_event_recorder
+from sglang_omni.profiler.lifecycle import write_inventory
 from sglang_omni.profiler.profiler_control import ProfilerControlClient
 from sglang_omni.serve.openai_api import create_app
 from sglang_omni.serve.protocol import DEFAULT_TTS_BATCH_MAX_ITEMS
@@ -261,9 +263,29 @@ def _default_event_dir(profiler_dir: str, run_id: str) -> str:
 
 
 def _mount_profiler_routes(
-    app, profiler_ctl: ProfilerControlClient, profiler_dir: str | None
+    app,
+    profiler_ctl: ProfilerControlClient,
+    profiler_dir: str | None,
+    *,
+    runner: MultiProcessPipelineRunner | None = None,
 ) -> None:
     router = APIRouter()
+
+    def record_inventory(event_dir: str, run_id: str) -> None:
+        if runner is not None:
+            write_inventory(
+                Path(event_dir),
+                run_id,
+                [
+                    {
+                        "stage": "coordinator",
+                        "pid": os.getpid(),
+                        "role": "coordinator",
+                        "tp_rank": None,
+                    },
+                    *runner.request_profile_inventory(),
+                ],
+            )
 
     @router.post("/start_profile")
     async def start(req: StartReq):
@@ -295,9 +317,13 @@ def _mount_profiler_routes(
                 )
             tpl = req.trace_path_template or ""
         if event_dir is not None:
+            record_inventory(event_dir, run_id)
             try:
                 _get_event_recorder().start(
-                    run_id=run_id, event_dir=event_dir, stage="coordinator"
+                    run_id=run_id,
+                    event_dir=event_dir,
+                    stage="coordinator",
+                    worker={"role": "coordinator", "tp_rank": None},
                 )
             except Exception:
                 logger.warning(
@@ -333,9 +359,13 @@ def _mount_profiler_routes(
                     ),
                 )
             event_dir = _default_event_dir(profiler_dir, run_id)
+        record_inventory(event_dir, run_id)
         try:
             _get_event_recorder().start(
-                run_id=run_id, event_dir=event_dir, stage="coordinator"
+                run_id=run_id,
+                event_dir=event_dir,
+                stage="coordinator",
+                worker={"role": "coordinator", "tp_rank": None},
             )
         except Exception:
             logger.warning(
@@ -459,7 +489,7 @@ async def _run_server(
         )
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
-        _mount_profiler_routes(app, profiler_ctl, profiler_dir)
+        _mount_profiler_routes(app, profiler_ctl, profiler_dir, runner=mp_runner)
 
         config = uvicorn.Config(
             app,

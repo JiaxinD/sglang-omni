@@ -519,6 +519,26 @@ class MultiProcessPipelineRunner:
             endpoints.update(group.stage_control_endpoints)
         return endpoints
 
+    def request_profile_inventory(self) -> list[dict[str, Any]]:
+        """Snapshot launched worker identities, including colocated stages and TP ranks."""
+        if not self._started:
+            raise RuntimeError("Runner not started")
+        return [
+            {
+                "stage": stage.stage_name,
+                "pid": process.pid,
+                "process_name": spec.process_name,
+                "role": stage.role,
+                "tp_rank": stage.tp_rank,
+                "tp_size": stage.tp_size,
+                "gpu_id": stage.gpu_id,
+                "placement_gpu_id": stage.placement_gpu_id,
+            }
+            for group in self._groups
+            for spec, process in zip(group.process_specs, group.processes, strict=True)
+            for stage in spec.stage_specs
+        ]
+
     async def start(self, timeout: float = 120.0) -> None:
         if self._started:
             raise RuntimeError("Already started")

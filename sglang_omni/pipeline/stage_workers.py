@@ -515,6 +515,12 @@ def _run_process(
             reason=f"stage process {spec.process_name} failure",
         )
         raise
+    finally:
+        # Note (Jiaxin Deng): close only after all colocated stages finish;
+        # a stage-local close would cut off its siblings' final events.
+        from sglang_omni.profiler.event_recorder import get_recorder
+
+        get_recorder().stop(reason="process_exit")
 
 
 def _cleanup_constructed_stages(
