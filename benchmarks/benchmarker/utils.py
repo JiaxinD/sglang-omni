@@ -407,6 +407,9 @@ def _ensure_port_available(host: str, port: int) -> None:
     probe_host = "" if host in {"0.0.0.0", "::"} else host
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # Note (Jiaxin Deng): match server reuse so TIME_WAIT is not a live listener.
+            if os.name == "posix":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((probe_host, port))
     except OSError as exc:
         raise RuntimeError(
