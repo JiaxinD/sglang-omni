@@ -277,3 +277,21 @@ This API does not collect model measurements, verify provenance against a
 running server or infer saturated serving capacity from serial latency.
 Those integrations remain necessary before prediction can rank new-hardware
 placements.
+
+### Batched TTS quality evaluation
+
+A campaign spec may set `"batch_quality": true` for TTS or Omni speech trials.
+For each candidate, generation still starts and stops an independent service
+for every rate/repeat. After those measurements finish, one ASR service evaluates
+the saved audio sequentially across the pending trials. Generation cache policy
+is unchanged; ASR remains warm across quality batches, and its timing is excluded
+from the measured serving results. This mode changes evaluator lifecycle and is
+recorded in campaign identity, so resume cannot mix it with the default mode.
+
+Every completed quality decision is checkpointed immediately, including rejected
+trials. A later quality error preserves those decisions and the remaining raw
+measurements. Resume currently reuses completed evaluations only; pending or
+failed quality cells generate again in new attempt directories. The shared ASR
+log is `asr-batch-server.log` in the first pending trial directory, while each
+trial retains its own quality protocol, transcript details and result. This
+reduces ASR launches per candidate; it does not yet reuse generation services.

@@ -162,3 +162,94 @@ async def test_tts_requires_streaming_for_first_audio_constraint(tmp_path, api):
             sender_options={"stream": False},
         )
     assert not (tmp_path / "trial").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_second", [False, True])
+async def test_batch_quality_reuses_asr_and_retains_each_trial(
+    tmp_path, monkeypatch, fail_second
+):
+    import json
+
+    from benchmarks.benchmarker.restage_trial import TrialMeasurement
+
+    measurements = []
+    for i in range(3):
+        dest = tmp_path / str(i)
+        dest.mkdir()
+        wav = dest / "a.wav"
+        sf.write(wav, np.full(16000, 0.1), 16000)
+        measurements.append(
+            TrialMeasurement(
+                dest,
+                [
+                    RequestResult(
+                        request_id="a",
+                        is_success=True,
+                        wav_path=str(wav),
+                        scheduled_s=0,
+                        completed_s=0.1,
+                    )
+                ],
+                SLO(max_latency_s=1),
+                dict(status="awaiting_quality", expected_requests=1, elapsed_s=1),
+            )
+        )
+    events = []
+
+    @contextmanager
+    def server(**kwargs):
+        events.append("start")
+        try:
+            yield
+        finally:
+            events.append("stop")
+
+    async def transcribe(samples, **kwargs):
+        i = int(Path(samples[0].ref_audio).parent.name)
+        events.append(i)
+        if i == 1 and fail_second:
+            raise RuntimeError("ASR unavailable")
+        return [
+            RequestResult(
+                request_id="a",
+                is_success=True,
+                text="hello" if i != 1 else "different words",
+            )
+        ], 1
+
+    from pathlib import Path
+
+    monkeypatch.setattr(restage_tts, "managed_omni_server", server)
+    monkeypatch.setattr(restage_tts, "run_asr_transcription", transcribe)
+    completed = []
+
+    async def run():
+        await restage_tts.evaluate_tts_batch(
+            measurements,
+            samples=[SampleInput("a", "", "", "hello")],
+            asr_config_path=tmp_path / "asr.yaml",
+            asr_model_path="asr",
+            port=18000,
+            lang="en",
+            max_wer=0.2,
+            on_evaluated=lambda m, e: completed.append(
+                (m.destination.name, e.feasible)
+            ),
+        )
+
+    if fail_second:
+        with pytest.raises(RuntimeError, match="ASR unavailable"):
+            await run()
+        assert completed == [("0", True)]
+        assert measurements[1].metadata["status"] == "failed"
+        assert measurements[2].metadata["status"] == "awaiting_quality"
+        assert events == ["start", 0, 1, "stop"]
+    else:
+        await run()
+        assert completed == [("0", True), ("1", False), ("2", True)]
+        assert events == ["start", 0, 1, 2, "stop"]
+    for name, feasible in completed:
+        saved = json.loads((tmp_path / name / "result.json").read_text())
+        assert saved["evaluation"]["feasible"] is feasible
+        assert saved["elapsed_s"] == 1

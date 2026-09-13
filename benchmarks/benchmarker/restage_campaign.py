@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 from filelock import FileLock
 
 from benchmarks.benchmarker.restage_asr import execute_asr_trial
-from benchmarks.benchmarker.restage_tts import execute_tts_trial
+from benchmarks.benchmarker.restage_tts import evaluate_tts_batch, execute_tts_trial
 from benchmarks.dataset.seedtts import SampleInput
 from sglang_omni.restage.evaluation import SLO, Evaluation
 from sglang_omni.restage.search import search_rates
@@ -30,6 +31,7 @@ async def execute_campaign(
     task: str = "tts",
     run_identity: str | None = None,
     resume: bool = False,
+    batch_quality: bool = False,
 ) -> Selection:
     """Measure supplied candidates with identical workload/SLO and paired arrivals.
 
@@ -55,6 +57,7 @@ async def execute_campaign(
             task=task,
             run_identity=run_identity,
             resume=resume,
+            batch_quality=batch_quality,
         )
 
 
@@ -104,10 +107,17 @@ async def _execute_campaign(
     task,
     run_identity,
     resume,
+    batch_quality,
 ):
     runners = {"tts": execute_tts_trial, "asr": execute_asr_trial}
     if task not in runners:
         raise ValueError(f"Unsupported campaign task: {task}")
+    if batch_quality and task != "tts":
+        raise ValueError("Batch quality is available for TTS campaigns only")
+    if not rates or any(not math.isfinite(rate) or rate <= 0 for rate in rates):
+        raise ValueError("Rates must be nonempty, finite and positive")
+    if type(repeats) is not int or repeats < 1:
+        raise ValueError("repeats must be a positive integer")
     run_trial = runners[task]
     if baseline not in configs:
         raise ValueError("Include the baseline configuration")
@@ -133,6 +143,8 @@ async def _execute_campaign(
             for key, path in snapshots.items()
         },
     }
+    if batch_quality:
+        metadata["batch_quality"] = True
     manifest = destination / "campaign.json"
     completed = {}
     checkpoint = destination / "completed-trials.json"
@@ -158,10 +170,39 @@ async def _execute_campaign(
         for key, path in snapshots.items():
             path.write_bytes(config_bytes[key])
         manifest.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    def record_failure(key, rate, repeat, trial_dir, exc, phase):
+        failure = json.dumps(
+            {
+                "candidate": key,
+                "rate": rate,
+                "repeat": repeat,
+                "directory": trial_dir.name,
+                "phase": phase,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            indent=2,
+        )
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(trial_dir / "execution-failure.json", failure)
+        _atomic_write(destination / "failure.json", failure)
+
+    def record_completed(key, rate, repeat, trial_dir, evaluation):
+        completed[key, rate, repeat] = {
+            "candidate": key,
+            "rate": rate,
+            "repeat": repeat,
+            "arrival_seed": arrival_seed + repeat,
+            "directory": trial_dir.name,
+            "evaluation": asdict(evaluation),
+        }
+        _atomic_write(checkpoint, json.dumps(list(completed.values()), indent=2))
+        write_trial_log()
+
     results = {}
     for index, (key, path) in enumerate(snapshots.items()):
 
-        async def trial(rate, repeat):
+        async def trial(rate, repeat, *, defer_quality=False):
             if (key, rate, repeat) in completed:
                 return Evaluation(**completed[key, rate, repeat]["evaluation"])
             base_dir = (
@@ -178,34 +219,74 @@ async def _execute_campaign(
                     destination=trial_dir,
                     rate=rate,
                     arrival_seed=arrival_seed + repeat,
+                    **({"defer_quality": True} if defer_quality else {}),
                     **trial_options,
                 )
             except BaseException as exc:
-                failure = json.dumps(
-                    {
-                        "candidate": key,
-                        "rate": rate,
-                        "repeat": repeat,
-                        "directory": trial_dir.name,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                    indent=2,
+                record_failure(
+                    key,
+                    rate,
+                    repeat,
+                    trial_dir,
+                    exc,
+                    "generation" if defer_quality else "trial",
                 )
-                trial_dir.mkdir(parents=True, exist_ok=True)
-                _atomic_write(trial_dir / "execution-failure.json", failure)
-                _atomic_write(destination / "failure.json", failure)
                 raise
-            completed[key, rate, repeat] = {
-                "candidate": key,
-                "rate": rate,
-                "repeat": repeat,
-                "arrival_seed": arrival_seed + repeat,
-                "directory": trial_dir.name,
-                "evaluation": asdict(evaluation),
-            }
-            _atomic_write(checkpoint, json.dumps(list(completed.values()), indent=2))
-            write_trial_log()
+            if defer_quality:
+                return evaluation
+            record_completed(key, rate, repeat, trial_dir, evaluation)
             return evaluation
+
+        if batch_quality:
+            pending = []
+            cells = {}
+            for repeat in range(repeats):
+                for rate in sorted(set(float(rate) for rate in rates)):
+                    if (key, rate, repeat) in completed:
+                        continue
+                    measurement = await trial(rate, repeat, defer_quality=True)
+                    pending.append(measurement)
+                    cells[measurement.destination] = (rate, repeat)
+
+            def checkpoint_quality(measurement, evaluation):
+                rate, repeat = cells[measurement.destination]
+                record_completed(key, rate, repeat, measurement.destination, evaluation)
+
+            if pending:
+                try:
+                    await evaluate_tts_batch(
+                        pending,
+                        on_evaluated=checkpoint_quality,
+                        **{
+                            name: trial_options[name]
+                            for name in (
+                                "samples",
+                                "asr_config_path",
+                                "asr_model_path",
+                                "port",
+                                "lang",
+                                "max_wer",
+                                "startup_timeout_s",
+                                "request_timeout_s",
+                                "asr_concurrency",
+                            )
+                            if name in trial_options
+                        },
+                    )
+                except BaseException as exc:
+                    unfinished = next(
+                        (
+                            m
+                            for m in pending
+                            if (key, *cells[m.destination]) not in completed
+                        ),
+                        pending[-1],
+                    )
+                    rate, repeat = cells[unfinished.destination]
+                    record_failure(
+                        key, rate, repeat, unfinished.destination, exc, "batch_quality"
+                    )
+                    raise
 
         results[key] = await search_rates(
             trial, [float(rate) for rate in rates], repeats=repeats

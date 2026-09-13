@@ -258,3 +258,196 @@ async def test_campaign_rejects_concurrent_writer(tmp_path):
                 trial_options={},
             )
     assert not destination.exists()
+
+
+@pytest.mark.asyncio
+async def test_campaign_batches_quality_after_generation_and_resumes_completed(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    config = tmp_path / "model.yaml"
+    config.write_text("model")
+    events = []
+    fail = True
+
+    async def trial(**kwargs):
+        assert kwargs["defer_quality"] is True
+        kwargs["destination"].mkdir()
+        events.append(("measure", kwargs["rate"]))
+        return SimpleNamespace(destination=kwargs["destination"], rate=kwargs["rate"])
+
+    async def quality(measurements, *, on_evaluated, **kwargs):
+        events.append(("quality", [m.rate for m in measurements]))
+        for m in measurements:
+            if fail and m.rate == 2:
+                raise RuntimeError("quality interrupted")
+            on_evaluated(
+                m,
+                evaluate(
+                    [Observation("a", 0, 0.1, True, True)],
+                    SLO(),
+                    expected_requests=1,
+                    elapsed_s=1,
+                ),
+            )
+
+    monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
+    monkeypatch.setattr(restage_campaign, "evaluate_tts_batch", quality)
+    options = dict(
+        configs={"default": config},
+        baseline="default",
+        rates=[1, 2],
+        repeats=1,
+        arrival_seed=42,
+        destination=tmp_path / "campaign",
+        trial_options={},
+        run_identity="frozen",
+        batch_quality=True,
+    )
+    with pytest.raises(RuntimeError, match="quality interrupted"):
+        await restage_campaign.execute_campaign(**options)
+    assert events == [("measure", 1), ("measure", 2), ("quality", [1, 2])]
+    checkpoint = json.loads((tmp_path / "campaign/completed-trials.json").read_text())
+    assert len(checkpoint) == 1 and checkpoint[0]["rate"] == 1
+    fail = False
+    events.clear()
+    result = await restage_campaign.execute_campaign(**options, resume=True)
+    assert events == [("measure", 2), ("quality", [2])]
+    assert result.recommended == "default"
+    assert (
+        len(json.loads((tmp_path / "campaign/completed-trials.json").read_text())) == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_batch_campaign_keeps_generation_independent(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    import numpy as np
+    import soundfile as sf
+
+    from benchmarks.benchmarker import restage_trial, restage_tts
+    from benchmarks.benchmarker.data import RequestResult
+
+    events = []
+
+    @contextmanager
+    def generation(**kwargs):
+        events.append("generation-start")
+        try:
+            yield
+        finally:
+            events.append("generation-stop")
+
+    @contextmanager
+    def asr(**kwargs):
+        events.append("asr-start")
+        try:
+            yield
+        finally:
+            events.append("asr-stop")
+
+    def sender(*args, save_audio_dir, **kwargs):
+        async def send(session, sample):
+            wav = Path(save_audio_dir) / "a.wav"
+            sf.write(wav, np.full(16000, 0.1), 16000)
+            return RequestResult(
+                request_id=sample.sample_id, is_success=True, wav_path=str(wav)
+            )
+
+        return send
+
+    async def transcribe(samples, **kwargs):
+        events.append("transcribe")
+        return [
+            RequestResult(request_id=s.sample_id, is_success=True, text=s.ref_text)
+            for s in samples
+        ], 1
+
+    from pathlib import Path
+
+    monkeypatch.setattr(restage_trial, "managed_omni_server", generation)
+    monkeypatch.setattr(restage_tts, "managed_omni_server", asr)
+    monkeypatch.setattr(restage_tts, "make_tts_send_fn", sender)
+    monkeypatch.setattr(restage_tts, "run_asr_transcription", transcribe)
+    config = tmp_path / "model.yaml"
+    config.write_text("model")
+    result = await restage_campaign.execute_campaign(
+        configs={"default": config, "split": config},
+        baseline="default",
+        rates=[1, 2],
+        repeats=1,
+        arrival_seed=42,
+        destination=tmp_path / "campaign",
+        batch_quality=True,
+        trial_options=dict(
+            model_path="tts",
+            asr_model_path="asr",
+            asr_config_path=config,
+            samples=[SampleInput("a", "", "", "hello")],
+            slo=SLO(max_latency_s=1),
+            port=18000,
+            lang="en",
+            max_wer=0.2,
+            warmup=0,
+        ),
+    )
+    assert result.recommended in ("default", "split")
+    assert (
+        events
+        == [
+            "generation-start",
+            "generation-stop",
+            "generation-start",
+            "generation-stop",
+            "asr-start",
+            "transcribe",
+            "transcribe",
+            "asr-stop",
+        ]
+        * 2
+    )
+    rows = json.loads((tmp_path / "campaign/completed-trials.json").read_text())
+    assert len(rows) == 4
+    for row in rows:
+        dest = tmp_path / "campaign" / row["directory"]
+        assert json.loads((dest / "result.json").read_text())["status"] == "complete"
+        assert (
+            json.loads((dest / "workload.json").read_text())["samples"][0][
+                "target_text"
+            ]
+            == "hello"
+        )
+        assert (dest / "quality-detail.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_batch_mode_is_part_of_resume_identity(tmp_path, monkeypatch):
+    config = tmp_path / "model.yaml"
+    config.write_text("model")
+
+    async def trial(**kwargs):
+        return evaluate(
+            [Observation("a", 0, 0.1, True, True)],
+            SLO(),
+            expected_requests=1,
+            elapsed_s=1,
+        )
+
+    monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
+    options = dict(
+        configs={"default": config},
+        baseline="default",
+        rates=[1],
+        repeats=1,
+        arrival_seed=42,
+        destination=tmp_path / "campaign",
+        trial_options={},
+        run_identity="frozen",
+    )
+    await restage_campaign.execute_campaign(**options)
+    with pytest.raises(ValueError, match="identity differs"):
+        await restage_campaign.execute_campaign(
+            **options, batch_quality=True, resume=True
+        )
