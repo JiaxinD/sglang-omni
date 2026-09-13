@@ -35,6 +35,7 @@ async def execute_campaign(
     resume: bool = False,
     batch_quality: bool = False,
     plan_evidence: dict | None = None,
+    adaptive_search: dict | None = None,
 ) -> Selection:
     """Measure supplied candidates with identical workload/SLO and paired arrivals.
 
@@ -49,6 +50,26 @@ async def execute_campaign(
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(destination.parent / f".{destination.name}.lock"), timeout=0):
+        if adaptive_search is not None:
+            from benchmarks.benchmarker.restage_adaptive import (
+                execute_adaptive_campaign,
+            )
+
+            return await execute_adaptive_campaign(
+                configs=configs,
+                baseline=baseline,
+                rates=rates,
+                repeats=repeats,
+                arrival_seed=arrival_seed,
+                destination=destination,
+                trial_options=trial_options,
+                task=task,
+                run_identity=run_identity,
+                resume=resume,
+                batch_quality=batch_quality,
+                plan_evidence=plan_evidence,
+                adaptive_search=adaptive_search,
+            )
         return await _execute_campaign(
             configs=configs,
             baseline=baseline,

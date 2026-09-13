@@ -5,8 +5,9 @@ The planning CLI exports **unmeasured candidates**. The installed
 `sgl-omni autotune run` command measures supplied candidates and selects a winner
 within the tested configurations and load grid, subject to quality and SLO
 checks. Planning can annotate candidates with supplied GPU-group calibration
-data. Automatic calibration and prediction-based execution ordering are not
-yet connected to the measurement workflow.
+data. Campaigns loading an exported plan use those predictions to order
+measurements after the baseline. Automatic calibration and measurement
+feedback into the performance model remain unfinished.
 
 ## Generate candidates
 
@@ -95,6 +96,46 @@ Predictions determine order only; recommendations still use measured quality
 and SLO. Calibration is not performed automatically by this loader. Result
 directory candidate filenames are snapshot indices; `campaign.json` maps them
 to their original candidate names.
+
+## Adapt the measured load grid
+
+Add an optional `adaptive_search` object to the campaign spec:
+
+```json
+{
+  "max_rate": 256,
+  "growth_factor": 2,
+  "target_arrival_duration_s": 120
+}
+```
+
+The campaign measures every candidate at each initial `rates` entry, then
+increases the common rate while at least one candidate passes every repeat.
+It stops when every candidate fails the latest rate or `max_rate` is reached.
+Every candidate retains the same measured grid and paired arrival seeds.
+There is no binary refinement or inference about rates between measured points.
+
+`target_arrival_duration_s` is optional and currently supports ASR only. It
+increases `corpus_repeats` to supply at least `rate * duration` requests,
+rounded to a whole corpus. This targets the nominal arrival window; Poisson
+arrivals and final draining change actual duration. Repeated audio is not
+new independent data and may change cache behavior. Other tasks can use
+adaptive search with their supplied corpus by omitting this setting.
+
+The parent records `adaptive-campaign.json`, `adaptive-search.json` and the
+aggregate recommendation. Each `rate-*` directory is a regular campaign with
+its own complete trial evidence. Resume reuses completed child trials and
+rejects changes to the original inputs, settings or caller-supplied identity.
+Execution errors still stop the run rather than becoming performance failures.
+The parent records the failed rate and child directory in `failure.json`.
+`partial-selection.json`, when present, compares only fully completed common
+rates after an interruption. It is not the final adaptive recommendation.
+Use the root `selection.json` for the completed search; child selections
+describe only their individual rate. Changing `max_rate` starts a new campaign
+identity, since a capped final rate also changes the tested grid.
+These are deployment-level observations, not GPU-group calibration: a failed
+SLO point is not a mathematical upper bound on GPU capacity, and a passing
+maximum rate leaves the boundary unmeasured.
 
 ## Keep warmup inputs separate
 
