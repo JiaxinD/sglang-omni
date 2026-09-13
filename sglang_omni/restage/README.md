@@ -244,6 +244,11 @@ and the non-pre-LM forward path do not provide these observations. Component
 identity is not an inferred stage mapping. Isolated replay, execution shape
 capture for other models and held-out validation remain necessary before fitting
 stage laws.
+Services created synchronously inside a stage factory also retain `constructed_in`
+with the stage name, TP role/rank/size, local GPU ID and placement GPU ID. This is
+construction provenance, not proof of exclusive ownership or physical CUDA
+context binding. Services created outside that thread's factory scope, including
+lazy or separate-thread construction, retain `null`; no PID-based guess is made.
 The report uses compact unit rows; member details remain in the JSONL. Existing
 aggregate `encoder_time_s` statistics include recording overhead when profiling
 is enabled and are not substituted for these per-execution intervals.

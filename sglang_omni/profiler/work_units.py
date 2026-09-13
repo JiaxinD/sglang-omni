@@ -14,6 +14,21 @@ logger = logging.getLogger(__name__)
 _execution_local = threading.local()
 
 
+def current_stage_construction() -> dict | None:
+    """Stage factory active on this thread; not physical device binding."""
+    return getattr(_execution_local, "stage_construction", None)
+
+
+@contextmanager
+def stage_construction_scope(stage: dict):
+    previous = current_stage_construction()
+    _execution_local.stage_construction = stage
+    try:
+        yield
+    finally:
+        _execution_local.stage_construction = previous
+
+
 def current_execution_observations() -> list[dict] | None:
     """Return this Python worker's collector, absent outside a profiled unit."""
     return getattr(_execution_local, "observations", None)

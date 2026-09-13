@@ -512,3 +512,34 @@ def test_cpu_scheduler_construction_skips_startup_lock(monkeypatch) -> None:
     scheduler = stage_workers._construct_scheduler(spec, None, _RecordingLog())
 
     assert isinstance(scheduler, FakeScheduler)
+
+
+def test_factory_construction_provenance_uses_actual_spec_and_restores(monkeypatch):
+    from sglang_omni.profiler.work_units import current_stage_construction
+
+    def factory():
+        return dict(current_stage_construction())
+
+    monkeypatch.setattr(stage_workers, "import_string", lambda path: factory)
+    spec = StageLaunchConfig(
+        stage_name="encoder", role="follower", tp_rank=1, tp_size=2
+    )
+    result = stage_workers._construct_scheduler(spec, None, _RecordingLog())
+    assert result == {
+        "stage": "encoder",
+        "role": "follower",
+        "tp_rank": 1,
+        "tp_size": 2,
+        "gpu_id": None,
+        "placement_gpu_id": None,
+    }
+    assert current_stage_construction() is None
+
+    def failed_factory():
+        assert current_stage_construction()["stage"] == "encoder"
+        raise RuntimeError("factory failed")
+
+    monkeypatch.setattr(stage_workers, "import_string", lambda path: failed_factory)
+    with pytest.raises(RuntimeError, match="factory failed"):
+        stage_workers._construct_scheduler(spec, None, _RecordingLog())
+    assert current_stage_construction() is None

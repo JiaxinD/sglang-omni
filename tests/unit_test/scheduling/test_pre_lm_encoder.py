@@ -201,6 +201,33 @@ def test_execution_observations_are_serialized_per_retry(tmp_path):
     assert current_execution_observations() is None
 
 
+def test_service_keeps_construction_snapshot_after_factory_scope(tmp_path):
+    from sglang_omni.profiler.work_units import stage_construction_scope
+
+    origin = {"stage": "encoder", "tp_rank": 1, "gpu_id": 0, "placement_gpu_id": 3}
+    with stage_construction_scope(origin):
+        service = _Service()
+    origin["stage"] = "changed"
+    unknown = _Service()
+    recorder = get_recorder()
+    recorder.start("run", str(tmp_path), "asr")
+    try:
+        assert service._submit(1).result(timeout=2) == 2
+        assert unknown._submit(2).result(timeout=2) == 4
+    finally:
+        service.close()
+        unknown.close()
+        recorder.stop()
+    begins = [r for r in _work_records(tmp_path) if r["kind"] == "begin"]
+    assert begins[0]["constructed_in"] == {
+        "stage": "encoder",
+        "tp_rank": 1,
+        "gpu_id": 0,
+        "placement_gpu_id": 3,
+    }
+    assert begins[1]["constructed_in"] is None
+
+
 class _Service(PreLMEncoderService[int, list[int], int]):
     def __init__(self, *, controlled_drain: bool = False) -> None:
         self.attachments: list[tuple[int, int]] = []

@@ -143,6 +143,7 @@ def work_unit_report(source: Path, run_id: str) -> dict:
                         "attempt": begin["attempt"],
                         "member_count": len(begin["members"]),
                         "component_id": begin.get("component_id"),
+                        "constructed_in": begin.get("constructed_in"),
                         "end_observed": end is not None,
                         "error_type": None if end is None else end["error_type"],
                         "host_execution_s": duration,

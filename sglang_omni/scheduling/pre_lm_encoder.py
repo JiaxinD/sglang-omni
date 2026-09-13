@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 from sglang_omni.profiler.event_recorder import get_recorder
-from sglang_omni.profiler.work_units import collect_execution_observations
+from sglang_omni.profiler.work_units import (
+    collect_execution_observations,
+    current_stage_construction,
+)
 
 ItemT = TypeVar("ItemT")
 EncodedT = TypeVar("EncodedT")
@@ -42,6 +45,10 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
         self._worker_state_lock = threading.Lock()
         self._worker_error: Exception | None = None
         self._profile_component_id: str | None = None
+        # Note (Jiaxin Deng): the worker cannot read its creator's thread-local
+        # factory scope. Snapshot here, before starting the worker thread.
+        constructed_in = current_stage_construction()
+        self._constructed_in = None if constructed_in is None else dict(constructed_in)
         self._thread = threading.Thread(
             target=self._worker,
             name=worker_name,
@@ -191,6 +198,7 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
                 )
             unit_id = recorder.begin(
                 component_id=self._profile_component_id,
+                constructed_in=self._constructed_in,
                 component=f"{type(self).__module__}.{type(self).__qualname__}",
                 thread=self._thread.name,
                 batch_id=batch_id,
