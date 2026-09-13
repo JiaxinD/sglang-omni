@@ -45,6 +45,40 @@ def collect_execution_observations():
         _execution_local.observations = previous
 
 
+@contextmanager
+def annotate_execution_device(device, observations: list[dict]):
+    """Attach worker-side device properties to newly recorded executions.
+
+    CUDA device properties can be cached by the runtime. They are not a query
+    of context affinity, exclusive partitions, or actual MPS attachment.
+    """
+    first = len(observations)
+    try:
+        yield
+    finally:
+        if len(observations) > first:
+            metadata = {"type": device.type, "index": device.index}
+            try:
+                if device.type == "cuda":
+                    import torch
+
+                    properties = torch.cuda.get_device_properties(device)
+                    metadata.update(
+                        name=properties.name,
+                        device_reported_sm_count=properties.multi_processor_count,
+                        mps_active_thread_percentage=os.environ.get(
+                            "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
+                        ),
+                        scope="device properties; not context affinity or MPS attachment",
+                    )
+            except Exception as exc:
+                # Note (Jiaxin Deng): diagnostic queries must not replace the
+                # encoder's original exception or invalidate a successful batch.
+                metadata["query_error_type"] = type(exc).__name__
+            for execution in observations[first:]:
+                execution["device"] = dict(metadata)
+
+
 class WorkUnitRecorder:
     """One profiling session; late completions never enter another session."""
 

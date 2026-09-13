@@ -486,11 +486,17 @@ class WhisperForConditionalGeneration(nn.Module):
             features.append(feature.to(device=reference.device, dtype=reference.dtype))
         # Note (Jiaxin Deng): only this Python pre-LM entry reads the collector;
         # the model forward/compile path keeps the default unobserved call.
-        from sglang_omni.profiler.work_units import current_execution_observations
-
-        return self._run_encoder(
-            torch.cat(features, dim=0), observations=current_execution_observations()
+        from sglang_omni.profiler.work_units import (
+            annotate_execution_device,
+            current_execution_observations,
         )
+
+        audio_features = torch.cat(features, dim=0)
+        observations = current_execution_observations()
+        if observations is None:
+            return self._run_encoder(audio_features)
+        with annotate_execution_device(reference.device, observations):
+            return self._run_encoder(audio_features, observations=observations)
 
     def _batch_audio_inputs(
         self,

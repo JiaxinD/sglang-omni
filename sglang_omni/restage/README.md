@@ -153,6 +153,13 @@ capped result. The CPU contract test proves configuration-to-child-environment
 propagation only. Green Context and exclusive SM partitioning remain separate
 runtime work. See the [NVIDIA MPS environment reference](https://docs.nvidia.com/deploy/mps/appendix-environment-variables.html).
 
+Profiled Whisper pre-LM execution records include worker-side device properties:
+the visible device index, device-reported SM count, and requested MPS percentage.
+Property-query failures remain diagnostic metadata. These potentially cached
+device properties do not prove context affinity or MPS attachment; correlate
+them with stage construction provenance and the daemon's client list. The
+default unprofiled encoder path does not query these properties.
+
 ## Measure a TTS candidate
 
 After allocating the visible GPUs, run one candidate with a JSON trial spec:

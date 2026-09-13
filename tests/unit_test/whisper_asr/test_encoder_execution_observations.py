@@ -8,9 +8,7 @@ from sglang_omni.models.whisper_asr.encoder_cuda_graph import (
     WhisperEncoderCudaGraphRunner,
     _CapturedGraph,
 )
-from sglang_omni.models.whisper_asr.sglang_model import (
-    WhisperForConditionalGeneration,
-)
+from sglang_omni.models.whisper_asr.sglang_model import WhisperForConditionalGeneration
 from sglang_omni.profiler.work_units import collect_execution_observations
 
 
@@ -82,3 +80,17 @@ def test_default_encoder_call_compiles_without_reading_active_collector():
     with collect_execution_observations() as observations:
         torch.testing.assert_close(compiled(features), run(features))
         assert observations == []
+
+
+def test_profiled_pre_lm_entry_retains_device_metadata():
+    from functools import partial
+
+    model = _model(torch.nn.Linear(5, 5))
+    model._run_encoder = partial(WhisperForConditionalGeneration._run_encoder, model)
+    features = torch.ones(1, 2, 5)
+    with collect_execution_observations() as observations:
+        output = WhisperForConditionalGeneration.encode_audio_features(
+            model, [SimpleNamespace(feature=features)]
+        )
+    torch.testing.assert_close(output, model.model.encoder(features))
+    assert observations[0]["device"] == {"type": "cpu", "index": None}
