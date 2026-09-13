@@ -83,6 +83,30 @@ def test_profile_preserves_restarts_and_sessions_with_unavailable_event_bytes(tm
     assert recorder_coverage(tmp_path, "run")["inventory_status"] == "ambiguous"
 
 
+def test_profile_report_keeps_work_units_out_of_request_timelines(tmp_path):
+    recorder = RequestEventRecorder()
+    recorder.start("run", str(tmp_path), "asr")
+    units = recorder.work_unit_recorder()
+    first = units.begin(
+        batch_id="batch", attempt=0, members=[{"feature_shape": [1, 80, 3000]}]
+    )
+    units.end(first, start_ns=100, end_ns=200, error_type=None)
+    units.begin(batch_id="interrupted", attempt=0, members=[])
+    recorder.stop()
+    output = tmp_path / "report.json"
+    write_profile_report([], source=tmp_path, run_id="run", output=output)
+    report = json.loads(output.read_text())
+    assert report["requests"] == {}
+    assert report["calibration_ready"] is False
+    session = report["work_units"]["sessions"][0]
+    assert len(session["units"]) == 2
+    assert session["units"][0]["host_execution_s"] == pytest.approx(1e-7)
+    assert session["units"][1]["host_execution_s"] is None
+    assert session["units"][0]["member_count"] == 1
+    assert "members" not in session["units"][0]
+    assert session["stop_observed"] is True
+
+
 def test_profile_report_excludes_warmup_and_pairs_within_worker(tmp_path):
     events = []
     for run, request, pid, name, timestamp in [

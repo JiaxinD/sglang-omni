@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import queue
 import threading
 import time
 from collections.abc import Iterator
@@ -195,7 +196,7 @@ def test_async_single_flight_completes_each_item_future() -> None:
     assert all(item.precomputed_embeddings is not None for item in items)
 
 
-def test_bounded_queue_applies_backpressure_and_records_saturation() -> None:
+def test_bounded_queue_applies_backpressure_and_records_saturation(monkeypatch) -> None:
     model = _StubModel()
     gate = threading.Event()
     model.encode_gate = gate
@@ -207,16 +208,30 @@ def test_bounded_queue_applies_backpressure_and_records_saturation() -> None:
     assert model.encode_calls == 1
     futures.append(service.submit_item(_item(2, 3)))
     submitted: list[concurrent.futures.Future[torch.Tensor]] = []
+    full_seen = threading.Event()
+    original_put = service._queue.put_nowait
+
+    def observe_full(entry):
+        try:
+            original_put(entry)
+        except queue.Full:
+            full_seen.set()
+            raise
+
+    monkeypatch.setattr(service._queue, "put_nowait", observe_full)
 
     thread = threading.Thread(
         target=lambda: submitted.append(service.submit_item(_item(3, 3)))
     )
     thread.start()
-    time.sleep(0.02)
-    assert thread.is_alive()
-
-    gate.set()
-    thread.join(timeout=2)
+    try:
+        # Note (Jiaxin Deng): a live thread may still be building its input;
+        # release the encoder only after the queue actually rejected a put.
+        assert full_seen.wait(timeout=2)
+        assert thread.is_alive()
+    finally:
+        gate.set()
+        thread.join(timeout=2)
     assert not thread.is_alive()
     for future in [*futures, *submitted]:
         future.result(timeout=2)

@@ -84,6 +84,27 @@ def test_lifecycle_records_failed_close_without_claiming_clean_file(tmp_path):
     assert actual.closed
 
 
+def test_failed_work_unit_start_cannot_reuse_prior_run(tmp_path, monkeypatch):
+    from sglang_omni.profiler import event_recorder
+
+    rec = RequestEventRecorder()
+    rec.start("first", str(tmp_path), "encoder")
+    old = rec.work_unit_recorder()
+
+    def failed_open(*args):
+        raise OSError("unwritable work-unit directory")
+
+    monkeypatch.setattr(event_recorder, "WorkUnitRecorder", failed_open)
+    try:
+        path = rec.start("second", str(tmp_path), "encoder")
+        assert rec.work_unit_recorder() is None
+        assert not old.is_active()
+        rec.emit(request_id="r", stage="encoder", event_name="encoder_start")
+    finally:
+        rec.stop()
+    assert _read_events(path)[-1]["run_id"] == "second"
+
+
 def test_event_dataclass_roundtrip() -> None:
     ev = RequestEvent(
         request_id="r1",

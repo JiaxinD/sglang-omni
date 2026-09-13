@@ -221,6 +221,25 @@ report it as unavailable. Identical inventory snapshots are combined; different
 snapshots for the same run are labeled ambiguous. Each worker lists its observed
 sessions so restarts remain visible. Use a distinct run ID for each trial.
 
+Pre-LM encoder workers also write `work_units_*.jsonl`. Each execution attempt
+has a batch ID, retry index, component/PID identity, input feature shapes and
+available audio fingerprints/token counts. The host envelope starts after the
+begin record and ends before future callbacks; it includes the model's existing
+synchronization and cache paths, with no added CUDA synchronization. Failed batch
+attempts and single-item retries remain separate. Recovery hooks between attempts
+are outside these envelopes. A stop during execution leaves an unmatched begin;
+its completion cannot enter a later session, even with the same run ID.
+
+The `work_units` report retains unfinished attempts and recording errors without
+creating request IDs. Cache hits and merged followers bypass this worker, so
+these records are not request coverage. Feature shapes describe the submitted
+items, not CUDA graph padding buckets or confirmed physical GPU work. Component
+identity is not an inferred stage mapping. Isolated replay, actual execution
+shape capture and held-out validation remain necessary before fitting stage laws.
+The report uses compact unit rows; member details remain in the JSONL. Existing
+aggregate `encoder_time_s` statistics include recording overhead when profiling
+is enabled and are not substituted for these per-execution intervals.
+
 This is diagnostic collection, not an isolated calibration or a readiness
 acknowledgement from every worker. Event pairs do not prove complete stage
 coverage or GPU service time; the report explicitly leaves `calibration_ready`

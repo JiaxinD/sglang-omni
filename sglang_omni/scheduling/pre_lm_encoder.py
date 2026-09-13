@@ -9,10 +9,13 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
+
+from sglang_omni.profiler.event_recorder import get_recorder
 
 ItemT = TypeVar("ItemT")
 EncodedT = TypeVar("EncodedT")
@@ -37,6 +40,7 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue_size)
         self._worker_state_lock = threading.Lock()
         self._worker_error: Exception | None = None
+        self._profile_component_id: str | None = None
         self._thread = threading.Thread(
             target=self._worker,
             name=worker_name,
@@ -159,6 +163,63 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
             self.cache_embedding(item, embedding, host_copy)
         return embeddings
 
+    def _execute_recorded_batch(self, items, *, recorder, batch_id, attempt, entries):
+        if recorder is None or not recorder.is_active():
+            return self._execute_batch(items)
+        unit_id = None
+        try:
+            if self._profile_component_id is None:
+                self._profile_component_id = uuid.uuid4().hex
+            members = []
+            for index, entry in enumerate(entries):
+                item = entry.item
+                feature = getattr(item, "feature", None)
+                shape = getattr(feature, "shape", None)
+                tokens = getattr(item, "num_audio_tokens", None)
+                fingerprint = getattr(item, "audio_fingerprint", None)
+                members.append(
+                    {
+                        "batch_member_index": index if attempt == 0 else attempt - 1,
+                        "feature_shape": list(shape) if shape is not None else None,
+                        "num_audio_tokens": tokens if isinstance(tokens, int) else None,
+                        "audio_fingerprint": (
+                            fingerprint if isinstance(fingerprint, str) else None
+                        ),
+                        "enqueued_at_s": entry.enqueued_at,
+                    }
+                )
+            unit_id = recorder.begin(
+                component_id=self._profile_component_id,
+                component=f"{type(self).__module__}.{type(self).__qualname__}",
+                thread=self._thread.name,
+                batch_id=batch_id,
+                attempt=attempt,
+                members=members,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to collect encoder work-unit metadata", exc_info=True
+            )
+            recorder.metadata_error(
+                batch_id=batch_id, attempt=attempt, error_type=type(exc).__name__
+            )
+        if unit_id is None:
+            return self._execute_batch(items)
+        # Note (Jiaxin Deng): stamp after the begin record and before future
+        # dispatch; synchronous follower callbacks are not encoder execution.
+        start_ns = time.perf_counter_ns()
+        error_type = None
+        try:
+            return self._execute_batch(items)
+        except BaseException as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            end_ns = time.perf_counter_ns()
+            recorder.end(
+                unit_id, start_ns=start_ns, end_ns=end_ns, error_type=error_type
+            )
+
     def _handle_batch_failure(
         self,
         batch: list[QueueEntry[ItemT]],
@@ -265,9 +326,19 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
                     return
                 self._notify_batch_start(batch)
                 items = [entry.item for entry in batch]
+                recorder = get_recorder().work_unit_recorder()
+                if recorder is not None and not recorder.is_active():
+                    recorder = None
+                batch_id = uuid.uuid4().hex if recorder is not None else None
                 encode_start = time.perf_counter()
                 try:
-                    embeddings = self._execute_batch(items)
+                    embeddings = self._execute_recorded_batch(
+                        items,
+                        recorder=recorder,
+                        batch_id=batch_id,
+                        attempt=0,
+                        entries=batch,
+                    )
                 except Exception as batch_exc:
                     batch_exc = self._handle_batch_failure(batch, batch_exc)
                     if not self._retry_batch(batch, batch_exc):
@@ -284,9 +355,15 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
                         batch = []
                         continue
                     recovered = 0
-                    for entry in batch:
+                    for attempt, entry in enumerate(batch, start=1):
                         try:
-                            embedding = self._execute_batch([entry.item])[0]
+                            embedding = self._execute_recorded_batch(
+                                [entry.item],
+                                recorder=recorder,
+                                batch_id=batch_id,
+                                attempt=attempt,
+                                entries=[entry],
+                            )[0]
                             self._set_result(entry, embedding)
                             recovered += 1
                         except Exception as item_exc:

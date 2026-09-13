@@ -2,8 +2,8 @@
 """Request-level event recorder.
 
 Each process appends events to ``<dir>/events_<stage>_<pid>.jsonl``; the
-views layer merges files by ``request_id``. Kept free of sglang-omni
-imports so it can be loaded from any process without circular risk.
+views layer merges files by ``request_id``. Dependencies stay within the
+profiler package so it can be loaded without importing the serving runtime.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+from sglang_omni.profiler.work_units import WorkUnitRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,7 @@ class RequestEventRecorder:
         self._dropped: int = 0
         self._written: int = 0
         self._lifecycle_fp: Any = None
+        self._work_units: WorkUnitRecorder | None = None
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -101,6 +104,9 @@ class RequestEventRecorder:
 
     def active_path(self) -> str | None:
         return None if self._path is None else str(self._path)
+
+    def work_unit_recorder(self) -> WorkUnitRecorder | None:
+        return self._work_units
 
     def start(
         self,
@@ -143,6 +149,10 @@ class RequestEventRecorder:
             self._path = path
             self._dropped = 0
             self._written = 0
+            try:
+                self._work_units = WorkUnitRecorder(directory, run_id)
+            except OSError:
+                logger.warning("Failed to open work-unit file", exc_info=True)
             # Note (Jiaxin Deng): lifecycle records must not become requests in
             # timeline views. A session id also keeps user run ids out of paths.
             try:
@@ -165,6 +175,9 @@ class RequestEventRecorder:
                     hostname=socket.gethostname(),
                     host_boot_id=boot_id,
                     ppid=os.getppid(),
+                    work_units_file=(
+                        self._work_units.path.name if self._work_units else None
+                    ),
                 )
                 self._lifecycle("join", stage=stage, worker=dict(worker or {}))
             except OSError:
@@ -218,6 +231,9 @@ class RequestEventRecorder:
             logger.warning("Failed to write recorder lifecycle record", exc_info=True)
 
     def _close_unlocked(self, *, reason: str = "stop") -> None:
+        if self._work_units is not None:
+            self._work_units.close()
+            self._work_units = None
         errors = []
         if self._fp is not None:
             # Note (Jiaxin Deng): attempt close even if flush failed; the
