@@ -1,9 +1,11 @@
 # Restage integration
 
 Restage plans stage placement, process replicas and resource configuration.
-The current integration exports **unmeasured candidates**. It does not yet
-run calibration, benchmark candidates, enforce performance SLOs or select a
-validated winner.
+The planning CLI exports **unmeasured candidates**. The source-checkout
+benchmark modules below measure supplied candidates and select a winner
+within the tested configurations and load grid, subject to quality and SLO
+checks. Hardware calibration and prediction-based candidate ranking are not
+yet connected to that workflow.
 
 ## Generate candidates
 
@@ -17,8 +19,9 @@ sgl-omni autotune plan \
   --max-candidates 256
 ```
 
-The example varies Qwen3-TTS engine memory budgets on two visible GPUs. Its
-values are search choices, not recommended memory settings. Use device IDs
+The example varies Qwen3-TTS engine memory budgets on two visible GPUs,
+setting both the declared stage budget and `engine.mem_fraction_static`.
+Its values are search choices, not recommended memory settings. Use device IDs
 in the same visible-device namespace as the serving process. A four-GPU
 budget can use `"devices": [0, 1, 2, 3]`.
 

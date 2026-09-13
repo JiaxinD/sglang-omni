@@ -3,8 +3,8 @@
   "replica_counts": [1, 2],
   "dimensions": {
     "memory": [
-      {"tts_engine.gpu_memory_fraction": 0.4, "vocoder.gpu_memory_fraction": 0.1},
-      {"tts_engine.gpu_memory_fraction": 0.6, "vocoder.gpu_memory_fraction": 0.1}
+      {"tts_engine.gpu_memory_fraction": 0.4, "tts_engine.engine.mem_fraction_static": 0.4, "vocoder.gpu_memory_fraction": 0.1},
+      {"tts_engine.gpu_memory_fraction": 0.6, "tts_engine.engine.mem_fraction_static": 0.6, "vocoder.gpu_memory_fraction": 0.1}
     ]
   }
 }
