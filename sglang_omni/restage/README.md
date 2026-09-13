@@ -212,6 +212,7 @@ The checkpoint includes completed but infeasible evaluations. An unfinished
 cell is rerun in an `-attempt-00001` directory, preserving its previous raw
 files. A trial that finished but was interrupted before checkpointing may be
 rerun; partial measurements are never promoted to completed evaluations.
+Each failed attempt retains `execution-failure.json`. The top-level
 `failure.json` retains the last execution failure as history even after a
 later successful resume produces `selection.json`.
 

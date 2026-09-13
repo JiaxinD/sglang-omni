@@ -181,19 +181,19 @@ async def _execute_campaign(
                     **trial_options,
                 )
             except BaseException as exc:
-                (destination / "failure.json").write_text(
-                    json.dumps(
-                        {
-                            "candidate": key,
-                            "rate": rate,
-                            "repeat": repeat,
-                            "directory": trial_dir.name,
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                failure = json.dumps(
+                    {
+                        "candidate": key,
+                        "rate": rate,
+                        "repeat": repeat,
+                        "directory": trial_dir.name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    indent=2,
                 )
+                trial_dir.mkdir(parents=True, exist_ok=True)
+                _atomic_write(trial_dir / "execution-failure.json", failure)
+                _atomic_write(destination / "failure.json", failure)
                 raise
             completed[key, rate, repeat] = {
                 "candidate": key,

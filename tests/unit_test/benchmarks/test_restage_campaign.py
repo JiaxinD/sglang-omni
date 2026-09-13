@@ -125,7 +125,7 @@ async def test_resume_reuses_completed_cells_and_preserves_failed_attempt(
         kwargs["destination"].mkdir()
         if kwargs["rate"] == 2 and fail:
             (kwargs["destination"] / "partial.txt").write_text("saved evidence")
-            raise RuntimeError("interrupted")
+            raise RuntimeError(f"interrupted-{len(calls)}")
         return evaluate(
             [Observation("a", 0, 0.1, True, feasible)],
             SLO(max_latency_s=1),
@@ -148,17 +148,24 @@ async def test_resume_reuses_completed_cells_and_preserves_failed_attempt(
     with pytest.raises(RuntimeError, match="interrupted"):
         await restage_campaign.execute_campaign(**options)
     failed_dir = calls[-1][1]
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await restage_campaign.execute_campaign(**options, resume=True)
+    second_failed_dir = calls[-1][1]
+    assert second_failed_dir != failed_dir
+    for directory, attempt in [(failed_dir, 2), (second_failed_dir, 3)]:
+        failure = json.loads((directory / "execution-failure.json").read_text())
+        assert failure["error"] == f"RuntimeError: interrupted-{attempt}"
     fail = False
     result = await restage_campaign.execute_campaign(**options, resume=True)
     assert result.recommended == ("baseline" if feasible else None)
-    assert [rate for rate, _ in calls] == [1, 2, 2]
+    assert [rate for rate, _ in calls] == [1, 2, 2, 2]
     assert calls[-1][1] != failed_dir
     assert (failed_dir / "partial.txt").read_text() == "saved evidence"
     assert len((options["destination"] / "trials.jsonl").read_text().splitlines()) == 2
     (options["destination"] / "trials.jsonl").write_text('{"partial":')
     again = await restage_campaign.execute_campaign(**options, resume=True)
     assert again == result
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert len((options["destination"] / "trials.jsonl").read_text().splitlines()) == 2
 
 
