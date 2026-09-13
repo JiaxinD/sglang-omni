@@ -161,6 +161,11 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             self._closed = True
             self._queue.put(_SHUTDOWN)
         self._thread.join(timeout=5)
+        logger.info(
+            "Qwen3-ASR pre-LM encoder shutdown: worker_stopped=%s stats=%s",
+            not self._thread.is_alive(),
+            self.stats(),
+        )
 
     def _enqueue(
         self,

@@ -275,6 +275,21 @@ def test_zero_cache_budget_reencodes_completed_requests() -> None:
     assert service.stats()["cache_bytes"] == 0
 
 
+def test_close_reports_stopped_worker_stats_once(caplog) -> None:
+    service = _make_service(cache_max_bytes=0)
+    service.encode_item(_item(11, 3))
+    service.encode_item(_item(11, 3))
+    with caplog.at_level("INFO"):
+        service.close()
+        service.close()
+    records = [r for r in caplog.records if "pre-LM encoder shutdown" in r.message]
+    assert len(records) == 1
+    assert records[0].args[0] is True
+    stats = records[0].args[1]
+    assert stats["items"] == 2
+    assert stats["hits"] == stats["merged"] == stats["cache_bytes"] == 0
+
+
 def test_lookup_cached_embedding_returns_only_valid_entries() -> None:
     model = _StubModel()
     service = _make_service(model)
