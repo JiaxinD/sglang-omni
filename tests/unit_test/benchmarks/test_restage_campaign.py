@@ -451,3 +451,70 @@ async def test_batch_mode_is_part_of_resume_identity(tmp_path, monkeypatch):
         await restage_campaign.execute_campaign(
             **options, batch_quality=True, resume=True
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["checkpoint", "trial_log", "shutdown"])
+async def test_batch_failure_is_attributed_to_actual_phase(
+    tmp_path, monkeypatch, failure
+):
+    from types import SimpleNamespace
+
+    config = tmp_path / "model.yaml"
+    config.write_text("model")
+
+    async def trial(**kwargs):
+        kwargs["destination"].mkdir()
+        return SimpleNamespace(destination=kwargs["destination"], rate=kwargs["rate"])
+
+    async def quality(measurements, *, on_evaluated, **kwargs):
+        for m in measurements:
+            on_evaluated(
+                m,
+                evaluate(
+                    [Observation("a", 0, 0.1, True, True)],
+                    SLO(),
+                    expected_requests=1,
+                    elapsed_s=1,
+                ),
+            )
+        raise RuntimeError("shutdown failed")
+
+    write = restage_campaign._atomic_write
+
+    def atomic(path, text):
+        if (failure == "checkpoint" and path.name == "completed-trials.json") or (
+            failure == "trial_log" and path.name == "trials.jsonl"
+        ):
+            raise OSError(f"{failure} failed")
+        write(path, text)
+
+    monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
+    monkeypatch.setattr(restage_campaign, "evaluate_tts_batch", quality)
+    monkeypatch.setattr(restage_campaign, "_atomic_write", atomic)
+    dest = tmp_path / "campaign"
+    with pytest.raises((RuntimeError, OSError), match=f"{failure} failed"):
+        await restage_campaign.execute_campaign(
+            configs={"default": config},
+            baseline="default",
+            rates=[1, 2],
+            repeats=1,
+            arrival_seed=42,
+            destination=dest,
+            trial_options={},
+            batch_quality=True,
+        )
+    saved = json.loads((dest / "failure.json").read_text())
+    if failure in ("checkpoint", "trial_log"):
+        assert saved["rate"] == 1
+        assert saved["phase"] == "checkpoint"
+        if failure == "checkpoint":
+            assert not (dest / "completed-trials.json").exists()
+        else:
+            assert len(json.loads((dest / "completed-trials.json").read_text())) == 1
+        assert len(list(dest.glob("*/execution-failure.json"))) == 1
+    else:
+        assert saved["phase"] == "batch_shutdown"
+        assert saved["directory"] is None
+        assert len(json.loads((dest / "completed-trials.json").read_text())) == 2
+        assert not list(dest.glob("*/execution-failure.json"))

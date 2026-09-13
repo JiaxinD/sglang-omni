@@ -177,18 +177,19 @@ async def _execute_campaign(
                 "candidate": key,
                 "rate": rate,
                 "repeat": repeat,
-                "directory": trial_dir.name,
+                "directory": trial_dir.name if trial_dir is not None else None,
                 "phase": phase,
                 "error": f"{type(exc).__name__}: {exc}",
             },
             indent=2,
         )
-        trial_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(trial_dir / "execution-failure.json", failure)
+        if trial_dir is not None:
+            trial_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write(trial_dir / "execution-failure.json", failure)
         _atomic_write(destination / "failure.json", failure)
 
     def record_completed(key, rate, repeat, trial_dir, evaluation):
-        completed[key, rate, repeat] = {
+        row = {
             "candidate": key,
             "rate": rate,
             "repeat": repeat,
@@ -196,7 +197,8 @@ async def _execute_campaign(
             "directory": trial_dir.name,
             "evaluation": asdict(evaluation),
         }
-        _atomic_write(checkpoint, json.dumps(list(completed.values()), indent=2))
+        _atomic_write(checkpoint, json.dumps([*completed.values(), row], indent=2))
+        completed[key, rate, repeat] = row
         write_trial_log()
 
     results = {}
@@ -248,9 +250,18 @@ async def _execute_campaign(
                     pending.append(measurement)
                     cells[measurement.destination] = (rate, repeat)
 
+            checkpoint_error = None
+
             def checkpoint_quality(measurement, evaluation):
+                nonlocal checkpoint_error
                 rate, repeat = cells[measurement.destination]
-                record_completed(key, rate, repeat, measurement.destination, evaluation)
+                try:
+                    record_completed(
+                        key, rate, repeat, measurement.destination, evaluation
+                    )
+                except BaseException:
+                    checkpoint_error = measurement
+                    raise
 
             if pending:
                 try:
@@ -274,18 +285,30 @@ async def _execute_campaign(
                         },
                     )
                 except BaseException as exc:
-                    unfinished = next(
+                    unfinished = checkpoint_error or next(
                         (
                             m
                             for m in pending
                             if (key, *cells[m.destination]) not in completed
                         ),
-                        pending[-1],
+                        None,
                     )
-                    rate, repeat = cells[unfinished.destination]
-                    record_failure(
-                        key, rate, repeat, unfinished.destination, exc, "batch_quality"
-                    )
+                    if unfinished is None:
+                        record_failure(key, None, None, None, exc, "batch_shutdown")
+                    else:
+                        rate, repeat = cells[unfinished.destination]
+                        record_failure(
+                            key,
+                            rate,
+                            repeat,
+                            unfinished.destination,
+                            exc,
+                            (
+                                "checkpoint"
+                                if checkpoint_error is not None
+                                else "batch_quality"
+                            ),
+                        )
                     raise
 
         results[key] = await search_rates(
