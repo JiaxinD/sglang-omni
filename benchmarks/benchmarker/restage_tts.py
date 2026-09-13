@@ -39,6 +39,7 @@ async def execute_tts_trial(
     request_timeout_s: int = 300,
     asr_concurrency: int = 8,
     arrival_seed: int | None = None,
+    profile: bool = False,
 ) -> Evaluation:
     """Measure one admitted configuration, then transcribe its saved audio.
 
@@ -147,6 +148,7 @@ async def execute_tts_trial(
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,
+        profile=profile,
     )
 
 

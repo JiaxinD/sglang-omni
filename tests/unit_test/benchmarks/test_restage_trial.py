@@ -1,6 +1,6 @@
 import asyncio
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 import pytest
 
@@ -10,10 +10,41 @@ from sglang_omni.restage.evaluation import SLO
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile", [False, True])
 async def test_trial_stops_server_before_quality_and_saves_requests(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, profile
 ):
     running = False
+    profiling = False
+
+    @asynccontextmanager
+    async def profiler(url, *, event_dir, run_id):
+        nonlocal profiling
+        assert running
+        profiling = True
+        try:
+            yield
+        finally:
+            assert running
+            profiling = False
+            event_dir.mkdir()
+            (event_dir / "events_encoder_1.jsonl").write_text(
+                "\n".join(
+                    json.dumps(
+                        dict(
+                            run_id=run_id,
+                            request_id=rid,
+                            pid=1,
+                            stage="encoder",
+                            event_name="encoder_start",
+                            timestamp_ns=1,
+                        )
+                    )
+                    for rid in ("a", "b")
+                )
+            )
+
+    monkeypatch.setattr(restage_trial, "request_profile", profiler)
 
     @contextmanager
     def server(**kwargs):
@@ -32,7 +63,10 @@ async def test_trial_stops_server_before_quality_and_saves_requests(
 
         async def send(session, sample):
             assert running
-            return RequestResult(request_id=sample, is_success=True)
+            assert profiling == profile
+            return RequestResult(
+                request_id=sample, server_request_id=sample, is_success=True
+            )
 
         return send
 
@@ -52,12 +86,18 @@ async def test_trial_stops_server_before_quality_and_saves_requests(
         destination=tmp_path / "trial",
         port=18000,
         warmup=0,
+        profile=profile,
     )
     assert result.feasible
     assert result.good_requests == 2
     saved = json.loads((tmp_path / "trial/result.json").read_text())
     assert saved["status"] == "complete"
     assert saved["evaluation"]["feasible"] is True
+    if profile:
+        report = json.loads((tmp_path / "trial/profile-report.json").read_text())
+        assert report["requests"]["a"]["event_count"] == 1
+    else:
+        assert not (tmp_path / "trial/profile-report.json").exists()
 
 
 @pytest.mark.asyncio

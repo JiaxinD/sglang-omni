@@ -129,6 +129,22 @@ profiling is enabled. This does not itself enable profiling or turn stage
 residence time into isolated service time. Other senders currently leave this
 field unset.
 
+Set `profile=true` in a TTS trial or its campaign `trial_options` to collect
+the existing JSONL request profiler alongside serving. This starts before
+warmup and stops after the measured cohort; the report joins only measured
+server IDs. The owned service stops before `profile-report.json` is built,
+so raw files can be flushed. `request-events/` retains the original events.
+The report selects this run and pairs stage intervals within each PID,
+preserving separate worker timelines and requests without correlated events.
+
+This is diagnostic collection, not an isolated calibration or a readiness
+acknowledgement from every worker. Event pairs do not prove complete stage
+coverage or GPU service time; the report explicitly leaves `calibration_ready`
+false. Use correlated Omni requests for per-request reports until the other
+API senders have server-ID linkage. Profiling overhead may affect performance:
+keep the same setting across comparisons and validate final capacity without
+profiling. The default is off.
+
 To compare explicit candidates, use:
 
 ```bash

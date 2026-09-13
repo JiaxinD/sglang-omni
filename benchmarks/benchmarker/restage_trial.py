@@ -2,13 +2,16 @@
 
 import json
 import math
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from benchmarks.benchmarker.data import RequestResult
 from benchmarks.benchmarker.restage import to_observation
+from benchmarks.benchmarker.restage_profile import request_profile, write_profile_report
 from benchmarks.benchmarker.runner import BenchmarkRunner, RunConfig, SendFn
 from benchmarks.benchmarker.utils import managed_omni_server
 from sglang_omni.restage.evaluation import SLO, Evaluation, evaluate
@@ -29,6 +32,7 @@ async def execute_trial(
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
+    profile: bool = False,
 ) -> Evaluation:
     """Launch, measure, stop, then evaluate quality and the joint SLO.
 
@@ -51,6 +55,7 @@ async def execute_trial(
         "slo": asdict(slo),
         "warmup": warmup,
         "arrival_seed": arrival_seed,
+        "profile_run_id": str(uuid.uuid4()) if profile else None,
     }
     output = destination / "result.json"
 
@@ -86,7 +91,23 @@ async def execute_trial(
                 timeout=startup_timeout_s,
                 wait_for_gpu_release=False,
             ):
-                results = await runner.run(samples, send)
+                async with AsyncExitStack() as stack:
+                    if profile:
+                        await stack.enter_async_context(
+                            request_profile(
+                                f"http://127.0.0.1:{port}",
+                                event_dir=destination / "request-events",
+                                run_id=metadata["profile_run_id"],
+                            )
+                        )
+                    results = await runner.run(samples, send)
+        if profile:
+            write_profile_report(
+                results,
+                source=destination / "request-events",
+                run_id=metadata["profile_run_id"],
+                output=destination / "profile-report.json",
+            )
         quality_results = await quality(results)
         (destination / "quality.json").write_text(
             json.dumps(dict(quality_results), indent=2), encoding="utf-8"
