@@ -61,12 +61,14 @@ async def test_campaign_pairs_arrivals_and_exports_measured_winner(
 def test_campaign_cli_resolves_task_specific_config(
     tmp_path, monkeypatch, task, resume
 ):
+    (tmp_path / "clip.wav").write_bytes(b"fixture")
+    (tmp_path / "quality.yaml").write_text("quality")
     options = {
         "samples": [
             {
                 "sample_id": "a",
                 "ref_text": "hello",
-                "ref_audio": "/clip.wav",
+                "ref_audio": "clip.wav",
                 "target_text": "world",
             }
         ],

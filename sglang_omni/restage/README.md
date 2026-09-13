@@ -321,7 +321,10 @@ sgl-omni autotune run --spec campaign.json --output results --resume
 
 The command uses the same campaign executor as the source module entry point.
 Local reference-audio and configuration paths are resolved relative to the spec;
-model identifiers remain unchanged. `--resume` requires the same recorded run
+model identifiers and supported HTTP/data/file media references remain unchanged.
+Required local audio and ASR configuration files are checked before launching a
+model. Unused reference audio does not require a local file. URI contents are
+not fetched or hashed by the CLI; their identity remains the caller's responsibility. `--resume` requires the same recorded run
 identity and inputs. Hardware admission remains the caller's responsibility.
 A wheel/CLI test without model execution verifies packaging and dispatch only;
 it does not establish GPU support, quality, capacity or a best topology.

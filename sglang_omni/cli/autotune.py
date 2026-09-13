@@ -80,7 +80,7 @@ def run(
     resume: Annotated[
         bool,
         typer.Option(
-            help="Resume with the same recorded environment identity and inputs."
+            help="Resume using caller-verified run_identity and matching recorded inputs."
         ),
     ] = False,
 ):
@@ -94,7 +94,9 @@ def run(
         options = load_campaign_spec(spec)
     except (ValueError, OSError) as exc:
         raise typer.BadParameter(str(exc), param_hint="--spec") from exc
-    selection = asyncio.run(
-        execute_campaign(destination=output, resume=resume, **options)
-    )
+    try:
+        campaign = execute_campaign(destination=output, resume=resume, **options)
+    except TypeError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--spec") from exc
+    selection = asyncio.run(campaign)
     typer.echo(json.dumps(asdict(selection), indent=2))

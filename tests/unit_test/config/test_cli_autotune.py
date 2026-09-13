@@ -143,3 +143,124 @@ def test_run_command_loads_spec_and_resumes_completed_trials(
     assert resumed.exit_code == 0, resumed.output
     assert len(calls) == 1
     assert (tmp_path / "output/recommended.yaml").read_text() == "model"
+
+
+@pytest.mark.parametrize("fault", ["shape", "audio", "asr_config"])
+def test_run_rejects_invalid_inputs_before_model_execution(
+    tmp_path, monkeypatch, fault
+):
+    from benchmarks.benchmarker import restage_campaign
+
+    (tmp_path / "model.yaml").write_text("model")
+    (tmp_path / "audio.wav").write_bytes(b"fixture")
+    options = dict(
+        samples=[
+            dict(
+                sample_id="a",
+                ref_audio="missing.wav" if fault == "audio" else "audio.wav",
+                ref_text="hello",
+                target_text="hello",
+            )
+        ],
+        slo={},
+        asr_config_path="missing.yaml" if fault == "asr_config" else "model.yaml",
+    )
+    payload = dict(
+        configs={"default": "model.yaml"},
+        baseline="default",
+        rates=[1],
+        repeats=1,
+        arrival_seed=42,
+        trial_options=options,
+    )
+    if fault == "shape":
+        payload = {}
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(payload))
+    calls = []
+
+    async def forbidden(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("model execution must not start")
+
+    monkeypatch.setattr(restage_campaign, "execute_campaign", forbidden)
+    result = CliRunner().invoke(
+        app, ["autotune", "run", "--spec", str(spec), "--output", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 2, result.output
+    assert "--spec" in result.output
+    assert not calls
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.invalid/audio.wav",
+        "data:audio/wav;base64," + "AAAA" * 3000,
+        "file:///reference.wav",
+    ],
+    ids=["https", "data", "file"],
+)
+def test_campaign_loader_preserves_media_references(tmp_path, reference):
+    from benchmarks.benchmarker.restage_campaign import (
+        _input_identity,
+        load_campaign_spec,
+    )
+
+    (tmp_path / "asr.yaml").write_text("asr")
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            dict(
+                configs={},
+                trial_options=dict(
+                    samples=[
+                        dict(
+                            sample_id="a",
+                            ref_text="hello",
+                            ref_audio=reference,
+                            target_text="hello",
+                        )
+                    ],
+                    slo={},
+                    asr_config_path="asr.yaml",
+                ),
+            )
+        )
+    )
+    options = load_campaign_spec(spec)["trial_options"]
+    assert options["samples"][0].ref_audio == reference
+    assert list(_input_identity(options)["local_input_sha256"]) == [
+        str(tmp_path / "asr.yaml")
+    ]
+
+
+def test_unused_reference_does_not_require_a_local_file(tmp_path):
+    from benchmarks.benchmarker.restage_campaign import load_campaign_spec
+
+    (tmp_path / "asr.yaml").write_text("asr")
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            dict(
+                configs={},
+                trial_options=dict(
+                    samples=[
+                        dict(
+                            sample_id="a",
+                            ref_text="hello",
+                            ref_audio="unused.wav",
+                            target_text="hello",
+                        )
+                    ],
+                    slo={},
+                    sender_options={"no_ref_audio": True},
+                    asr_config_path="asr.yaml",
+                ),
+            )
+        )
+    )
+    assert load_campaign_spec(spec)["trial_options"]["samples"][0].ref_audio == str(
+        tmp_path / "unused.wav"
+    )

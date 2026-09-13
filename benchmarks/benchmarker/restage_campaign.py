@@ -8,6 +8,7 @@ import math
 import shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from filelock import FileLock
 
@@ -84,6 +85,10 @@ def _atomic_write(path, text):
     temporary.replace(path)
 
 
+def _is_media_reference(value):
+    return urlparse(str(value)).scheme in {"http", "https", "data", "file"}
+
+
 def _input_identity(options):
     serialized = json.loads(json.dumps(options, default=_json_default, allow_nan=False))
     references = [sample.get("ref_audio") for sample in serialized.get("samples", [])]
@@ -91,7 +96,7 @@ def _input_identity(options):
     files = {
         str(Path(path).resolve()): _file_hash(path)
         for path in references
-        if path and Path(path).is_file()
+        if path and not _is_media_reference(path) and Path(path).is_file()
     }
     return {"options": serialized, "local_input_sha256": files}
 
@@ -367,18 +372,42 @@ async def _execute_campaign(
 
 def load_campaign_spec(path: Path) -> dict:
     """Load a campaign with local asset/config paths relative to its spec."""
-    spec = json.loads(path.read_text(encoding="utf-8"))
-    base = path.resolve().parent
-    spec["configs"] = {key: base / path for key, path in spec["configs"].items()}
-    options = spec["trial_options"]
-    options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
-    for sample in options["samples"]:
-        if sample.ref_audio:
-            sample.ref_audio = str(base / sample.ref_audio)
-    options["slo"] = SLO(**options["slo"])
-    if spec.get("task", "tts") == "tts":
-        options["asr_config_path"] = base / options["asr_config_path"]
-    return spec
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        base = path.resolve().parent
+        spec["configs"] = {key: base / value for key, value in spec["configs"].items()}
+        options = spec["trial_options"]
+        task = spec.get("task", "tts")
+        sender = options.get("sender_options") or {}
+        needs_audio = task == "asr" or (
+            sender.get("voice_clone", False)
+            if options.get("api") == "chat"
+            else not sender.get("no_ref_audio", False)
+        )
+        options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
+        for sample in options["samples"]:
+            media_reference = _is_media_reference(sample.ref_audio)
+            if sample.ref_audio and not media_reference:
+                sample.ref_audio = str(base / Path(sample.ref_audio).expanduser())
+            if needs_audio:
+                if task == "asr" and media_reference:
+                    raise ValueError("ASR samples require local audio files")
+                if not media_reference and (
+                    not sample.ref_audio or not Path(sample.ref_audio).is_file()
+                ):
+                    raise ValueError(
+                        f"Reference audio file does not exist: {sample.ref_audio}"
+                    )
+        options["slo"] = SLO(**options["slo"])
+        if task == "tts":
+            options["asr_config_path"] = base / options["asr_config_path"]
+            if not options["asr_config_path"].is_file():
+                raise ValueError(
+                    f"ASR configuration file does not exist: {options['asr_config_path']}"
+                )
+        return spec
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"Invalid campaign spec {path}: {exc}") from exc
 
 
 def main():
