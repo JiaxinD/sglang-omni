@@ -45,6 +45,7 @@ def _sha256(path):
 def _save_measurement(destination, metadata, results):
     receipt = {
         "metadata": metadata,
+        "request_ids": [result.request_id for result in results],
         "requests_sha256": _sha256(destination / "requests.jsonl"),
         "audio_sha256": {
             str(Path(result.wav_path).resolve()): (
@@ -69,16 +70,20 @@ def restore_measurement(source: Path, *, destination: Path) -> TrialMeasurement:
     receipt = json.loads((source / "measurement.json").read_text(encoding="utf-8"))
     raw = (source / "requests.jsonl").read_bytes()
     if hashlib.sha256(raw).hexdigest() != receipt["requests_sha256"]:
-        raise ValueError("Saved requests changed since measurement")
+        raise ValueError(
+            f"Saved requests changed since measurement: {source / 'requests.jsonl'}"
+        )
     for path, expected in receipt["audio_sha256"].items():
         actual = _sha256(path) if Path(path).is_file() else None
         if actual != expected:
             raise ValueError(f"Saved audio changed since measurement: {path}")
     metadata = receipt["metadata"]
     metadata.setdefault("measurement_source", str(source))
-    results = [
-        RequestResult(**json.loads(line)) for line in raw.decode("utf-8").splitlines()
+    rows = [
+        json.loads(line) for line in raw.decode("utf-8").split("\n") if line.strip()
     ]
+    by_id = {row["request_id"]: RequestResult(**row) for row in rows}
+    results = [by_id[request_id] for request_id in receipt["request_ids"]]
     measurement = TrialMeasurement(
         destination, results, SLO(**metadata["slo"]), metadata
     )

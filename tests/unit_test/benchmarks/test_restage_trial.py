@@ -326,7 +326,12 @@ async def test_restore_measurement_preserves_original_and_checks_inputs(
         async def send(session, sample):
             wav = audio_dir / "a.wav"
             wav.write_bytes(b"saved audio")
-            return RequestResult(request_id=sample, is_success=True, wav_path=str(wav))
+            return RequestResult(
+                request_id=sample,
+                is_success=True,
+                wav_path=str(wav),
+                text="first\u2028second\u2029third\u0085fourth",
+            )
 
         return send
 
@@ -374,3 +379,50 @@ async def test_restore_measurement_preserves_original_and_checks_inputs(
 
         assert (await restage_trial.evaluate_trial(restored, quality=passed)).feasible
     assert (original.destination / "result.json").read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_restored_measurement_preserves_input_order_and_excludes_warmup(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    @contextmanager
+    def server(**kwargs):
+        yield
+
+    monkeypatch.setattr(restage_trial, "managed_omni_server", server)
+    calls = []
+
+    def sender(url, audio_dir):
+        async def send(session, sample):
+            calls.append(sample)
+            if sample == "a":
+                await asyncio.sleep(0.02)
+            return RequestResult(request_id=sample, is_success=True)
+
+        return send
+
+    original = await restage_trial.measure_trial(
+        config_path=tmp_path / "config.yaml",
+        model_path="tts",
+        samples=["a", "b"],
+        send_factory=sender,
+        slo=SLO(),
+        rate=1e9,
+        destination=tmp_path / "original",
+        port=18000,
+        warmup=2,
+        arrival_seed=42,
+    )
+    rows = [
+        json.loads(line)
+        for line in (original.destination / "requests.jsonl").read_text().splitlines()
+    ]
+    assert [row["request_id"] for row in rows] == ["b", "a"]
+    assert calls.count("a") == 3 and calls.count("b") == 1
+    restored = restage_trial.restore_measurement(
+        original.destination, destination=tmp_path / "retry"
+    )
+    assert restored.results == original.results
+    assert [result.request_id for result in restored.results] == ["a", "b"]

@@ -230,7 +230,9 @@ async def _execute_campaign(
                         )
                         != saved["receipt_sha256"]
                     ):
-                        raise ValueError("Measurement receipt changed since generation")
+                        raise ValueError(
+                            f"Measurement receipt changed since generation: {destination / saved['directory'] / 'measurement.json'}"
+                        )
                     evaluation = restore_measurement(
                         destination / saved["directory"], destination=trial_dir
                     )
