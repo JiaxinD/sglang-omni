@@ -160,6 +160,7 @@ from benchmarks.metrics.performance import (
     compute_speed_metrics,
     print_speed_summary,
 )
+from benchmarks.metrics.playback_continuity import compute_max_playback_underrun_s
 from benchmarks.tasks.asr import (
     DEFAULT_ASR_TRANSCRIBE_CONCURRENCY,
     QWEN3_ASR_MODEL_PATH,
@@ -267,6 +268,7 @@ def make_send_fn(
             text=sample.target_text[:TEXT_PREVIEW_LENGTH],
         )
         chunk_times: list[float] = []
+        chunk_durations: list[float] = []
         text_first_time_holder: list[float] = []
         start_time = time.perf_counter()
         try:
@@ -283,6 +285,7 @@ def make_send_fn(
                 stream=stream,
                 system_prompt=system_prompt,
                 chunk_times_out=chunk_times if stream else None,
+                chunk_durations_out=chunk_durations if stream else None,
                 text_first_time_holder=text_first_time_holder if stream else None,
             )
             result.audio_duration_s = get_wav_duration(wav_bytes)
@@ -313,6 +316,11 @@ def make_send_fn(
             result.wav_path = wav_path
 
             if chunk_times:
+                result.chunk_audio_duration_s = chunk_durations
+                result.audio_chunk_count = len(chunk_times)
+                result.max_playback_underrun_s = compute_max_playback_underrun_s(
+                    chunk_times, chunk_durations
+                )
                 result.audio_ttfp_s = chunk_times[0] - start_time
                 result.first_audio_s = chunk_times[0]
                 result.inter_chunk_s = [

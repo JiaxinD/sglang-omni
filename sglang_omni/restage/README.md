@@ -110,12 +110,16 @@ For example, Ming may need a read-aloud system prompt to avoid chat responses.
 The audio must agree with the full `target_text` under the same WER check.
 
 This covers speech generation through the chat API, not arbitrary multimodal
-conversation or image/video understanding. The existing chat sender records
-streaming first-audio time but does not measure playback underrun; this mode
-rejects `max_underrun_s` until that metric has a producer. The default `api`
+conversation or image/video understanding. The chat sender records first-audio
+time, per-chunk PCM duration and maximum playback underrun for streaming
+responses. The default `api`
 is `speech`, preserving `/v1/audio/speech` trials.
 For either API, `max_ttfa_s` requires `sender_options.stream=true` because
 non-streaming responses do not provide a first-audio timestamp.
+`max_underrun_s` also requires streaming. As with the existing speech sender,
+fewer than two chunks leaves continuity unmeasured; such a request does not
+pass an explicit playback constraint. Playback starts at the first chunk,
+without an additional client buffering allowance.
 
 To compare explicit candidates, use:
 

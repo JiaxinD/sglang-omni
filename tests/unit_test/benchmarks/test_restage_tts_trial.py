@@ -90,7 +90,7 @@ async def test_tts_trial_launches_asr_only_for_quality(tmp_path, monkeypatch, ap
         asr_config_path=tmp_path / "asr.yaml",
         asr_model_path="asr-checkpoint",
         samples=[SampleInput("a", "", "", "hello")],
-        slo=SLO(max_latency_s=2),
+        slo=SLO(max_latency_s=2, max_underrun_s=0.1),
         rate=1,
         destination=tmp_path / "trial",
         port=18000,
@@ -123,7 +123,7 @@ async def test_tts_trial_launches_asr_only_for_quality(tmp_path, monkeypatch, ap
 
 
 @pytest.mark.asyncio
-async def test_chat_rejects_unmeasured_playback_slo(tmp_path):
+async def test_chat_requires_streaming_for_playback_slo(tmp_path):
     with pytest.raises(ValueError, match="playback"):
         await restage_tts.execute_tts_trial(
             config_path=tmp_path / "tts.yaml",

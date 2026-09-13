@@ -50,8 +50,10 @@ async def execute_tts_trial(
         raise ValueError(f"Unsupported speech generation API: {api}")
     if slo.max_ttfa_s is not None and not (sender_options or {}).get("stream", False):
         raise ValueError("First-audio SLO requires a streaming sender")
-    if api == "chat" and slo.max_underrun_s is not None:
-        raise ValueError("Chat sender does not yet measure playback underrun")
+    if slo.max_underrun_s is not None and not (sender_options or {}).get(
+        "stream", False
+    ):
+        raise ValueError("A playback SLO requires a streaming sender")
     targets = {sample.sample_id: sample.target_text for sample in samples}
     if len(targets) != len(samples):
         raise ValueError("Sample IDs must be unique")
