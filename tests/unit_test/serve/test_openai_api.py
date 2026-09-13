@@ -2570,6 +2570,50 @@ def test_unprobeable_audio_with_chunking_enabled_stays_one_request() -> None:
     )
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_transcription_response_exposes_unique_pipeline_request_id(stream) -> None:
+    class RecordingClient(SuccessfulTranscriptionClient):
+        request_ids = []
+
+        async def completion(self, request, *, request_id, **kwargs):
+            self.request_ids.append(request_id)
+            return await super().completion(request, request_id=request_id, **kwargs)
+
+        async def generate(self, request, request_id=None):
+            self.request_ids.append(request_id)
+            async for chunk in super().generate(request, request_id=request_id):
+                yield chunk
+
+    backend = RecordingClient()
+    client = TestClient(create_app(backend, model_name="openai/whisper-large-v3"))
+    ids = []
+    for _ in range(2):
+        response = client.post(
+            "/v1/audio/transcriptions",
+            data={"stream": str(stream).lower(), "language": "en"},
+            files={"file": ("sample.wav", b"RIFF", "audio/wav")},
+        )
+        assert response.status_code == 200
+        assert response.headers["x-request-id"] == backend.request_ids[-1]
+        ids.append(response.headers["x-request-id"])
+    assert len(set(ids)) == 2
+
+
+def test_chunked_transcription_exposes_parent_request_id() -> None:
+    backend = ChunkRecordingTranscriptionClient()
+    client = _chunking_test_client(backend)
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr"},
+        files={"file": ("long.wav", _wav_upload(2.5), "audio/wav")},
+    )
+    assert response.status_code == 200
+    parent = response.headers["x-request-id"]
+    assert parent.startswith("transcription-")
+    assert len(backend.requests) > 1
+    assert all(rid.startswith(f"{parent}-chunk-") for rid, _ in backend.requests)
+
+
 def test_transcription_endpoint_returns_text_json() -> None:
     transcription_client = SuccessfulTranscriptionClient()
     client = TestClient(

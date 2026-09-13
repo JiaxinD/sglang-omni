@@ -1,6 +1,7 @@
 """Correlate measured requests with the existing request-event profiler."""
 
 import json
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -40,12 +41,22 @@ def write_profile_report(
     results: list[RequestResult], *, source: Path, run_id: str, output: Path
 ) -> None:
     """Keep process-local intervals separate; do not interpret them as service time."""
-    measured = {r.server_request_id for r in results if r.server_request_id}
+    by_server = {
+        r.server_request_id: r.request_id for r in results if r.server_request_id
+    }
     grouped = defaultdict(list)
     for event in iter_events(source):
         rid = event.get("request_id")
-        if event.get("run_id") == run_id and rid in measured:
-            grouped[(rid, event.get("pid"))].append(event)
+        if event.get("run_id") != run_id or not rid:
+            continue
+        parent = rid
+        if parent not in by_server:
+            child = re.fullmatch(r"(transcription-.+?)-chunk-\d+(?:-retry)?", rid)
+            if child is None:
+                continue
+            parent = child.group(1)
+        if parent in by_server:
+            grouped[(parent, rid, event.get("pid"))].append(event)
     requests = {
         r.request_id: {
             "server_request_id": r.server_request_id,
@@ -54,12 +65,9 @@ def write_profile_report(
         }
         for r in results
     }
-    by_server = {
-        r.server_request_id: r.request_id for r in results if r.server_request_id
-    }
-    for (rid, pid), events in grouped.items():
+    for (parent, rid, pid), events in grouped.items():
         events.sort(key=lambda event: event["timestamp_ns"])
-        row = requests[by_server[rid]]
+        row = requests[by_server[parent]]
         row["event_count"] += len(events)
         intervals = compute_stage_intervals({rid: RequestTimeline(rid, events)})
         row["intervals"].extend(

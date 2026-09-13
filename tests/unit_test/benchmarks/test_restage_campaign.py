@@ -22,6 +22,7 @@ async def test_campaign_pairs_arrivals_and_exports_measured_winner(
     calls = []
 
     async def trial(**kwargs):
+        assert kwargs["profile"] is True
         key = kwargs["config_path"].read_text()
         calls.append((key, kwargs["rate"], kwargs["arrival_seed"]))
         good = kwargs["rate"] == 1 or key == "split"
@@ -41,7 +42,7 @@ async def test_campaign_pairs_arrivals_and_exports_measured_winner(
         repeats=2,
         arrival_seed=42,
         destination=tmp_path / "campaign",
-        trial_options={},
+        trial_options={"profile": True},
     )
     assert result.recommended == "split"
     assert {(rate, seed) for key, rate, seed in calls if key == "default"} == {

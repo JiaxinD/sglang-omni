@@ -150,20 +150,25 @@ profiling is enabled. This does not itself enable profiling or turn stage
 residence time into isolated service time. The `/v1/audio/speech` sender
 records the same field from the server's `X-Request-ID` response header for
 both streaming and non-streaming audio. Older servers without that header
-leave it unset. ASR sender linkage remains pending.
+leave it unset. The ASR sender also records this header for streaming and
+non-streaming transcriptions. Chunked transcriptions return the parent request
+ID; their chunk and retry event IDs are joined to that parent. Error responses
+may lack this header; those requests remain in the report without correlated events.
 
-Set `profile=true` in a TTS trial or its campaign `trial_options` to collect
+Set `profile=true` in a TTS or ASR trial or its campaign `trial_options` to collect
 the existing JSONL request profiler alongside serving. This starts before
 warmup and stops after the measured cohort; the report joins only measured
 server IDs. The owned service stops before `profile-report.json` is built,
 so raw files can be flushed. `request-events/` retains the original events.
-The report selects this run and pairs stage intervals within each PID,
+The report selects this run and pairs stage intervals within each request ID and PID,
 preserving separate worker timelines and requests without correlated events.
+ASR child intervals retain their own IDs, so overlapping chunks and retries
+are not paired with one another or collapsed into a single service duration.
 
 This is diagnostic collection, not an isolated calibration or a readiness
 acknowledgement from every worker. Event pairs do not prove complete stage
 coverage or GPU service time; the report explicitly leaves `calibration_ready`
-false. Omni and audio-speech requests support per-request reports when server
+false. Omni, audio-speech and ASR requests support per-request reports when server
 IDs are available. Profiling overhead may affect performance:
 keep the same setting across comparisons and validate final capacity without
 profiling. The default is off.

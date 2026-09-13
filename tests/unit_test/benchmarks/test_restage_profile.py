@@ -86,3 +86,45 @@ async def test_profile_stops_exact_run_on_dispatch_failure(tmp_path, monkeypatch
         ),
         ("http://localhost:18000/stop_request_profile", {"run_id": "run"}),
     ]
+
+
+def test_profile_keeps_asr_children_and_retries_separate(tmp_path):
+    events = []
+    for rid, start, end in [
+        ("transcription-a-chunk-0", 100, 300),
+        ("transcription-a-chunk-1", 110, 200),
+        ("transcription-a-chunk-0-retry", 400, 450),
+        ("transcription-warmup-chunk-0", 1, 2),
+        ("transcription-a-unrelated", 1, 2),
+    ]:
+        for name, timestamp in [("encoder_start", start), ("encoder_end", end)]:
+            events.append(
+                dict(
+                    run_id="run",
+                    request_id=rid,
+                    pid=1,
+                    stage="encoder",
+                    event_name=name,
+                    timestamp_ns=timestamp,
+                )
+            )
+    source = tmp_path / "events.jsonl"
+    source.write_text("\n".join(json.dumps(e) for e in events))
+    output = tmp_path / "report.json"
+    write_profile_report(
+        [RequestResult(request_id="a", server_request_id="transcription-a")],
+        source=source,
+        run_id="run",
+        output=output,
+    )
+    report = json.loads(output.read_text())
+    row = report["requests"]["a"]
+    assert row["event_count"] == 6
+    assert {
+        i["request_id"]: i["close_ns"] - i["open_ns"] for i in row["intervals"]
+    } == {
+        "transcription-a-chunk-0": 200,
+        "transcription-a-chunk-1": 90,
+        "transcription-a-chunk-0-retry": 50,
+    }
+    assert report["calibration_ready"] is False
