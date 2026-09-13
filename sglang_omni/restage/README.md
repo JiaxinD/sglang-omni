@@ -121,6 +121,14 @@ fewer than two chunks leaves continuity unmeasured; such a request does not
 pass an explicit playback constraint. Playback starts at the first chunk,
 without an additional client buffering allowance.
 
+Omni speech request records also include `server_request_id`, the unique ID
+sent through the chat API and used by server request profiling. It differs
+from the dataset `request_id`: repeated samples and warmup calls get distinct
+server IDs. Use it to join raw request events to the measured workload when
+profiling is enabled. This does not itself enable profiling or turn stage
+residence time into isolated service time. Other senders currently leave this
+field unset.
+
 To compare explicit candidates, use:
 
 ```bash
