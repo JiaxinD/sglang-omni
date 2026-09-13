@@ -112,6 +112,16 @@ WER measures transcript agreement; speaker similarity and perceptual quality
 require separate evaluation. A single trial does not establish a best topology
 or the maximum sustainable arrival rate.
 
+The low-level `measure_trial` API returns a `TrialMeasurement` after stopping
+the measured service and records `status: awaiting_quality`. `evaluate_trial`
+then runs the supplied quality callback and writes the joint evaluation;
+quality failure preserves the original timings and request records. A
+measurement may be finalized only once. The existing `execute_trial` API
+composes both phases, so the TTS/ASR commands keep their current lifecycle.
+Pending measurements are not completed campaign checkpoints. These phase
+APIs prepare for batched quality evaluation; they do not yet reuse services
+or restore a pending measurement from disk.
+
 For an Omni model's read-aloud workload, set `api` to `chat` in the TTS
 trial spec (or campaign `trial_options`). This reuses the existing Omni
 SeedTTS sender at `/v1/chat/completions`. Supply its required `sender_options`:

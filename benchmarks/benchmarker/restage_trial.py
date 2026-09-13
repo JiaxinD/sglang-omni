@@ -5,7 +5,7 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +17,28 @@ from benchmarks.benchmarker.utils import managed_omni_server
 from sglang_omni.restage.evaluation import SLO, Evaluation, evaluate
 
 
-async def execute_trial(
+@dataclass
+class TrialMeasurement:
+    """Completed serving measurements awaiting a separate quality decision."""
+
+    destination: Path
+    results: list[RequestResult]
+    slo: SLO
+    metadata: dict[str, Any]
+
+
+def _save_result(destination, metadata):
+    (destination / "result.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
+
+
+async def measure_trial(
     *,
     config_path: Path,
     model_path: str,
     samples: list[Any],
     send_factory: Callable[[str, Path], SendFn],
-    quality: Callable[[list[RequestResult]], Awaitable[Mapping[str, bool | None]]],
     slo: SLO,
     rate: float,
     destination: Path,
@@ -33,13 +48,13 @@ async def execute_trial(
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
     profile: bool = False,
-) -> Evaluation:
-    """Launch, measure, stop, then evaluate quality and the joint SLO.
+) -> TrialMeasurement:
+    """Launch, measure and stop the candidate without assigning quality.
 
     The caller provides an admitted GPU allocation, model-specific sender,
-    explicit warmup count and quality evaluation. The run is open-loop.
-    Quality runs after serving stops so its resource use cannot contaminate
-    the timed cohort. This function owns only the launched service group.
+    explicit warmup count. The run is open-loop. The returned measurement
+    is not a completed evaluation and cannot be ranked as a passing trial.
+    This function owns only the launched service group.
     """
     if not samples or not math.isfinite(rate) or rate <= 0:
         raise ValueError("A trial needs samples and a finite positive arrival rate")
@@ -57,12 +72,7 @@ async def execute_trial(
         "arrival_seed": arrival_seed,
         "profile_run_id": str(uuid.uuid4()) if profile else None,
     }
-    output = destination / "result.json"
-
-    def save():
-        output.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-    save()
+    _save_result(destination, metadata)
     runner = BenchmarkRunner(
         RunConfig(
             max_concurrency=0,
@@ -104,7 +114,7 @@ async def execute_trial(
                     metadata.update(
                         measurement_complete=True, elapsed_s=runner.wall_clock_s
                     )
-                    save()
+                    _save_result(destination, metadata)
         if profile:
             write_profile_report(
                 results,
@@ -112,28 +122,83 @@ async def execute_trial(
                 run_id=metadata["profile_run_id"],
                 output=destination / "profile-report.json",
             )
-        quality_results = await quality(results)
+        metadata["status"] = "awaiting_quality"
+        _save_result(destination, metadata)
+        return TrialMeasurement(destination, results, slo, metadata)
+    except BaseException as exc:
+        metadata.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        _save_result(destination, metadata)
+        raise
+
+
+async def evaluate_trial(
+    measurement: TrialMeasurement,
+    *,
+    quality: Callable[[list[RequestResult]], Awaitable[Mapping[str, bool | None]]],
+) -> Evaluation:
+    """Finalize a waiting measurement after its serving process has stopped."""
+    destination = measurement.destination
+    metadata = measurement.metadata
+    if metadata["status"] != "awaiting_quality":
+        raise ValueError("Only measurements awaiting quality can be finalized")
+    try:
+        quality_results = await quality(measurement.results)
         (destination / "quality.json").write_text(
             json.dumps(dict(quality_results), indent=2), encoding="utf-8"
         )
         observations = [
             to_observation(result, quality_pass=quality_results.get(result.request_id))
-            for result in results
+            for result in measurement.results
         ]
         evaluation = evaluate(
             observations,
-            slo,
-            expected_requests=len(samples),
-            elapsed_s=runner.wall_clock_s,
+            measurement.slo,
+            expected_requests=metadata["expected_requests"],
+            elapsed_s=metadata["elapsed_s"],
         )
         metadata.update(
             status="complete",
-            elapsed_s=runner.wall_clock_s,
             evaluation=asdict(evaluation),
         )
-        save()
+        _save_result(destination, metadata)
         return evaluation
     except BaseException as exc:
         metadata.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-        save()
+        _save_result(destination, metadata)
         raise
+
+
+async def execute_trial(
+    *,
+    config_path: Path,
+    model_path: str,
+    samples: list[Any],
+    send_factory: Callable[[str, Path], SendFn],
+    quality: Callable[[list[RequestResult]], Awaitable[Mapping[str, bool | None]]],
+    slo: SLO,
+    rate: float,
+    destination: Path,
+    port: int,
+    warmup: int = 1,
+    startup_timeout_s: int = 1800,
+    request_timeout_s: int = 300,
+    arrival_seed: int | None = None,
+    profile: bool = False,
+) -> Evaluation:
+    """Measure an owned service, stop it, then evaluate quality and the joint SLO."""
+    measurement = await measure_trial(
+        config_path=config_path,
+        model_path=model_path,
+        samples=samples,
+        send_factory=send_factory,
+        slo=slo,
+        rate=rate,
+        destination=destination,
+        port=port,
+        warmup=warmup,
+        startup_timeout_s=startup_timeout_s,
+        request_timeout_s=request_timeout_s,
+        arrival_seed=arrival_seed,
+        profile=profile,
+    )
+    return await evaluate_trial(measurement, quality=quality)

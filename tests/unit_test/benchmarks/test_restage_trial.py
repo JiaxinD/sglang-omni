@@ -235,3 +235,73 @@ async def test_trial_preserves_completed_measurement_before_postprocessing_failu
     assert "evaluation" not in saved
     rows = (tmp_path / "trial/requests.jsonl").read_text().splitlines()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality_outcome", ["pass", "reject", "error"])
+async def test_measurement_waits_for_quality_without_restarting_generation(
+    tmp_path, monkeypatch, quality_outcome
+):
+    events = []
+
+    @contextmanager
+    def server(**kwargs):
+        events.append("start")
+        try:
+            yield
+        finally:
+            events.append("stop")
+
+    monkeypatch.setattr(restage_trial, "managed_omni_server", server)
+
+    def sender(url, audio_dir):
+        async def send(session, sample):
+            events.append("generate")
+            return RequestResult(request_id=sample, is_success=True)
+
+        return send
+
+    measurement = await restage_trial.measure_trial(
+        config_path=tmp_path / "candidate.yaml",
+        model_path="dummy",
+        samples=["a"],
+        send_factory=sender,
+        slo=SLO(max_latency_s=1),
+        rate=100,
+        destination=tmp_path / "trial",
+        port=18000,
+        warmup=0,
+        arrival_seed=42,
+    )
+    output = tmp_path / "trial/result.json"
+    before = json.loads(output.read_text())
+    assert before["status"] == "awaiting_quality"
+    assert before["measurement_complete"] is True
+    assert "evaluation" not in before
+    assert events == ["start", "generate", "stop"]
+    raw_requests = (tmp_path / "trial/requests.jsonl").read_bytes()
+
+    async def quality(results):
+        assert events == ["start", "generate", "stop"]
+        events.append("quality")
+        assert [result.request_id for result in results] == ["a"]
+        if quality_outcome == "error":
+            raise RuntimeError("evaluator unavailable")
+        return {"a": quality_outcome == "pass"}
+
+    if quality_outcome == "error":
+        with pytest.raises(RuntimeError, match="evaluator unavailable"):
+            await restage_trial.evaluate_trial(measurement, quality=quality)
+        assert json.loads(output.read_text())["status"] == "failed"
+    else:
+        evaluation = await restage_trial.evaluate_trial(measurement, quality=quality)
+        assert evaluation.feasible is (quality_outcome == "pass")
+        assert json.loads(output.read_text())["status"] == "complete"
+    assert events == ["start", "generate", "stop", "quality"]
+    assert json.loads(output.read_text())["elapsed_s"] == before["elapsed_s"]
+    assert (tmp_path / "trial/requests.jsonl").read_bytes() == raw_requests
+    final_record = output.read_bytes()
+    with pytest.raises(ValueError, match="awaiting quality"):
+        await restage_trial.evaluate_trial(measurement, quality=quality)
+    assert output.read_bytes() == final_record
+    assert events.count("quality") == 1
