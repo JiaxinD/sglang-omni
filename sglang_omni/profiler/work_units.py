@@ -7,9 +7,27 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+_execution_local = threading.local()
+
+
+def current_execution_observations() -> list[dict] | None:
+    """Return this Python worker's collector, absent outside a profiled unit."""
+    return getattr(_execution_local, "observations", None)
+
+
+@contextmanager
+def collect_execution_observations():
+    previous = current_execution_observations()
+    observations = []
+    _execution_local.observations = observations
+    try:
+        yield observations
+    finally:
+        _execution_local.observations = previous
 
 
 class WorkUnitRecorder:
@@ -72,7 +90,15 @@ class WorkUnitRecorder:
                 error_type=error_type,
             )
 
-    def end(self, unit_id: str, *, start_ns: int, end_ns: int, error_type: str | None):
+    def end(
+        self,
+        unit_id: str,
+        *,
+        start_ns: int,
+        end_ns: int,
+        error_type: str | None,
+        executions: list[dict] | None = None,
+    ):
         with self._lock:
             if self._write(
                 "end",
@@ -80,6 +106,7 @@ class WorkUnitRecorder:
                 start_ns=start_ns,
                 end_ns=end_ns,
                 error_type=error_type,
+                executions=executions,
             ):
                 self._ended += 1
 

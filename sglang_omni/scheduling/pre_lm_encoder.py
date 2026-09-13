@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 from sglang_omni.profiler.event_recorder import get_recorder
+from sglang_omni.profiler.work_units import collect_execution_observations
 
 ItemT = TypeVar("ItemT")
 EncodedT = TypeVar("EncodedT")
@@ -207,18 +208,23 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
             return self._execute_batch(items)
         # Note (Jiaxin Deng): stamp after the begin record and before future
         # dispatch; synchronous follower callbacks are not encoder execution.
-        start_ns = time.perf_counter_ns()
-        error_type = None
-        try:
-            return self._execute_batch(items)
-        except BaseException as exc:
-            error_type = type(exc).__name__
-            raise
-        finally:
-            end_ns = time.perf_counter_ns()
-            recorder.end(
-                unit_id, start_ns=start_ns, end_ns=end_ns, error_type=error_type
-            )
+        with collect_execution_observations() as executions:
+            start_ns = time.perf_counter_ns()
+            error_type = None
+            try:
+                return self._execute_batch(items)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                end_ns = time.perf_counter_ns()
+                recorder.end(
+                    unit_id,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                    error_type=error_type,
+                    executions=executions,
+                )
 
     def _handle_batch_failure(
         self,

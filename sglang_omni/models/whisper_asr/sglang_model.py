@@ -429,16 +429,43 @@ class WhisperForConditionalGeneration(nn.Module):
         )
         self._encoder_graph_runner.capture(batch_buckets)
 
-    def _run_encoder(self, audio_features: torch.Tensor) -> torch.Tensor:
+    def _run_encoder(
+        self, audio_features: torch.Tensor, *, observations: list[dict] | None = None
+    ) -> torch.Tensor:
         """Run the Whisper encoder with CUDA-graph replay when available."""
         if self._encoder_graph_runner is not None:
             try:
-                return self._encoder_graph_runner.run(audio_features)
+                if observations is None:
+                    return self._encoder_graph_runner.run(audio_features)
+                return self._encoder_graph_runner.run(
+                    audio_features, observations=observations
+                )
             except Exception:
                 logger.exception(
                     "Whisper encoder CUDA graph replay failed; falling back to eager"
                 )
-        return self.model.encoder(audio_features)
+        if observations is None:
+            return self.model.encoder(audio_features)
+        execution = {
+            "component": "whisper_encoder",
+            "site": "model",
+            "input_shape": [int(size) for size in audio_features.shape],
+            "reason": (
+                "no_runner" if self._encoder_graph_runner is None else "runner_raised"
+            ),
+            "path": "eager",
+            "bucket": None,
+            "step": "encoder_call",
+        }
+        observations.append(execution)
+        try:
+            output = self.model.encoder(audio_features)
+        except BaseException as exc:
+            execution.update(outcome="raised", error_type=type(exc).__name__)
+            raise
+        else:
+            execution["outcome"] = "host_returned"
+            return output
 
     def encode_audio_features(self, items: list[Any]) -> torch.Tensor:
         """Batch-encode mel features into encoder states [B, T, H]."""
@@ -457,7 +484,13 @@ class WhisperForConditionalGeneration(nn.Module):
             if not isinstance(feature, torch.Tensor):
                 feature = torch.as_tensor(feature)
             features.append(feature.to(device=reference.device, dtype=reference.dtype))
-        return self._run_encoder(torch.cat(features, dim=0))
+        # Note (Jiaxin Deng): only this Python pre-LM entry reads the collector;
+        # the model forward/compile path keeps the default unobserved call.
+        from sglang_omni.profiler.work_units import current_execution_observations
+
+        return self._run_encoder(
+            torch.cat(features, dim=0), observations=current_execution_observations()
+        )
 
     def _batch_audio_inputs(
         self,

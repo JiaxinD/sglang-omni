@@ -233,9 +233,17 @@ its completion cannot enter a later session, even with the same run ID.
 The `work_units` report retains unfinished attempts and recording errors without
 creating request IDs. Cache hits and merged followers bypass this worker, so
 these records are not request coverage. Feature shapes describe the submitted
-items, not CUDA graph padding buckets or confirmed physical GPU work. Component
-identity is not an inferred stage mapping. Isolated replay, actual execution
-shape capture and held-out validation remain necessary before fitting stage laws.
+items, not confirmed physical GPU work. Whisper's pre-LM path additionally records
+`executions`: the concatenated input shape, selected CUDA graph bucket, eager or
+graph path, and host-returned or raised outcome. A graph failure and subsequent
+eager fallback remain separate observations. `input_copy`, `replay` and
+`output_clone` identify where a graph attempt raised. Host return does not prove
+GPU completion; asynchronous errors can surface at the worker's later barrier.
+Missing or empty executions mean unobserved, not eager execution. Other models
+and the non-pre-LM forward path do not provide these observations. Component
+identity is not an inferred stage mapping. Isolated replay, execution shape
+capture for other models and held-out validation remain necessary before fitting
+stage laws.
 The report uses compact unit rows; member details remain in the JSONL. Existing
 aggregate `encoder_time_s` statistics include recording overhead when profiling
 is enabled and are not substituted for these per-execution intervals.

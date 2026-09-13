@@ -146,6 +146,7 @@ def work_unit_report(source: Path, run_id: str) -> dict:
                         "end_observed": end is not None,
                         "error_type": None if end is None else end["error_type"],
                         "host_execution_s": duration,
+                        "executions": None if end is None else end.get("executions"),
                     }
                 )
             sessions.append(

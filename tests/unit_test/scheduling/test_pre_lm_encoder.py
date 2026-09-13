@@ -169,6 +169,38 @@ def test_profile_restart_does_not_move_inflight_completion_to_new_session(tmp_pa
     assert [r["kind"] for r in new] == ["open", "begin", "end", "stop"]
 
 
+def test_execution_observations_are_serialized_per_retry(tmp_path):
+    from sglang_omni.profiler.work_units import current_execution_observations
+
+    class ObservedService(_Service):
+        def encode_batch(self, items):
+            observations = current_execution_observations()
+            assert observations is not None
+            observations.append({"input_shape": [len(items), 80, 3000]})
+            return super().encode_batch(items)
+
+    recorder = get_recorder()
+    recorder.start("run", str(tmp_path), "asr")
+    service = ObservedService(controlled_drain=True)
+    service.fail_multi = service.retry = True
+    try:
+        first, second = service._submit(1), service._submit(2)
+        service.drain_gate.set()
+        assert first.result(timeout=2) == 2
+        assert second.result(timeout=2) == 4
+    finally:
+        service.close()
+        recorder.stop()
+    ends = [r for r in _work_records(tmp_path) if r["kind"] == "end"]
+    assert [e["executions"] for e in ends] == [
+        [{"input_shape": [2, 80, 3000]}],
+        [{"input_shape": [1, 80, 3000]}],
+        [{"input_shape": [1, 80, 3000]}],
+    ]
+    assert ends[0]["error_type"] == "RuntimeError"
+    assert current_execution_observations() is None
+
+
 class _Service(PreLMEncoderService[int, list[int], int]):
     def __init__(self, *, controlled_drain: bool = False) -> None:
         self.attachments: list[tuple[int, int]] = []
