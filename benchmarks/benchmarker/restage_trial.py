@@ -101,6 +101,10 @@ async def execute_trial(
                             )
                         )
                     results = await runner.run(samples, send)
+                    metadata.update(
+                        measurement_complete=True, elapsed_s=runner.wall_clock_s
+                    )
+                    save()
         if profile:
             write_profile_report(
                 results,

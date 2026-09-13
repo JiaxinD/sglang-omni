@@ -181,3 +181,57 @@ async def test_trial_keeps_completed_request_evidence_after_later_failure(
     ]
     assert [row["request_id"] for row in rows] == ["completed"]
     assert rows[0]["scheduled_s"] <= rows[0]["dispatched_s"] <= rows[0]["completed_s"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["shutdown", "quality"])
+async def test_trial_preserves_completed_measurement_before_postprocessing_failure(
+    tmp_path, monkeypatch, failure_phase
+):
+    output = tmp_path / "trial/result.json"
+    measured_elapsed = None
+
+    @contextmanager
+    def server(**kwargs):
+        nonlocal measured_elapsed
+        yield
+        saved = json.loads(output.read_text())
+        assert saved["measurement_complete"] is True
+        measured_elapsed = saved["elapsed_s"]
+        assert measured_elapsed > 0
+        if failure_phase == "shutdown":
+            raise RuntimeError("shutdown failed")
+
+    monkeypatch.setattr(restage_trial, "managed_omni_server", server)
+
+    def sender(url, audio_dir):
+        async def send(session, sample):
+            return RequestResult(request_id=sample, is_success=True)
+
+        return send
+
+    async def quality(results):
+        assert failure_phase == "quality"
+        raise RuntimeError("quality failed")
+
+    with pytest.raises(RuntimeError, match=f"{failure_phase} failed"):
+        await restage_trial.execute_trial(
+            config_path=tmp_path / "candidate.yaml",
+            model_path="dummy",
+            samples=["a"],
+            send_factory=sender,
+            quality=quality,
+            slo=SLO(max_latency_s=1),
+            rate=100,
+            destination=tmp_path / "trial",
+            port=18000,
+            warmup=0,
+            arrival_seed=42,
+        )
+    saved = json.loads(output.read_text())
+    assert saved["status"] == "failed"
+    assert saved["measurement_complete"] is True
+    assert saved["elapsed_s"] == measured_elapsed
+    assert "evaluation" not in saved
+    rows = (tmp_path / "trial/requests.jsonl").read_text().splitlines()
+    assert len(rows) == 1
