@@ -1,0 +1,38 @@
+{
+  "devices": [0, 1],
+  "replica_counts": [1],
+  "dimensions": {
+    "processes": [
+      {
+        "preprocessing.process": "preprocessing",
+        "tts_engine.process": "tts_engine",
+        "vocoder.process": "vocoder",
+        "tts_engine.gpu_memory_fraction": 0.4,
+        "vocoder.gpu_memory_fraction": 0.1
+      }
+    ],
+    "mps_cap": [
+      {"mps": "off"},
+      {
+        "mps": "on",
+        "tts_engine.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "100",
+        "vocoder.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "100"
+      },
+      {
+        "mps": "on",
+        "tts_engine.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "50",
+        "vocoder.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "50"
+      },
+      {
+        "mps": "on",
+        "tts_engine.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "75",
+        "vocoder.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "25"
+      },
+      {
+        "mps": "on",
+        "tts_engine.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "25",
+        "vocoder.env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "75"
+      }
+    ]
+  }
+}

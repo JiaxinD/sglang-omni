@@ -46,6 +46,31 @@ The new output directory contains:
 does not cover the full declared space; enumeration order is not a ranking.
 No GPU serving process starts during planning.
 
+## Explore MPS client limits
+
+`examples/configs/restage_qwen3_tts_mps_search.json` uses the existing native
+MPS runtime and stage environment defaults. It puts preprocessing, the TTS
+engine and vocoder in separate processes, and compares MPS off, MPS on at
+100/100, and client percentages of 50/50, 75/25 and 25/75. Keeping an uncapped
+MPS-on control separates MPS scheduling effects from the effect of caps.
+Also include the shipped configuration as the campaign baseline.
+
+These values are experimental choices, not measured recommendations.
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` limits the available client execution
+resources; it does not reserve an exclusive SM partition. Native MPS currently
+supports non-TP processes on one physical GPU each. Stages sharing a process
+share its client limit; different limits require separate processes.
+
+Use `mps=on` for capped trials: auto mode can leave single-client GPUs without
+MPS. Stage env values are defaults, so remove an inherited
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` when testing these choices. Keep daemon
+limits and per-context partition settings fixed across comparisons, and
+record them. Actual MPS attachment and the SM count visible to each CUDA
+worker/context must be verified on the target stack before accepting a
+capped result. The CPU contract test proves configuration-to-child-environment
+propagation only. Green Context and exclusive SM partitioning remain separate
+runtime work. See the [NVIDIA MPS environment reference](https://docs.nvidia.com/deploy/mps/appendix-environment-variables.html).
+
 ## Measure a TTS candidate
 
 After allocating the visible GPUs, run one candidate with a JSON trial spec:
