@@ -4846,6 +4846,215 @@ def test_qwen3_tts_followup_queue_prioritizes_playback_deadline() -> None:
     assert scheduler._collect_followup_batch() == [("earlier", earlier)]
 
 
+def test_qwen3_tts_criticality_gate_factory_and_deadline_release(monkeypatch):
+    monkeypatch.setattr(
+        qwen3_stages,
+        "_load_qwen3_tts_tokenizer",
+        lambda *a, **kw: _FakeQwen3TTSTokenizer(),
+    )
+    monkeypatch.setattr(
+        Qwen3TTSStreamingVocoderScheduler, "warmup_now", lambda scheduler: None
+    )
+    scheduler = qwen3_stages.create_vocoder_executor(
+        "model",
+        device="cpu",
+        criticality_slack_s=0.05,
+        followup_batch_wait_ms=0,
+        enable_stateful_codec_decoder=False,
+    )
+    clock = [100.0]
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: clock[0])
+    state = scheduler.create_stream_state("buffered")
+    state.playback_deadline_s = 100.055
+    scheduler._enqueue_followup("buffered", state)
+    scheduler._initial_queue.put(("first", object()))
+
+    def wait(seconds):
+        clock[0] += seconds
+        return False
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", wait)
+    assert scheduler._collect_followup_batch() == [("buffered", state)]
+    assert clock[0] >= 100.005
+
+
+@pytest.mark.parametrize("slack", [-1, float("nan"), float("inf")])
+def test_qwen3_tts_criticality_gate_rejects_invalid_slack(slack):
+    with pytest.raises(ValueError, match="criticality_slack_s"):
+        Qwen3TTSStreamingVocoderScheduler(
+            _FakeQwen3TTSTokenizer(), device="cpu", criticality_slack_s=slack
+        )
+
+
+def test_qwen3_tts_criticality_gate_rechecks_earliest_deadline(monkeypatch) -> None:
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=0.05,
+        followup_batch_wait_ms=0,
+    )
+    clock = [100.0]
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: clock[0])
+    buffered = scheduler.create_stream_state("buffered")
+    buffered.playback_deadline_s = 101.0
+    urgent = scheduler.create_stream_state("urgent")
+    urgent.playback_deadline_s = 100.01
+    scheduler._enqueue_followup("buffered", buffered)
+    scheduler._initial_queue.put(("first", object()))
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+        scheduler._enqueue_followup("urgent", urgent)
+        return False
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", wait)
+    assert scheduler._collect_followup_batch() == [("urgent", urgent)]
+    assert len(waits) == 1
+    scheduler._initial_queue.get_nowait()
+    assert scheduler._collect_followup_batch() == [("buffered", buffered)]
+    assert scheduler._followup_queue.empty()
+
+
+def test_qwen3_tts_criticality_gate_releases_when_initial_queue_drains(monkeypatch):
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=0.05,
+        followup_batch_wait_ms=0,
+    )
+    clock = [100.0]
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: clock[0])
+    buffered = scheduler.create_stream_state("buffered")
+    buffered.playback_deadline_s = 101.0
+    scheduler._enqueue_followup("buffered", buffered)
+    scheduler._initial_queue.put(("first", object()))
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+        scheduler._initial_queue.get_nowait()
+        return False
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", wait)
+    assert scheduler._collect_followup_batch() == [("buffered", buffered)]
+    assert waits == [0.002]
+    assert clock[0] < buffered.playback_deadline_s - 0.05
+
+
+def test_qwen3_tts_criticality_gate_does_not_delay_urgent_batch(monkeypatch) -> None:
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=0.05,
+        followup_batch_wait_ms=10,
+    )
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: 100.0)
+    urgent = scheduler.create_stream_state("urgent")
+    urgent.playback_deadline_s = 100.01
+    buffered = scheduler.create_stream_state("buffered")
+    buffered.playback_deadline_s = 101.0
+    scheduler._enqueue_followup("urgent", urgent)
+    scheduler._enqueue_followup("buffered", buffered)
+    scheduler._initial_queue.put(("first", object()))
+    assert scheduler._collect_followup_batch() == [("urgent", urgent)]
+    assert scheduler._followup_queue.get_nowait()[2:] == ("buffered", buffered)
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_qwen3_tts_criticality_gate_honors_commit_timeout_and_stop(monkeypatch, stop):
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=0.05,
+    )
+    clock = [100.0]
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: clock[0])
+    buffered = scheduler.create_stream_state("buffered")
+    buffered.playback_deadline_s = 101.0
+    scheduler._enqueue_followup("buffered", buffered)
+    scheduler._initial_queue.put(("first", object()))
+
+    def wait(seconds):
+        clock[0] += seconds
+        if stop:
+            scheduler._async_stop.set()
+        return stop
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", wait)
+    assert scheduler._collect_followup_batch(first_timeout=0.001) is None
+    assert clock[0] <= 100.001001
+    assert scheduler._followup_queue.get_nowait()[2:] == ("buffered", buffered)
+
+
+def test_qwen3_tts_criticality_gate_worker_drains_pending_audio(monkeypatch):
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=0.05,
+        followup_batch_wait_ms=1,
+    )
+    clock = [100.0]
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: clock[0])
+    buffered = scheduler.create_stream_state("buffered")
+    buffered.playback_deadline_s = 101.0
+    scheduler._enqueue_followup("buffered", buffered)
+    scheduler._initial_queue.put(("first", object()))
+    scheduler._pending_incremental().append(object())
+    drained = []
+
+    def wait(seconds):
+        clock[0] += seconds
+        return False
+
+    def drain(*, keep):
+        drained.append(clock[0])
+        assert keep == 0
+        scheduler._pending_incremental().clear()
+        scheduler._async_stop.set()
+
+    def unexpected_decode(batch):
+        pytest.fail("buffered follow-up decoded before the pending audio commit")
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", wait)
+    monkeypatch.setattr(scheduler, "_drain_pending_incremental", drain)
+    monkeypatch.setattr(scheduler, "_run_followup_batch", unexpected_decode)
+    scheduler._run_followup_worker()
+    assert len(drained) == 1
+    assert drained[0] <= 100.001001
+    assert scheduler._followup_queue.get_nowait()[2:] == ("buffered", buffered)
+    assert not scheduler._followup_collect_lock.locked()
+
+
+@pytest.mark.parametrize(
+    "slack,initial,deadline",
+    [(0.0, True, 101.0), (0.05, False, 101.0), (0.05, True, 100.01)],
+)
+def test_qwen3_tts_criticality_gate_allows_ready_work(
+    monkeypatch, slack, initial, deadline
+):
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        criticality_slack_s=slack,
+        followup_batch_wait_ms=0,
+    )
+    monkeypatch.setattr(qwen3_streaming_vocoder.time, "monotonic", lambda: 100.0)
+    state = scheduler.create_stream_state("ready")
+    state.playback_deadline_s = deadline
+    scheduler._enqueue_followup("ready", state)
+    if initial:
+        scheduler._initial_queue.put(("first", object()))
+
+    def unexpected_wait(seconds):
+        pytest.fail("ready work entered the criticality wait path")
+
+    monkeypatch.setattr(scheduler._async_stop, "wait", unexpected_wait)
+    assert scheduler._collect_followup_batch(first_timeout=0) == [("ready", state)]
+
+
 @pytest.mark.parametrize("worker", ["initial", "followup"])
 def test_qwen3_tts_async_worker_propagates_process_exit(
     monkeypatch: pytest.MonkeyPatch,

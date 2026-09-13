@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import queue
 import threading
 import time
@@ -522,6 +523,7 @@ class Qwen3TTSStreamingVocoderScheduler(
         followup_max_batch_size: int = 8,
         followup_batch_wait_ms: int = 1,
         followup_worker_count: int = 2,
+        criticality_slack_s: float = 0.0,
         initial_cuda_graph: bool = True,
         enable_deterministic_inference: bool = False,
         followup_cuda_graph: bool = True,
@@ -603,6 +605,8 @@ class Qwen3TTSStreamingVocoderScheduler(
             raise ValueError("async batch sizes must be > 0")
         if followup_worker_count < 1:
             raise ValueError("followup_worker_count must be >= 1")
+        if not math.isfinite(criticality_slack_s) or criticality_slack_s < 0:
+            raise ValueError("criticality_slack_s must be finite and >= 0")
         if initial_batch_wait_ms < 0 or followup_batch_wait_ms < 0:
             raise ValueError("async batch waits must be >= 0")
         if codec_state_slots <= 0:
@@ -820,6 +824,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             self._decode_stream = None
             self._followup_decode_streams = ()
             self._followup_decode_stream = None
+        self._criticality_slack_s = float(criticality_slack_s)
         self._initial_queue: queue.Queue[tuple[str, _Qwen3TTSStreamState] | None] = (
             queue.Queue()
         )
@@ -2551,29 +2556,74 @@ class Qwen3TTSStreamingVocoderScheduler(
                 return
             self._run_followup_batch(batch)
 
+    def _defer_followup(self, deadline_s: float) -> bool:
+        # Note (Jiaxin Deng): retain Yueying Li's Restage criticality policy
+        # (91730a612): buffered follow-ups yield to queued first chunks.
+        return (
+            self._criticality_slack_s > 0
+            and deadline_s - time.monotonic() > self._criticality_slack_s
+            and not self._initial_queue.empty()
+        )
+
+    def _get_followup_gated(
+        self, first_timeout: float | None
+    ) -> tuple[str, _Qwen3TTSStreamState] | None:
+        timeout_at = (
+            time.monotonic() + first_timeout if first_timeout is not None else None
+        )
+        remaining = first_timeout
+        while True:
+            try:
+                item = self._followup_queue.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            deadline_s, _, request_id, state = item
+            if state is None or self._async_stop.is_set():
+                return None
+            if not self._defer_followup(deadline_s):
+                return request_id, state
+            self._followup_queue.put(item)
+            # Note (Jiaxin Deng): a worker may owe an asynchronous audio commit;
+            # yielding must honor its collect timeout, not wait for buffer drain.
+            wait_s = min(
+                0.002, deadline_s - time.monotonic() - self._criticality_slack_s
+            )
+            if timeout_at is not None:
+                remaining = timeout_at - time.monotonic()
+                if remaining <= 0:
+                    return None
+                wait_s = min(wait_s, remaining)
+            if self._async_stop.wait(max(0.0, wait_s)):
+                return None
+            if timeout_at is not None:
+                remaining = timeout_at - time.monotonic()
+                if remaining <= 0:
+                    return None
+
     def _collect_followup_batch(
         self,
         *,
         first_timeout: float | None = None,
     ) -> list[tuple[str, _Qwen3TTSStreamState]] | None:
-        try:
-            _, _, request_id, state = self._followup_queue.get(timeout=first_timeout)
-        except queue.Empty:
+        head = self._get_followup_gated(first_timeout)
+        if head is None:
             return None
-        if state is None or self._async_stop.is_set():
-            return None
-        batch = [(request_id, state)]
+        batch = [head]
         deadline = time.monotonic() + self._followup_batch_wait_s
         while len(batch) < self._followup_max_batch_size:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             try:
-                _, _, request_id, state = self._followup_queue.get(timeout=remaining)
+                item = self._followup_queue.get(timeout=remaining)
             except queue.Empty:
                 break
+            deadline_s, _, request_id, state = item
             if state is None:
                 return None
+            if self._defer_followup(deadline_s):
+                self._followup_queue.put(item)
+                break
             batch.append((request_id, state))
         return batch
 

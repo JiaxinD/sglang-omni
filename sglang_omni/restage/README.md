@@ -49,6 +49,30 @@ The new output directory contains:
 does not cover the full declared space; enumeration order is not a ranking.
 No GPU serving process starts during planning.
 
+## Explore streaming vocoder criticality
+
+For Qwen3-TTS, `vocoder.factory.criticality_slack_s` enables the optional
+streaming criticality gate. Zero is the default and disables it. A positive
+value defers follow-up decodes with more than that many seconds of estimated
+playback buffer while first-chunk decodes are queued. Follow-ups resume when
+they become urgent or the initial queue drains. The playback estimate is
+server-side, not a client playback acknowledgement.
+
+`examples/configs/restage_qwen3_tts_gate_search.json` pairs off/on settings
+with placement and replica choices. Its 0.05-second threshold is an experimental
+choice, not a recommended value. Use matched workload, arrival seeds, memory
+settings and SLOs for gate off/on at each placement, including playback underrun
+and quality checks. A gate can improve first-audio latency while harming
+continuity or throughput; only measured results determine acceptance.
+
+This migrates Yueying Li's queued-initial criticality policy from Restage
+commit `91730a612`. The current implementation uses an explicit factory option
+instead of the historical `SGLANG_OMNI_VOX_GATE_SLACK_S` environment variable.
+It respects asynchronous commit timeouts and avoids adding buffered work to an
+urgent batch while the gate is closed. It affects asynchronous streaming vocoder
+dispatch; it neither preempts running kernels nor allocates SMs. New-stack
+gate-by-placement GPU ablations remain necessary.
+
 ## Explore MPS client limits
 
 `examples/configs/restage_qwen3_tts_mps_search.json` uses the existing native
