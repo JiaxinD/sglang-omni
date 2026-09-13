@@ -23,6 +23,7 @@ from sglang_omni.comm.data_ref import (
     TransportKind,
 )
 from sglang_omni.comm.kv_transfer import (
+    KVCapacityUnavailable,
     KVPageDestination,
     KVPageLease,
     KVPool,
@@ -430,29 +431,39 @@ class CommEngine:
             relay = self.relay(transport)
             relay.register_kv_pool(pool)
 
-            ready_future = asyncio.get_running_loop().create_future()
             prepare_start = _comm_now_ns()
-            self._kv_ready[transfer_id] = ready_future
             self._outbound_kv_requests[transfer_id] = request_id
-            await send_to_endpoint(
-                self._rank_send_sockets,
-                self.rank_endpoints[to_stage][self.tp_rank],
-                KVTransferPrepareMessage(
-                    request_id=request_id,
-                    transfer_id=transfer_id,
-                    from_stage=from_stage,
-                    to_stage=to_stage,
-                    source_pool_id=source_pool_id,
-                    target_pool_id=target_pool_id,
-                    source_page_indices=source_page_indices,
-                    source_layout=pool.layout,
-                    metadata=dict(metadata or {}),
-                ),
+            prepare = KVTransferPrepareMessage(
+                request_id=request_id,
+                transfer_id=transfer_id,
+                from_stage=from_stage,
+                to_stage=to_stage,
+                source_pool_id=source_pool_id,
+                target_pool_id=target_pool_id,
+                source_page_indices=source_page_indices,
+                source_layout=pool.layout,
+                metadata=dict(metadata or {}),
             )
-            ready = await asyncio.wait_for(
-                ready_future,
-                timeout=self._ack_timeout_s,
-            )
+            # Note (Jiaxin Deng): capacity waiting retains source ownership and
+            # leaves the control loop free to process copies and cancellations.
+            while True:
+                if self._closed or request_id in self._aborted_kv_requests:
+                    raise KVTransferCancelled(
+                        f"KV transfer request {request_id!r} was cleaned up"
+                    )
+                ready_future = asyncio.get_running_loop().create_future()
+                self._kv_ready[transfer_id] = ready_future
+                await send_to_endpoint(
+                    self._rank_send_sockets,
+                    self.rank_endpoints[to_stage][self.tp_rank],
+                    prepare,
+                )
+                ready = await asyncio.wait_for(
+                    ready_future, timeout=self._ack_timeout_s
+                )
+                if ready.success or not ready.retryable:
+                    break
+                await asyncio.sleep(0.01)
             _comm_trace(
                 "comm_kv_ready",
                 transfer_id=transfer_id,
@@ -681,6 +692,8 @@ class CommEngine:
                 destination_page_indices=destination.page_indices,
                 destination_ref=relay_info,
             )
+        except KVCapacityUnavailable as exc:
+            return self._kv_ready_failure(message, str(exc), retryable=True)
         except Exception as exc:
             with suppress(Exception):
                 receiver.abort(message, destination, exc)
@@ -743,6 +756,8 @@ class CommEngine:
     def _kv_ready_failure(
         message: KVTransferPrepareMessage,
         error: str,
+        *,
+        retryable: bool = False,
     ) -> KVTransferReadyMessage:
         _comm_trace(
             "comm_kv_prepare_rejected",
@@ -761,6 +776,7 @@ class CommEngine:
             to_stage=message.from_stage,
             success=False,
             error=error,
+            retryable=retryable,
         )
 
     def cleanup(self, request_id: str) -> None:

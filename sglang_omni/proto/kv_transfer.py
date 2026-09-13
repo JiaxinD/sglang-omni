@@ -78,6 +78,7 @@ class KVTransferReadyMessage:
     destination_page_indices: tuple[int, ...] = ()
     destination_ref: dict[str, Any] | None = None
     error: str | None = None
+    retryable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {"type": "kv_transfer_ready", **msgspec.to_builtins(self)}

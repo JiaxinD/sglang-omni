@@ -260,6 +260,22 @@ class OmniDecodeScheduler(_PDKVLifecycle):
 
     scheduler_role = "decode"
 
+    def stream_output(self, reqs, return_logprob=False, skip_req=None):
+        for req in reqs:
+            if req is skip_req:
+                continue
+            remaining = (
+                0
+                if req.finished()
+                else max(0, req.sampling_params.max_new_tokens - len(req.output_ids))
+            )
+            self._pd_receiver.update_decode_headroom(req.rid, remaining)
+        return super().stream_output(reqs, return_logprob, skip_req)
+
+    def _release_request_kv_cache(self, req):
+        super()._release_request_kv_cache(req)
+        self._pd_receiver.update_decode_headroom(req.rid)
+
     def __init__(
         self,
         *args,
@@ -369,6 +385,7 @@ class OmniDecodeScheduler(_PDKVLifecycle):
                 if request_id in self._aborted_request_ids:
                     self._pd_deferred_admission = None
                     self.token_to_kv_pool_allocator.free(admission.allocation.slots)
+                    self._pd_receiver.update_decode_headroom(request_id)
                     continue
                 try:
                     req = req_from_continuation(
@@ -383,6 +400,7 @@ class OmniDecodeScheduler(_PDKVLifecycle):
                 except Exception as exc:
                     self._pd_deferred_admission = None
                     self.token_to_kv_pool_allocator.free(admission.allocation.slots)
+                    self._pd_receiver.update_decode_headroom(request_id)
                     self.outbox.put(admitted)
                     self._emit_request_error(request_id, exc)
                     continue
@@ -398,12 +416,18 @@ class OmniDecodeScheduler(_PDKVLifecycle):
             self._pd_deferred_admission = None
             if admission is not None:
                 self.token_to_kv_pool_allocator.free(admission.allocation.slots)
+                self._pd_receiver.update_decode_headroom(
+                    admission.continuation.request_id
+                )
             while True:
                 try:
                     admission = self._pd_admissions.get_nowait()
                 except queue.Empty:
                     return
                 self.token_to_kv_pool_allocator.free(admission.allocation.slots)
+                self._pd_receiver.update_decode_headroom(
+                    admission.continuation.request_id
+                )
 
     def abort(self, request_id: str, *, defer_running_cleanup: bool = True) -> None:
         with self._pd_lifecycle_lock:

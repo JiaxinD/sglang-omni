@@ -18,6 +18,7 @@ import msgspec
 import torch
 
 from sglang_omni.comm import KVBufferRegion, KVPageDestination, KVPool
+from sglang_omni.comm.kv_transfer import KVCapacityUnavailable
 from sglang_omni.proto import KVTransferPrepareMessage, StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 
@@ -413,6 +414,7 @@ class DecodeKVReceiver:
         self._resume_schema = resume_schema
         self._lock = lifecycle_lock or threading.RLock()
         self._reservations: dict[str, DecodeAdmission] = {}
+        self._decode_headroom: dict[str, int] = {}
         self._transfer_tombstones: dict[str, None] = {}
         self._accepting_reservations = True
         self._closed = False
@@ -447,6 +449,11 @@ class DecodeKVReceiver:
         if seq_len != count:
             raise ValueError("PD requires one transferred page per prompt token")
         bindings = dict(request.metadata.get("replica_bindings") or {})
+        remaining = max(
+            0,
+            int(continuation.sampling_params["max_new_tokens"])
+            - len(continuation.output_ids),
+        )
         with self._lock:
             if self._closed:
                 raise RuntimeError("decode KV receiver is closed")
@@ -457,8 +464,17 @@ class DecodeKVReceiver:
                 or request.transfer_id in self._transfer_tombstones
             ):
                 raise RuntimeError(f"duplicate KV transfer {request.transfer_id!r}")
-            if int(self._allocator.available_size()) < count:
-                raise RuntimeError(
+            # Note (Jiaxin Deng): leave room for admitted requests to finish;
+            # filling the pool with prompts alone forces unsupported retraction.
+            required = count + remaining
+            if required > self._allocator.size:
+                raise ValueError(
+                    f"KV request budget of {required} tokens exceeds decode pool capacity"
+                )
+            if int(self._allocator.available_size()) < required + sum(
+                self._decode_headroom.values()
+            ):
+                raise KVCapacityUnavailable(
                     f"decode KV pool exhausted: need {count}, "
                     f"have {self._allocator.available_size()}"
                 )
@@ -473,7 +489,15 @@ class DecodeKVReceiver:
             self._reservations[request.transfer_id] = DecodeAdmission(
                 continuation, allocation, bindings
             )
+            self._decode_headroom[request.request_id] = remaining
         return KVPageDestination(self.pool_id, allocation.page_indices)
+
+    def update_decode_headroom(self, request_id: str, remaining: int = 0) -> None:
+        with self._lock:
+            if remaining > 0 and request_id in self._decode_headroom:
+                self._decode_headroom[request_id] = remaining
+            elif remaining <= 0:
+                self._decode_headroom.pop(request_id, None)
 
     def commit(
         self,
@@ -495,6 +519,7 @@ class DecodeKVReceiver:
                 or reservation.allocation.page_indices != destination.page_indices
             ):
                 self._allocator.free(reservation.allocation.slots)
+                self.update_decode_headroom(request.request_id)
                 raise RuntimeError("KV commit does not match a live reservation")
             self._admissions.put(reservation)
 
@@ -509,6 +534,7 @@ class DecodeKVReceiver:
             reservation = self._reservations.pop(request.transfer_id, None)
             if reservation is not None:
                 self._remember_finished_transfer(request.transfer_id)
+                self.update_decode_headroom(request.request_id)
         if reservation is not None:
             self._allocator.free(reservation.allocation.slots)
         logger.warning("KV receive aborted for %s: %s", request.request_id, error)

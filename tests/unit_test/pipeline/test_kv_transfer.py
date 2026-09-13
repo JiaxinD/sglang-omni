@@ -403,6 +403,64 @@ def test_kv_transfer_uses_rank_endpoint_for_full_lifecycle() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+def test_kv_capacity_wait_keeps_source_pages_until_admitted_or_cancelled(cancel):
+    from sglang_omni.comm.kv_transfer import KVCapacityUnavailable
+
+    async def run():
+        relay, source, destination = await _start_pair()
+        try:
+            source.register_kv_pool(_pool("source_pool"))
+            destination.register_kv_pool(_pool("destination_pool"))
+            receiver = _Receiver((0, 3))
+            original_reserve = receiver.reserve
+            waiting = asyncio.Event()
+            capacity = False
+
+            def reserve(message):
+                if not capacity:
+                    waiting.set()
+                    raise KVCapacityUnavailable("pool busy")
+                return original_reserve(message)
+
+            receiver.reserve = reserve
+            destination.register_kv_receiver("destination_pool", receiver)
+            lease = Mock()
+            task = asyncio.create_task(
+                source.send_kv_pages(
+                    request_id="request",
+                    transfer_id="transfer",
+                    source_pool_id="source_pool",
+                    source_page_indices=(1, 4),
+                    target_pool_id="destination_pool",
+                    to_stage="destination",
+                    lease=lease,
+                )
+            )
+            await asyncio.wait_for(waiting.wait(), 1)
+            await asyncio.sleep(0.03)
+            assert not task.done()
+            assert not relay.put_ops
+            lease.release.assert_not_called()
+            assert not receiver.aborted
+            if cancel:
+                source.cleanup("request")
+                with pytest.raises(KVTransferCancelled):
+                    await asyncio.wait_for(task, 1)
+                assert not receiver.committed
+                assert not relay.put_ops
+            else:
+                capacity = True
+                await asyncio.wait_for(task, 1)
+                assert receiver.committed == ["request"]
+            lease.release.assert_called_once_with()
+        finally:
+            await source.close()
+            await destination.close()
+
+    asyncio.run(run())
+
+
 def test_equal_tp_transfer_copies_each_shard_over_its_peer_endpoint() -> None:
     async def _run() -> None:
         endpoints = _kv_endpoints(2)

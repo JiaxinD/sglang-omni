@@ -100,6 +100,10 @@ class KVPageDestination:
     page_indices: tuple[int, ...]
 
 
+class KVCapacityUnavailable(RuntimeError):
+    """The request fits this pool, but must wait for other requests to release KV."""
+
+
 class KVReceiver(Protocol):
     """Request-scoped allocation lifecycle owned by the receiving stage.
 

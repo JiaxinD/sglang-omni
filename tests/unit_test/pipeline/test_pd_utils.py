@@ -60,6 +60,8 @@ class _ReqPool:
 
 
 class _KVAllocator:
+    size = 32
+
     def __init__(self) -> None:
         self.next_slot = 7
         self.freed = []
@@ -150,6 +152,66 @@ def _receiver(admissions=None):
         admissions=admissions if admissions is not None else queue.SimpleQueue(),
         resume_schema="test-v1",
     )
+
+
+def test_decode_capacity_shortage_is_retryable_without_allocating():
+    import pytest
+
+    from sglang_omni.comm.kv_transfer import KVCapacityUnavailable
+
+    receiver = _receiver()
+    allocator = receiver._allocator
+    allocator.available_size = lambda: 2
+    with pytest.raises(KVCapacityUnavailable):
+        receiver.reserve(_message())
+    assert allocator.next_slot == 7
+    assert not receiver.has_reservations()
+    allocator.available_size = lambda: 32
+    destination = receiver.reserve(_message())
+    receiver.abort(_message(), destination, RuntimeError("cancelled"))
+    assert len(allocator.freed) == 1
+    assert not receiver.has_reservations()
+
+
+def test_request_larger_than_decode_pool_is_not_retried_forever():
+    import pytest
+
+    receiver = _receiver()
+    receiver._allocator.size = 2
+    receiver._allocator.available_size = lambda: 2
+    with pytest.raises(ValueError, match="exceeds decode pool"):
+        receiver.reserve(_message())
+
+
+def test_decode_admission_reserves_generation_headroom_until_finished():
+    import pytest
+    from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
+
+    from sglang_omni.comm.kv_transfer import KVCapacityUnavailable
+
+    receiver = _receiver()
+    receiver._allocator = TokenToKVPoolAllocator(32, torch.float32, "cpu", None, False)
+    first = _message()
+    destination = receiver.reserve(first)
+    receiver.commit(first, destination)
+    second_continuation = replace(
+        _continuation(), request_id="request-2", transfer_id="transfer-2"
+    )
+    second = replace(
+        first,
+        request_id="request-2",
+        transfer_id="transfer-2",
+        metadata={"decode_continuation": second_continuation.encode()},
+    )
+    with pytest.raises(KVCapacityUnavailable):
+        receiver.reserve(second)
+    admission = receiver._admissions.get_nowait()
+    generated = receiver._allocator.alloc(15)
+    assert generated is not None
+    receiver._allocator.free(generated)
+    receiver._allocator.free(admission.allocation.slots)
+    receiver.update_decode_headroom("request-1")
+    receiver.reserve(second)
 
 
 def test_continuation_round_trip_rebuilds_prebuilt_request() -> None:
