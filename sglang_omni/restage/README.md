@@ -131,6 +131,27 @@ in the trial log. It does not yet randomize/interleave candidate order or
 resume interrupted runs. Prediction-based pruning and held-out calibration
 validation remain separate work.
 
+### ASR campaigns
+
+Use the same campaign command with `"task": "asr"` in the spec (`tts` is
+the default). ASR `trial_options` supplies `model_path`, `port`, `lang`,
+`max_wer`, `samples`, and `slo`; optional fields include `stream`, `warmup`
+and the startup/request timeouts. It does not need `asr_config_path` or a
+second quality model. Each sample's `ref_audio` is the input clip and
+`ref_text` is its ground-truth transcript; `target_text` is unused for ASR.
+
+For example, an ASR SLO can use `{"max_latency_s": 5, "max_rtf": 1,
+"min_good_fraction": 0.99}`. Choose thresholds for the intended workload;
+these example values are not validated model limits. Per-request WER must
+also meet `max_wer`. Failed requests remain failed even if their text matches.
+Scoring uses the existing ASR normalizer and preserves normalized transcripts
+and edit counts in `quality-detail.json`.
+
+ASR supports latency and RTF constraints. Audio TTFA and playback-underrun
+constraints are rejected because the response is text. Streaming text TTFT
+is recorded by the sender but is not yet a selection constraint. This adapter
+has CPU contract coverage; real-model ASR candidate measurements remain pending.
+
 ## Source method and remaining work
 
 This integration follows `yl3469/sglang-omni` branch

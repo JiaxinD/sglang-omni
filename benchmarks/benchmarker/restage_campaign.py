@@ -1,4 +1,4 @@
-"""Repeated TTS candidate measurements and an evidence-scoped recommendation."""
+"""Repeated candidate measurements and an evidence-scoped recommendation."""
 
 import argparse
 import asyncio
@@ -8,6 +8,7 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
+from benchmarks.benchmarker.restage_asr import execute_asr_trial
 from benchmarks.benchmarker.restage_tts import execute_tts_trial
 from benchmarks.dataset.seedtts import SampleInput
 from sglang_omni.restage.evaluation import SLO
@@ -15,7 +16,7 @@ from sglang_omni.restage.search import search_rates
 from sglang_omni.restage.selection import Selection, select_candidate
 
 
-async def execute_tts_campaign(
+async def execute_campaign(
     *,
     configs: dict[str, Path],
     baseline: str,
@@ -24,6 +25,7 @@ async def execute_tts_campaign(
     arrival_seed: int,
     destination: Path,
     trial_options: dict,
+    task: str = "tts",
 ) -> Selection:
     """Measure supplied candidates with identical workload/SLO and paired arrivals.
 
@@ -31,6 +33,10 @@ async def execute_tts_campaign(
     pruning. The caller supplies admitted hardware and model-specific options.
     Any trial exception stops the campaign, retaining completed trial evidence.
     """
+    runners = {"tts": execute_tts_trial, "asr": execute_asr_trial}
+    if task not in runners:
+        raise ValueError(f"Unsupported campaign task: {task}")
+    run_trial = runners[task]
     if baseline not in configs:
         raise ValueError("Include the baseline configuration")
     destination.mkdir(parents=True, exist_ok=False)
@@ -40,6 +46,7 @@ async def execute_tts_campaign(
         shutil.copyfile(path, target)
         snapshots[key] = target
     metadata = {
+        "task": task,
         "baseline": baseline,
         "rates": rates,
         "repeats": repeats,
@@ -63,7 +70,7 @@ async def execute_tts_campaign(
                 destination / f"candidate-{index:05d}-rate-{rate.hex()}-repeat-{repeat}"
             )
             try:
-                evaluation = await execute_tts_trial(
+                evaluation = await run_trial(
                     config_path=path,
                     destination=trial_dir,
                     rate=rate,
@@ -128,8 +135,9 @@ def main():
     options = spec["trial_options"]
     options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
     options["slo"] = SLO(**options["slo"])
-    options["asr_config_path"] = base / options["asr_config_path"]
-    selection = asyncio.run(execute_tts_campaign(destination=args.output, **spec))
+    if spec.get("task", "tts") == "tts":
+        options["asr_config_path"] = base / options["asr_config_path"]
+    selection = asyncio.run(execute_campaign(destination=args.output, **spec))
     print(json.dumps(asdict(selection), indent=2))
 
 

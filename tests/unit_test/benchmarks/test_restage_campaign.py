@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -7,8 +8,9 @@ from sglang_omni.restage.evaluation import SLO, Observation, evaluate
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("task", ["tts", "asr"])
 async def test_campaign_pairs_arrivals_and_exports_measured_winner(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, task
 ):
     configs = {}
     for key in ("default", "split"):
@@ -28,8 +30,9 @@ async def test_campaign_pairs_arrivals_and_exports_measured_winner(
             elapsed_s=1,
         )
 
-    monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
-    result = await restage_campaign.execute_tts_campaign(
+    monkeypatch.setattr(restage_campaign, f"execute_{task}_trial", trial)
+    result = await restage_campaign.execute_campaign(
+        task=task,
         configs=configs,
         baseline="default",
         rates=[1, 2],
@@ -48,3 +51,52 @@ async def test_campaign_pairs_arrivals_and_exports_measured_winner(
     saved = json.loads((tmp_path / "campaign/selection.json").read_text())
     assert saved["recommended"] == "split"
     assert saved["rate_gain_over_baseline"] == 2
+    assert json.loads((tmp_path / "campaign/campaign.json").read_text())["task"] == task
+
+
+@pytest.mark.parametrize("task", ["tts", "asr"])
+def test_campaign_cli_resolves_task_specific_config(tmp_path, monkeypatch, task):
+    options = {
+        "samples": [
+            {
+                "sample_id": "a",
+                "ref_text": "hello",
+                "ref_audio": "/clip.wav",
+                "target_text": "world",
+            }
+        ],
+        "slo": {"max_latency_s": 2},
+    }
+    if task == "tts":
+        options["asr_config_path"] = "quality.yaml"
+    spec = tmp_path / "campaign.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "task": task,
+                "configs": {"default": "model.yaml"},
+                "trial_options": options,
+            }
+        )
+    )
+    calls = []
+
+    async def campaign(**kwargs):
+        calls.append(kwargs)
+        return SLO(max_latency_s=2)
+
+    monkeypatch.setattr(restage_campaign, "execute_campaign", campaign)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["campaign", "--spec", str(spec), "--output", str(tmp_path / "output")],
+    )
+    restage_campaign.main()
+    call = calls[0]
+    assert call["configs"]["default"] == tmp_path / "model.yaml"
+    assert call["trial_options"]["samples"][0].ref_text == "hello"
+    assert call["trial_options"]["slo"] == SLO(max_latency_s=2)
+    if task == "tts":
+        assert call["trial_options"]["asr_config_path"] == tmp_path / "quality.yaml"
+    else:
+        assert "asr_config_path" not in call["trial_options"]
