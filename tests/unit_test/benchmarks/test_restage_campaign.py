@@ -269,13 +269,19 @@ async def test_campaign_batches_quality_after_generation_and_resumes_completed(
     config = tmp_path / "model.yaml"
     config.write_text("model")
     events = []
+    measurements = {}
     fail = True
 
     async def trial(**kwargs):
         assert kwargs["defer_quality"] is True
         kwargs["destination"].mkdir()
+        (kwargs["destination"] / "measurement.json").write_text("{}")
         events.append(("measure", kwargs["rate"]))
-        return SimpleNamespace(destination=kwargs["destination"], rate=kwargs["rate"])
+        measurement = SimpleNamespace(
+            destination=kwargs["destination"], rate=kwargs["rate"]
+        )
+        measurements[measurement.destination] = measurement
+        return measurement
 
     async def quality(measurements, *, on_evaluated, **kwargs):
         events.append(("quality", [m.rate for m in measurements]))
@@ -292,6 +298,14 @@ async def test_campaign_batches_quality_after_generation_and_resumes_completed(
                 ),
             )
 
+    def restore(source, *, destination):
+        destination.mkdir()
+        (destination / "measurement.json").write_bytes(
+            (source / "measurement.json").read_bytes()
+        )
+        return SimpleNamespace(destination=destination, rate=measurements[source].rate)
+
+    monkeypatch.setattr(restage_campaign, "restore_measurement", restore)
     monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
     monkeypatch.setattr(restage_campaign, "evaluate_tts_batch", quality)
     options = dict(
@@ -313,7 +327,7 @@ async def test_campaign_batches_quality_after_generation_and_resumes_completed(
     fail = False
     events.clear()
     result = await restage_campaign.execute_campaign(**options, resume=True)
-    assert events == [("measure", 2), ("quality", [2])]
+    assert events == [("quality", [2])]
     assert result.recommended == "default"
     assert (
         len(json.loads((tmp_path / "campaign/completed-trials.json").read_text())) == 2
@@ -465,6 +479,7 @@ async def test_batch_failure_is_attributed_to_actual_phase(
 
     async def trial(**kwargs):
         kwargs["destination"].mkdir()
+        (kwargs["destination"] / "measurement.json").write_text("{}")
         return SimpleNamespace(destination=kwargs["destination"], rate=kwargs["rate"])
 
     async def quality(measurements, *, on_evaluated, **kwargs):
@@ -518,3 +533,88 @@ async def test_batch_failure_is_attributed_to_actual_phase(
         assert saved["directory"] is None
         assert len(json.loads((dest / "completed-trials.json").read_text())) == 2
         assert not list(dest.glob("*/execution-failure.json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper_receipt", [False, True])
+async def test_resume_reuses_saved_generation_after_quality_failure(
+    tmp_path, monkeypatch, tamper_receipt
+):
+    from dataclasses import asdict
+
+    from benchmarks.benchmarker.data import RequestResult
+    from benchmarks.benchmarker.restage_trial import TrialMeasurement, _save_measurement
+
+    config = tmp_path / "model.yaml"
+    config.write_text("model")
+    generated = []
+    fail = True
+
+    async def trial(**kwargs):
+        dest = kwargs["destination"]
+        dest.mkdir()
+        generated.append(dest)
+        result = RequestResult(
+            request_id="a", is_success=True, scheduled_s=0, completed_s=0.1
+        )
+        meta = dict(
+            status="awaiting_quality",
+            measurement_complete=True,
+            slo=asdict(SLO()),
+            expected_requests=1,
+            elapsed_s=1,
+        )
+        (dest / "requests.jsonl").write_text(json.dumps(asdict(result)) + "\n")
+        _save_measurement(dest, meta, [result])
+        return TrialMeasurement(dest, [result], SLO(), meta)
+
+    async def quality(measurements, *, on_evaluated, **kwargs):
+        if fail:
+            raise RuntimeError("ASR unavailable")
+        for measurement in measurements:
+            assert measurement.metadata["measurement_source"] in [
+                str(p) for p in generated
+            ]
+            on_evaluated(
+                measurement,
+                evaluate(
+                    [Observation("a", 0, 0.1, True, True)],
+                    SLO(),
+                    expected_requests=1,
+                    elapsed_s=1,
+                ),
+            )
+
+    monkeypatch.setattr(restage_campaign, "execute_tts_trial", trial)
+    monkeypatch.setattr(restage_campaign, "evaluate_tts_batch", quality)
+    options = dict(
+        configs={"default": config},
+        baseline="default",
+        rates=[1, 2],
+        repeats=1,
+        arrival_seed=42,
+        destination=tmp_path / "campaign",
+        trial_options={},
+        batch_quality=True,
+        run_identity="frozen",
+    )
+    with pytest.raises(RuntimeError, match="ASR unavailable"):
+        await restage_campaign.execute_campaign(**options)
+    assert len(generated) == 2
+    originals = {str(p): (p / "requests.jsonl").read_bytes() for p in generated}
+    if tamper_receipt:
+        receipt = generated[0] / "measurement.json"
+        receipt.write_text(receipt.read_text() + " ")
+        with pytest.raises(ValueError, match="receipt changed"):
+            await restage_campaign.execute_campaign(**options, resume=True)
+        assert len(generated) == 2
+        return
+    fail = False
+    assert (
+        await restage_campaign.execute_campaign(**options, resume=True)
+    ).recommended == "default"
+    assert len(generated) == 2
+    for p in generated:
+        assert (p / "requests.jsonl").read_bytes() == originals[str(p)]
+    rows = json.loads((tmp_path / "campaign/completed-trials.json").read_text())
+    assert all("attempt-00001" in row["directory"] for row in rows)

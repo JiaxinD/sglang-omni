@@ -12,6 +12,7 @@ from pathlib import Path
 from filelock import FileLock
 
 from benchmarks.benchmarker.restage_asr import execute_asr_trial
+from benchmarks.benchmarker.restage_trial import restore_measurement
 from benchmarks.benchmarker.restage_tts import evaluate_tts_batch, execute_tts_trial
 from benchmarks.dataset.seedtts import SampleInput
 from sglang_omni.restage.evaluation import SLO, Evaluation
@@ -147,6 +148,8 @@ async def _execute_campaign(
         metadata["batch_quality"] = True
     manifest = destination / "campaign.json"
     completed = {}
+    measured = {}
+    measurement_checkpoint = destination / "measured-trials.json"
     checkpoint = destination / "completed-trials.json"
 
     def write_trial_log():
@@ -164,6 +167,9 @@ async def _execute_campaign(
         if checkpoint.exists():
             for row in json.loads(checkpoint.read_text(encoding="utf-8")):
                 completed[row["candidate"], row["rate"], row["repeat"]] = row
+        if measurement_checkpoint.exists():
+            for row in json.loads(measurement_checkpoint.read_text(encoding="utf-8")):
+                measured[row["candidate"], row["rate"], row["repeat"]] = row
         write_trial_log()
     else:
         destination.mkdir(parents=True, exist_ok=False)
@@ -215,15 +221,28 @@ async def _execute_campaign(
             while trial_dir.exists():
                 attempt += 1
                 trial_dir = base_dir.with_name(f"{base_dir.name}-attempt-{attempt:05d}")
+            saved = measured.get((key, rate, repeat)) if defer_quality else None
             try:
-                evaluation = await run_trial(
-                    config_path=path,
-                    destination=trial_dir,
-                    rate=rate,
-                    arrival_seed=arrival_seed + repeat,
-                    **({"defer_quality": True} if defer_quality else {}),
-                    **trial_options,
-                )
+                if saved is not None:
+                    if (
+                        _file_hash(
+                            destination / saved["directory"] / "measurement.json"
+                        )
+                        != saved["receipt_sha256"]
+                    ):
+                        raise ValueError("Measurement receipt changed since generation")
+                    evaluation = restore_measurement(
+                        destination / saved["directory"], destination=trial_dir
+                    )
+                else:
+                    evaluation = await run_trial(
+                        config_path=path,
+                        destination=trial_dir,
+                        rate=rate,
+                        arrival_seed=arrival_seed + repeat,
+                        **({"defer_quality": True} if defer_quality else {}),
+                        **trial_options,
+                    )
             except BaseException as exc:
                 record_failure(
                     key,
@@ -231,10 +250,26 @@ async def _execute_campaign(
                     repeat,
                     trial_dir,
                     exc,
-                    "generation" if defer_quality else "trial",
+                    (
+                        "restore"
+                        if saved is not None
+                        else ("generation" if defer_quality else "trial")
+                    ),
                 )
                 raise
             if defer_quality:
+                row = {
+                    "candidate": key,
+                    "rate": rate,
+                    "repeat": repeat,
+                    "directory": trial_dir.name,
+                    "receipt_sha256": _file_hash(trial_dir / "measurement.json"),
+                }
+                updated = {**measured, (key, rate, repeat): row}
+                _atomic_write(
+                    measurement_checkpoint, json.dumps(list(updated.values()), indent=2)
+                )
+                measured[key, rate, repeat] = row
                 return evaluation
             record_completed(key, rate, repeat, trial_dir, evaluation)
             return evaluation

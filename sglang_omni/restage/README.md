@@ -118,9 +118,9 @@ then runs the supplied quality callback and writes the joint evaluation;
 quality failure preserves the original timings and request records. A
 measurement may be finalized only once. The existing `execute_trial` API
 composes both phases, so the TTS/ASR commands keep their current lifecycle.
-Pending measurements are not completed campaign checkpoints. These phase
-APIs prepare for batched quality evaluation; they do not yet reuse services
-or restore a pending measurement from disk.
+Pending measurements are not completed quality evaluations. Batch campaigns
+can restore a generation receipt into a new quality attempt with
+`restore_measurement`; see the batched-quality section below.
 
 For an Omni model's read-aloud workload, set `api` to `chat` in the TTS
 trial spec (or campaign `trial_options`). This reuses the existing Omni
@@ -219,8 +219,9 @@ one afterward. Only one process may write a results directory at a time.
 `completed-trials.json` is replaced atomically after each completed trial;
 resume skips those cells and rebuilds `trials.jsonl` from that checkpoint.
 The checkpoint includes completed but infeasible evaluations. An unfinished
-cell is rerun in an `-attempt-00001` directory, preserving its previous raw
-files. A trial that finished but was interrupted before checkpointing may be
+cell uses a new `-attempt-00001` directory, preserving its previous raw files.
+Batch TTS campaigns can reuse its finalized generation receipt; other unfinished
+cells rerun generation. A trial that finished but was interrupted before checkpointing may be
 rerun; partial measurements are never promoted to completed evaluations.
 Each failed attempt retains `execution-failure.json`. The top-level
 `failure.json` retains the last execution failure as history even after a
@@ -290,8 +291,20 @@ recorded in campaign identity, so resume cannot mix it with the default mode.
 
 Every completed quality decision is checkpointed immediately, including rejected
 trials. A later quality error preserves those decisions and the remaining raw
-measurements. Resume currently reuses completed evaluations only; pending or
-failed quality cells generate again in new attempt directories. The shared ASR
+measurements. Resume reuses completed evaluations. In batch mode, it also restores saved
+generation for pending or failed quality cells into fresh quality-attempt
+directories, without launching generation again. The campaign checks the saved
+measurement receipt, requests and audio hashes first. Original attempts remain
+unchanged. Missing/corrupt saved evidence stops restoration instead of silently
+substituting new measurements. The shared ASR
 log is `asr-batch-server.log` in the first pending trial directory, while each
 trial retains its own quality protocol, transcript details and result. This
 reduces ASR launches per candidate; it does not yet reuse generation services.
+
+Generation receipts (`measurement.json`) are written only after the generation
+service and profiler finish. Batch campaigns record these in `measured-trials.json`
+separately from completed quality evaluations. Interrupted generation has no
+receipt and runs again; a process interruption before the campaign checkpoints a
+new receipt can also require regeneration. Earlier campaigns without saved
+measurement checkpoints retain completed-only recovery. Receipt creation hashes
+saved audio after the measured serving window; this overhead is not serving time.

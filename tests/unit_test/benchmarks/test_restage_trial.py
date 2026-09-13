@@ -233,6 +233,9 @@ async def test_trial_preserves_completed_measurement_before_postprocessing_failu
     assert saved["measurement_complete"] is True
     assert saved["elapsed_s"] == measured_elapsed
     assert "evaluation" not in saved
+    assert (tmp_path / "trial/measurement.json").exists() is (
+        failure_phase == "quality"
+    )
     rows = (tmp_path / "trial/requests.jsonl").read_text().splitlines()
     assert len(rows) == 1
 
@@ -305,3 +308,69 @@ async def test_measurement_waits_for_quality_without_restarting_generation(
         await restage_trial.evaluate_trial(measurement, quality=quality)
     assert output.read_bytes() == final_record
     assert events.count("quality") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quality_failed", [False, True])
+@pytest.mark.parametrize("tamper", [None, "audio", "requests"])
+async def test_restore_measurement_preserves_original_and_checks_inputs(
+    tmp_path, monkeypatch, quality_failed, tamper
+):
+    @contextmanager
+    def server(**kwargs):
+        yield
+
+    monkeypatch.setattr(restage_trial, "managed_omni_server", server)
+
+    def sender(url, audio_dir):
+        async def send(session, sample):
+            wav = audio_dir / "a.wav"
+            wav.write_bytes(b"saved audio")
+            return RequestResult(request_id=sample, is_success=True, wav_path=str(wav))
+
+        return send
+
+    original = await restage_trial.measure_trial(
+        config_path=tmp_path / "config.yaml",
+        model_path="tts",
+        samples=["a"],
+        send_factory=sender,
+        slo=SLO(),
+        rate=100,
+        destination=tmp_path / "original",
+        port=18000,
+        warmup=0,
+        arrival_seed=42,
+    )
+    if quality_failed:
+
+        async def fail(results):
+            raise RuntimeError("ASR unavailable")
+
+        with pytest.raises(RuntimeError):
+            await restage_trial.evaluate_trial(original, quality=fail)
+    before = (original.destination / "result.json").read_bytes()
+    if tamper:
+        path = original.destination / (
+            "audio/a.wav" if tamper == "audio" else "requests.jsonl"
+        )
+        path.write_bytes(path.read_bytes() + b"changed")
+        with pytest.raises(ValueError, match="changed"):
+            restage_trial.restore_measurement(
+                original.destination, destination=tmp_path / "retry"
+            )
+        assert not (tmp_path / "retry").exists()
+    else:
+        restored = restage_trial.restore_measurement(
+            original.destination, destination=tmp_path / "retry"
+        )
+        assert restored.metadata["status"] == "awaiting_quality"
+        assert restored.metadata["elapsed_s"] == original.metadata["elapsed_s"]
+        assert restored.results == original.results
+        assert restored.metadata["measurement_source"] == str(original.destination)
+
+        async def passed(results):
+            return {"a": True}
+
+        assert (await restage_trial.evaluate_trial(restored, quality=passed)).feasible
+    assert (original.destination / "result.json").read_bytes() == before

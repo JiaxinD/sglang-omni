@@ -1,5 +1,6 @@
 """Run one Restage candidate using the shared serving benchmark machinery."""
 
+import hashlib
 import json
 import math
 import uuid
@@ -31,6 +32,67 @@ def _save_result(destination, metadata):
     (destination / "result.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
     )
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _save_measurement(destination, metadata, results):
+    receipt = {
+        "metadata": metadata,
+        "requests_sha256": _sha256(destination / "requests.jsonl"),
+        "audio_sha256": {
+            str(Path(result.wav_path).resolve()): (
+                _sha256(result.wav_path) if Path(result.wav_path).is_file() else None
+            )
+            for result in results
+            if result.wav_path
+        },
+    }
+    temporary = destination / "measurement.json.tmp"
+    temporary.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    temporary.replace(destination / "measurement.json")
+
+
+def restore_measurement(source: Path, *, destination: Path) -> TrialMeasurement:
+    """Copy a finalized generation receipt into a new quality attempt.
+
+    The immutable receipt exists only after generation and service shutdown.
+    Mutable quality status is not used to infer measurement completeness.
+    Original requests, audio and quality attempts remain in place.
+    """
+    receipt = json.loads((source / "measurement.json").read_text(encoding="utf-8"))
+    raw = (source / "requests.jsonl").read_bytes()
+    if hashlib.sha256(raw).hexdigest() != receipt["requests_sha256"]:
+        raise ValueError("Saved requests changed since measurement")
+    for path, expected in receipt["audio_sha256"].items():
+        actual = _sha256(path) if Path(path).is_file() else None
+        if actual != expected:
+            raise ValueError(f"Saved audio changed since measurement: {path}")
+    metadata = receipt["metadata"]
+    metadata.setdefault("measurement_source", str(source))
+    results = [
+        RequestResult(**json.loads(line)) for line in raw.decode("utf-8").splitlines()
+    ]
+    measurement = TrialMeasurement(
+        destination, results, SLO(**metadata["slo"]), metadata
+    )
+    destination.mkdir(parents=True, exist_ok=False)
+    (destination / "requests.jsonl").write_bytes(raw)
+    (destination / "measurement.json").write_text(
+        json.dumps(receipt, indent=2), encoding="utf-8"
+    )
+    if (source / "workload.json").exists():
+        (destination / "workload.json").write_bytes(
+            (source / "workload.json").read_bytes()
+        )
+    _save_result(destination, metadata)
+    return measurement
 
 
 async def measure_trial(
@@ -123,6 +185,7 @@ async def measure_trial(
                 output=destination / "profile-report.json",
             )
         metadata["status"] = "awaiting_quality"
+        _save_measurement(destination, metadata, results)
         _save_result(destination, metadata)
         return TrialMeasurement(destination, results, slo, metadata)
     except BaseException as exc:
