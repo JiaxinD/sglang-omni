@@ -61,6 +61,8 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         pre_lm_cache_size_bytes: int = 2 * 1024**3,
         pre_lm_max_batch_size: int = 8,
         pre_lm_max_batch_wait_ms: int = 0,
+        encoder_capture_directory: str | None = None,
+        encoder_capture_max_batches: int = 16,
         enable_encoder_cuda_graph: bool = True,
         max_audio_clip_s: float | None = None,
     ) -> None:
@@ -100,6 +102,8 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         self.pre_lm_cache_size_bytes = pre_lm_cache_size_bytes
         self.pre_lm_max_batch_size = pre_lm_max_batch_size
         self.pre_lm_max_batch_wait_ms = pre_lm_max_batch_wait_ms
+        self.encoder_capture_directory = encoder_capture_directory
+        self.encoder_capture_max_batches = encoder_capture_max_batches
         self.enable_encoder_cuda_graph = enable_encoder_cuda_graph
         self.max_audio_clip_s = max_audio_clip_s
         self.tokenizer: Any = None
@@ -370,6 +374,8 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
                 cache_max_bytes=self.pre_lm_cache_size_bytes,
                 max_batch_size=self.pre_lm_max_batch_size,
                 max_batch_wait_ms=self.pre_lm_max_batch_wait_ms,
+                capture_directory=self.encoder_capture_directory,
+                capture_max_batches=self.encoder_capture_max_batches,
             )
 
     def should_wait_for_encode(self) -> bool:

@@ -28,6 +28,39 @@ class _RecordingAudioTower(nn.Module):
         return SimpleNamespace(last_hidden_state=input_features)
 
 
+def test_native_masked_snapshot_replay_records_eager_path():
+    from types import MethodType
+
+    from sglang_omni.profiler.qwen_encoder_replay import (
+        QwenEncoderSnapshot,
+        replay_qwen_encoder,
+    )
+    from sglang_omni.profiler.work_units import collect_execution_observations
+
+    model = SimpleNamespace(
+        audio_tower=_RecordingAudioTower(), _encoder_graph_runner=None
+    )
+    model.get_audio_feature = MethodType(
+        Qwen3ASRForConditionalGeneration.get_audio_feature, model
+    )
+    items = [
+        SimpleNamespace(
+            feature=torch.tensor([[[1.0, 2.0, 99.0], [3.0, 4.0, 99.0]]]),
+            feature_attention_mask=torch.tensor([[1, 1, 0]]),
+            model_specific_data={},
+        ),
+        SimpleNamespace(feature=torch.tensor([[[5.0], [6.0]]]), model_specific_data={}),
+    ]
+    with collect_execution_observations() as observations:
+        output = model.get_audio_feature(items)
+    assert observations[-1]["path"] == "eager"
+    assert observations[-1]["output_shape"] == list(output.shape)
+    torch.testing.assert_close(model.audio_tower.seen_lengths, torch.tensor([2, 1]))
+    snapshot = QwenEncoderSnapshot.capture(items, output, metadata={})
+    report = replay_qwen_encoder(model, snapshot, warmup=1, repeats=2, rtol=0, atol=0)
+    assert report["output_verified"]
+
+
 @pytest.mark.parametrize("use_mrope_positions", [True, False])
 def test_forward_uses_available_mrope_positions(
     monkeypatch: pytest.MonkeyPatch,

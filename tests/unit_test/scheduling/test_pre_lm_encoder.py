@@ -17,6 +17,53 @@ from sglang_omni.scheduling.pre_lm_encoder import PreLMEncoderService, QueueEntr
 _STOP = object()
 
 
+@pytest.mark.parametrize("profile", [False, True])
+def test_capture_associates_retries_and_marks_profile_timing(tmp_path, profile):
+    from sglang_omni.profiler.work_units import current_work_unit
+
+    identities = []
+
+    class CapturingService(_Service):
+        def calibration_capture_metadata(self):
+            return {"session": "capture-test", "affects_timing_and_batching": True}
+
+        def encode_batch(self, items):
+            identities.append(dict(current_work_unit()))
+            return super().encode_batch(items)
+
+    recorder = get_recorder()
+    recorder.stop()
+    if profile:
+        recorder.start("capture-run", str(tmp_path), "asr")
+    service = CapturingService(controlled_drain=True)
+    service.fail_multi = service.retry = True
+    try:
+        first, second = service._submit(1), service._submit(2)
+        service.drain_gate.set()
+        assert first.result(timeout=2) == 2
+        assert second.result(timeout=2) == 4
+    finally:
+        service.close()
+        recorder.stop()
+    assert [row["attempt"] for row in identities] == [0, 1, 2]
+    assert len({row["batch_id"] for row in identities}) == 1
+    assert identities[0]["batch_id"] is not None
+    assert current_work_unit() is None
+    if profile:
+        begins = [row for row in _work_records(tmp_path) if row["kind"] == "begin"]
+        assert [row["unit_id"] for row in begins] == [
+            row["unit_id"] for row in identities
+        ]
+        assert all(row["run_id"] == "capture-run" for row in identities)
+        assert all(
+            row["calibration_capture"]["affects_timing_and_batching"] for row in begins
+        )
+    else:
+        assert all(
+            row["unit_id"] is None and row["run_id"] is None for row in identities
+        )
+
+
 def _work_records(directory):
     return [
         json.loads(line)

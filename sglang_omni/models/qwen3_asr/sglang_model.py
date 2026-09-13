@@ -24,6 +24,7 @@ from sglang.srt.models.qwen3_omni_moe import Qwen3OmniMoeAudioEncoder
 from sglang.srt.utils import add_prefix
 
 from sglang_omni.platforms import current_platform
+from sglang_omni.profiler.work_units import current_execution_observations
 
 from .configuration_qwen3_asr import Qwen3ASRConfig
 from .encoder_cuda_graph import (
@@ -37,6 +38,20 @@ logger = logging.getLogger(__name__)
 fused_qk_norm_rope = current_platform.get_fused_qk_norm_rope()
 
 _MROPE_ONLY_KEYS = frozenset({"interleaved", "mrope_interleaved", "mrope_section"})
+
+
+def _record_audio_execution(output, *, path, graph_available):
+    observations = current_execution_observations()
+    if observations is not None:
+        observations.append(
+            {
+                "component": "qwen3_asr_audio",
+                "path": path,
+                "graph_available": graph_available,
+                "output_shape": list(output.shape),
+            }
+        )
+    return output
 
 
 def _normalize_asr_text_rope(text_config: Any) -> None:
@@ -253,13 +268,19 @@ class Qwen3ASRForConditionalGeneration(nn.Module):
                 )
                 graphed = runner.run(hidden, window_lens)
                 if graphed is not None:
-                    return graphed.unsqueeze(0)
+                    return _record_audio_execution(
+                        graphed.unsqueeze(0), path="graph", graph_available=True
+                    )
 
         audio_outputs = self.audio_tower(
             input_features,
             feature_lens=audio_feature_lengths,
         )
-        return audio_outputs.last_hidden_state
+        return _record_audio_execution(
+            audio_outputs.last_hidden_state,
+            path="eager",
+            graph_available=runner is not None,
+        )
 
     def forward(
         self,

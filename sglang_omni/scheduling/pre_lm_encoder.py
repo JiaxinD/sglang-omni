@@ -19,6 +19,8 @@ from sglang_omni.profiler.event_recorder import get_recorder
 from sglang_omni.profiler.work_units import (
     collect_execution_observations,
     current_stage_construction,
+    current_work_unit,
+    work_unit_scope,
 )
 
 ItemT = TypeVar("ItemT")
@@ -171,7 +173,35 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
             self.cache_embedding(item, embedding, host_copy)
         return embeddings
 
+    def calibration_capture_metadata(self) -> dict | None:
+        """Describe explicit calibration that changes timing and batch formation."""
+        return None
+
     def _execute_recorded_batch(self, items, *, recorder, batch_id, attempt, entries):
+        capture = self.calibration_capture_metadata()
+        active = recorder is not None and recorder.is_active()
+        if not active and capture is None:
+            return self._execute_batch(items)
+        with work_unit_scope(
+            {
+                "run_id": recorder.run_id if active else None,
+                "unit_id": None,
+                "batch_id": batch_id,
+                "attempt": attempt,
+            }
+        ):
+            return self._execute_profiled_batch(
+                items,
+                recorder=recorder,
+                batch_id=batch_id,
+                attempt=attempt,
+                entries=entries,
+                capture=capture,
+            )
+
+    def _execute_profiled_batch(
+        self, items, *, recorder, batch_id, attempt, entries, capture
+    ):
         if recorder is None or not recorder.is_active():
             return self._execute_batch(items)
         unit_id = None
@@ -204,6 +234,7 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
                 batch_id=batch_id,
                 attempt=attempt,
                 members=members,
+                calibration_capture=capture,
             )
         except Exception as exc:
             logger.warning(
@@ -214,6 +245,7 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
             )
         if unit_id is None:
             return self._execute_batch(items)
+        current_work_unit()["unit_id"] = unit_id
         # Note (Jiaxin Deng): stamp after the begin record and before future
         # dispatch; synchronous follower callbacks are not encoder execution.
         with collect_execution_observations() as executions:
@@ -343,7 +375,12 @@ class PreLMEncoderService(ABC, Generic[ItemT, EncodedT, EmbeddingT]):
                 recorder = get_recorder().work_unit_recorder()
                 if recorder is not None and not recorder.is_active():
                     recorder = None
-                batch_id = uuid.uuid4().hex if recorder is not None else None
+                batch_id = (
+                    uuid.uuid4().hex
+                    if recorder is not None
+                    or self.calibration_capture_metadata() is not None
+                    else None
+                )
                 encode_start = time.perf_counter()
                 try:
                     embeddings = self._execute_recorded_batch(

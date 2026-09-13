@@ -14,6 +14,21 @@ logger = logging.getLogger(__name__)
 _execution_local = threading.local()
 
 
+def current_work_unit() -> dict | None:
+    """Current encoder attempt, also available in capture-only sessions."""
+    return getattr(_execution_local, "work_unit", None)
+
+
+@contextmanager
+def work_unit_scope(identity: dict):
+    previous = current_work_unit()
+    _execution_local.work_unit = identity
+    try:
+        yield identity
+    finally:
+        _execution_local.work_unit = previous
+
+
 def current_stage_construction() -> dict | None:
     """Stage factory active on this thread; not physical device binding."""
     return getattr(_execution_local, "stage_construction", None)

@@ -149,6 +149,75 @@ def test_encode_attaches_lm_ready_embedding_and_clears_feature() -> None:
     assert service.stats()["misses"] == 1
 
 
+def test_explicit_calibration_capture_keeps_native_output(tmp_path):
+    import json
+
+    from sglang_omni.profiler.qwen_encoder_replay import QwenEncoderSnapshot
+
+    model = _StubModel()
+    service = Qwen3ASRPreLMEncoderService(
+        model,
+        cache_namespace=_NAMESPACE,
+        capture_directory=str(tmp_path),
+        capture_max_batches=1,
+    )
+    _SERVICES.append(service)
+    first, second = _item(7, 3), _item(8, 2)
+    service.encode_item(first)
+    service.encode_item(second)
+    paths = list(tmp_path.glob("*/batch-*.pt"))
+    assert len(paths) == 1
+    snapshot = QwenEncoderSnapshot.load(paths[0])
+    assert snapshot.metadata["work_unit"]["batch_id"]
+    assert snapshot.metadata["work_unit"]["attempt"] == 0
+    assert snapshot.metadata["work_unit"]["unit_id"] is None
+    assert snapshot.restore_items()[0].model_specific_data["num_audio_tokens"] == 3
+    torch.testing.assert_close(snapshot.output.squeeze(0), first.precomputed_embeddings)
+    assert first.feature is None and second.feature is None
+    assert service.stats()["capture_saved_batches"] == 1
+    assert service.stats()["capture_failed"] is False
+    service.close()
+    assert (
+        json.loads((paths[0].parent / "status.json").read_text())["state"] == "closed"
+    )
+
+
+def test_capture_snapshot_links_native_work_unit(tmp_path):
+    import json
+
+    from sglang_omni.profiler.event_recorder import get_recorder
+    from sglang_omni.profiler.qwen_encoder_replay import QwenEncoderSnapshot
+
+    recorder = get_recorder()
+    recorder.start("native-capture", str(tmp_path), "asr")
+    service = Qwen3ASRPreLMEncoderService(
+        _StubModel(),
+        cache_namespace=_NAMESPACE,
+        capture_directory=str(tmp_path / "capture"),
+        capture_max_batches=1,
+    )
+    _SERVICES.append(service)
+    try:
+        item = _item(19, 3)
+        service.encode_item(item)
+    finally:
+        service.close()
+        recorder.stop()
+    snapshot = QwenEncoderSnapshot.load(next(tmp_path.glob("capture/*/batch-*.pt")))
+    records = [
+        json.loads(line)
+        for path in tmp_path.glob("work_units_*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    begin = next(row for row in records if row["kind"] == "begin")
+    assert begin["members"][0]["num_audio_tokens"] == 3
+    assert snapshot.metadata["work_unit"] == {
+        key: begin[key] for key in ("run_id", "unit_id", "batch_id", "attempt")
+    }
+    assert begin["calibration_capture"]["session"] == str(service._capture.directory)
+    assert begin["calibration_capture"]["affects_timing_and_batching"] is True
+
+
 def test_submit_returns_before_encoding_completes() -> None:
     model = _StubModel()
     gate = threading.Event()

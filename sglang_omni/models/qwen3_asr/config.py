@@ -43,6 +43,8 @@ class Qwen3ASRFactoryArgs(FactoryArgs):
     )
     pre_lm_max_batch_size: int | None = Field(default=None, ge=1)
     pre_lm_max_batch_wait_ms: int | None = Field(default=None, ge=0)
+    encoder_capture_directory: str | None = None
+    encoder_capture_max_batches: int | None = Field(default=None, ge=1)
 
 
 class Qwen3ASRStageConfig(EngineStageConfig):

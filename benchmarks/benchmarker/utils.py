@@ -109,8 +109,24 @@ def stop_server(
             raise ValueError("Server must have its own process group")
     except ProcessLookupError:
         pass
+    # Note (Jiaxin Deng): let the server close its pipeline and encoder workers
+    # before group-wide signals would bypass their shutdown callbacks.
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=terminate_timeout_s)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+        if not _process_group_has_live_members(pgid):
+            proc.wait(timeout=kill_timeout_s)
+            return
     # Note (Jiaxin Deng): the leader may exit before its GPU workers; retain
     # its original group ID and wait for the group without scanning GPU owners.
+    logger.warning(
+        "Escalating server cleanup to process group %s (leader return code: %s)",
+        pgid,
+        proc.poll(),
+    )
     for sig, timeout in (
         (signal.SIGTERM, terminate_timeout_s),
         (signal.SIGKILL, kill_timeout_s),
