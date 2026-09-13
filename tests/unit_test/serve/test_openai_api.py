@@ -120,12 +120,14 @@ class SuccessfulSpeechClient:
         self.finish_reason = finish_reason
         self.generate_requests: list[GenerateRequest] = []
         self.speech_requests: list[GenerateRequest] = []
+        self.request_ids: list[str | None] = []
 
     def health(self) -> dict[str, Any]:
         return {"running": True}
 
     async def generate(self, request: Any, request_id: str | None = None):
         self.generate_requests.append(request)
+        self.request_ids.append(request_id)
         yield GenerateChunk(
             request_id=request_id or "speech-1",
             modality="audio",
@@ -145,7 +147,8 @@ class SuccessfulSpeechClient:
     ):
         from sglang_omni.client.types import SpeechResult
 
-        del request_id, speed, allow_format_fallback
+        del speed, allow_format_fallback
+        self.request_ids.append(request_id)
         self.speech_requests.append(request)
         return SpeechResult(
             audio_bytes=b"RIFF",
@@ -1248,6 +1251,26 @@ def test_chat_request_does_not_mark_null_sampling_params_explicit() -> None:
     assert gen_req.sampling.top_p == 1.0
     assert gen_req.sampling.top_k == -1
     assert EXPLICIT_GENERATION_PARAMS_KEY not in gen_req.metadata
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_speech_response_exposes_unique_pipeline_request_id(stream) -> None:
+    backend = SuccessfulSpeechClient()
+    client = TestClient(create_app(backend, model_name="tts"))
+    ids = []
+    for _ in range(2):
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "input": "hello",
+                "stream": stream,
+                "response_format": "pcm" if stream else "wav",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["x-request-id"] == backend.request_ids[-1]
+        ids.append(response.headers["x-request-id"])
+    assert len(set(ids)) == 2
 
 
 def test_speech_stream_defaults_to_raw_pcm() -> None:

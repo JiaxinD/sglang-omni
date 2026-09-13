@@ -137,8 +137,10 @@ sent through the chat API and used by server request profiling. It differs
 from the dataset `request_id`: repeated samples and warmup calls get distinct
 server IDs. Use it to join raw request events to the measured workload when
 profiling is enabled. This does not itself enable profiling or turn stage
-residence time into isolated service time. Other senders currently leave this
-field unset.
+residence time into isolated service time. The `/v1/audio/speech` sender
+records the same field from the server's `X-Request-ID` response header for
+both streaming and non-streaming audio. Older servers without that header
+leave it unset. ASR sender linkage remains pending.
 
 Set `profile=true` in a TTS trial or its campaign `trial_options` to collect
 the existing JSONL request profiler alongside serving. This starts before
@@ -151,8 +153,8 @@ preserving separate worker timelines and requests without correlated events.
 This is diagnostic collection, not an isolated calibration or a readiness
 acknowledgement from every worker. Event pairs do not prove complete stage
 coverage or GPU service time; the report explicitly leaves `calibration_ready`
-false. Use correlated Omni requests for per-request reports until the other
-API senders have server-ID linkage. Profiling overhead may affect performance:
+false. Omni and audio-speech requests support per-request reports when server
+IDs are available. Profiling overhead may affect performance:
 keep the same setting across comparisons and validate final capacity without
 profiling. The default is off.
 
