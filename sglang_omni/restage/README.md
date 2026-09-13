@@ -49,6 +49,26 @@ The new output directory contains:
 does not cover the full declared space; enumeration order is not a ranking.
 No GPU serving process starts during planning.
 
+## Keep warmup inputs separate
+
+A campaign can set `trial_options.warmup_sample` to a sample object with
+`sample_id`, `ref_text`, `ref_audio`, and `target_text`, just like a measured
+sample. The runner repeats this separate input for the configured `warmup`
+count before timing starts. If omitted, it retains the existing first-sample
+warmup behavior. A zero count disables warmup in either case.
+
+For new-audio ASR comparisons, choose a warmup waveform outside the measured
+set: Whisper caches encoder outputs by the decoded waveform fingerprint, so
+different filenames alone do not establish different inputs. Record that
+choice before measuring. The option does not guarantee coverage of all batch
+shapes or cold caches for shared text prefixes.
+
+Warmup results are excluded from request records, quality evaluation and the
+SLO denominator. Campaign input identity includes the separate sample and its
+local audio hash, so changing it prevents resuming the old campaign. Trial and
+workload metadata retain the supplied sample; old specs are not populated with
+a new default field.
+
 ## Explore streaming vocoder criticality
 
 For Qwen3-TTS, `vocoder.factory.criticality_slack_s` enables the optional

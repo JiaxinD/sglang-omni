@@ -6,7 +6,7 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +111,7 @@ async def measure_trial(
     destination: Path,
     port: int,
     warmup: int = 1,
+    warmup_sample: Any | None = None,
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
@@ -139,6 +140,10 @@ async def measure_trial(
         "arrival_seed": arrival_seed,
         "profile_run_id": str(uuid.uuid4()) if profile else None,
     }
+    if warmup_sample is not None:
+        metadata["warmup_sample"] = (
+            asdict(warmup_sample) if is_dataclass(warmup_sample) else warmup_sample
+        )
     _save_result(destination, metadata)
     runner = BenchmarkRunner(
         RunConfig(
@@ -177,7 +182,9 @@ async def measure_trial(
                                 run_id=metadata["profile_run_id"],
                             )
                         )
-                    results = await runner.run(samples, send)
+                    results = await runner.run(
+                        samples, send, warmup_sample=warmup_sample
+                    )
                     metadata.update(
                         measurement_complete=True, elapsed_s=runner.wall_clock_s
                     )
@@ -248,6 +255,7 @@ async def execute_trial(
     destination: Path,
     port: int,
     warmup: int = 1,
+    warmup_sample: Any | None = None,
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
@@ -264,6 +272,7 @@ async def execute_trial(
         destination=destination,
         port=port,
         warmup=warmup,
+        warmup_sample=warmup_sample,
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,

@@ -60,7 +60,10 @@ async def test_asr_sender_records_server_request_id(tmp_path, stream):
 async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
     tmp_path, monkeypatch
 ):
+    warmup = SampleInput("warm", "different audio", "/warm.wav", "")
+
     async def trial(**kwargs):
+        assert kwargs["warmup_sample"] is warmup
         assert kwargs["profile"] is True
         kwargs["destination"].mkdir()
         kwargs["send_factory"]("http://localhost:18000", tmp_path)
@@ -96,6 +99,7 @@ async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
         lang="en",
         max_wer=0.2,
         profile=True,
+        warmup_sample=warmup,
     )
     assert result == {"a": True, "b": False, "c": False}
     assert send_calls == [
@@ -107,6 +111,9 @@ async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
     details = json.loads((tmp_path / "trial/quality-detail.json").read_text())
     assert details["requests"]["a"]["target_text"] == "hello world"
     assert details["requests"]["b"]["error"] == "HTTP 500"
+
+    workload = json.loads((tmp_path / "trial/workload.json").read_text())
+    assert workload["warmup_sample"]["sample_id"] == "warm"
 
 
 @pytest.mark.asyncio

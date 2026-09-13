@@ -26,6 +26,7 @@ async def execute_asr_trial(
     max_wer: float,
     stream: bool = False,
     warmup: int = 1,
+    warmup_sample: SampleInput | None = None,
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
@@ -79,6 +80,11 @@ async def execute_asr_trial(
             json.dumps(
                 {
                     "samples": [asdict(sample) for sample in samples],
+                    **(
+                        {"warmup_sample": asdict(warmup_sample)}
+                        if warmup_sample is not None
+                        else {}
+                    ),
                     "lang": lang,
                     "stream": stream,
                     "max_wer": max_wer,
@@ -103,6 +109,7 @@ async def execute_asr_trial(
         destination=destination,
         port=port,
         warmup=warmup,
+        warmup_sample=warmup_sample,
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,

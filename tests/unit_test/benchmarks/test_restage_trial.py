@@ -382,8 +382,9 @@ async def test_restore_measurement_preserves_original_and_checks_inputs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("warmup_sample", [None, "warm"])
 async def test_restored_measurement_preserves_input_order_and_excludes_warmup(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, warmup_sample
 ):
     import asyncio
 
@@ -413,6 +414,7 @@ async def test_restored_measurement_preserves_input_order_and_excludes_warmup(
         destination=tmp_path / "original",
         port=18000,
         warmup=2,
+        warmup_sample=warmup_sample,
         arrival_seed=42,
     )
     rows = [
@@ -420,9 +422,16 @@ async def test_restored_measurement_preserves_input_order_and_excludes_warmup(
         for line in (original.destination / "requests.jsonl").read_text().splitlines()
     ]
     assert [row["request_id"] for row in rows] == ["b", "a"]
-    assert calls.count("a") == 3 and calls.count("b") == 1
+    assert calls.count("a") == (3 if warmup_sample is None else 1)
+    assert calls.count("b") == 1
+    assert calls.count("warm") == (0 if warmup_sample is None else 2)
     restored = restage_trial.restore_measurement(
         original.destination, destination=tmp_path / "retry"
     )
     assert restored.results == original.results
     assert [result.request_id for result in restored.results] == ["a", "b"]
+
+    if warmup_sample is None:
+        assert "warmup_sample" not in restored.metadata
+    else:
+        assert restored.metadata["warmup_sample"] == warmup_sample

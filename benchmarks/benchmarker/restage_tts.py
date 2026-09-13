@@ -42,6 +42,7 @@ async def execute_tts_trial(
     api: str = "speech",
     sender_options: dict[str, Any] | None = None,
     warmup: int = 1,
+    warmup_sample: SampleInput | None = None,
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     asr_concurrency: int = 8,
@@ -107,6 +108,11 @@ async def execute_tts_trial(
             json.dumps(
                 {
                     "samples": [asdict(sample) for sample in samples],
+                    **(
+                        {"warmup_sample": asdict(warmup_sample)}
+                        if warmup_sample is not None
+                        else {}
+                    ),
                     "api": api,
                     "sender_options": sender_options or {},
                 },
@@ -144,6 +150,7 @@ async def execute_tts_trial(
         destination=destination,
         port=port,
         warmup=warmup,
+        warmup_sample=warmup_sample,
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,

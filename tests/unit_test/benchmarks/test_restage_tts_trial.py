@@ -41,6 +41,7 @@ async def test_omni_sender_records_invalid_audio_as_request_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("api", ["speech", "chat"])
 async def test_tts_trial_launches_asr_only_for_quality(tmp_path, monkeypatch, api):
+    warmup = SampleInput("warm", "", "", "different text")
     events = []
     wav = tmp_path / "speech.wav"
     sf.write(wav, np.full(16000, 0.1), 16000)
@@ -63,6 +64,7 @@ async def test_tts_trial_launches_asr_only_for_quality(tmp_path, monkeypatch, ap
         return [RequestResult(request_id="a", is_success=True, text="hello")], 1
 
     async def trial(**kwargs):
+        assert kwargs["warmup_sample"] is warmup
         events.extend(["tts-start", "tts-stop"])
         kwargs["destination"].mkdir()
         kwargs["send_factory"]("http://localhost:18000", tmp_path)
@@ -97,6 +99,7 @@ async def test_tts_trial_launches_asr_only_for_quality(tmp_path, monkeypatch, ap
         lang="en",
         max_wer=0.2,
         api=api,
+        warmup_sample=warmup,
         sender_options=(
             {"stream": True}
             if api == "speech"

@@ -92,6 +92,8 @@ def _is_media_reference(value):
 def _input_identity(options):
     serialized = json.loads(json.dumps(options, default=_json_default, allow_nan=False))
     references = [sample.get("ref_audio") for sample in serialized.get("samples", [])]
+    if serialized.get("warmup_sample") is not None:
+        references.append(serialized["warmup_sample"].get("ref_audio"))
     references.append(serialized.get("asr_config_path"))
     files = {
         str(Path(path).resolve()): _file_hash(path)
@@ -385,7 +387,11 @@ def load_campaign_spec(path: Path) -> dict:
             else not sender.get("no_ref_audio", False)
         )
         options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
-        for sample in options["samples"]:
+        inputs = list(options["samples"])
+        if options.get("warmup_sample") is not None:
+            options["warmup_sample"] = SampleInput(**options["warmup_sample"])
+            inputs.append(options["warmup_sample"])
+        for sample in inputs:
             media_reference = _is_media_reference(sample.ref_audio)
             if sample.ref_audio and not media_reference:
                 sample.ref_audio = str(base / Path(sample.ref_audio).expanduser())

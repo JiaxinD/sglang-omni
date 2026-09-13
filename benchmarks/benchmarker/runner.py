@@ -65,7 +65,9 @@ class BenchmarkRunner:
         self.on_result = on_result
         self.wall_clock_s: float = 0.0
 
-    async def run(self, samples: list, send_fn: SendFn) -> list[RequestResult]:
+    async def run(
+        self, samples: list, send_fn: SendFn, *, warmup_sample: Any | None = None
+    ) -> list[RequestResult]:
         timeout = aiohttp.ClientTimeout(total=self.config.timeout_s)
         # note (guozhihao): Closed-loop runs are bounded by max_concurrency.
         # Open-loop (max_concurrency=0) must not inherit aiohttp's default
@@ -77,7 +79,13 @@ class BenchmarkRunner:
             timeout=timeout, connector=connector
         ) as session:
             if self.config.effective_warmup > 0:
-                await self._warmup(session, samples, send_fn)
+                # Note (Jiaxin Deng): a separate input avoids warming a timed
+                # request's audio/prefix cache while retaining the warmup count.
+                await self._warmup(
+                    session,
+                    samples if warmup_sample is None else [warmup_sample],
+                    send_fn,
+                )
 
             logger.info(
                 "Benchmarking %d requests (max_concurrency=%s)...",
@@ -109,7 +117,7 @@ class BenchmarkRunner:
             async with semaphore:
                 return await send_fn(session, sample)
 
-        # note (luojiaxuan): The measured cohort reuses this same sample list,
+        # note (luojiaxuan): By default the measured cohort reuses this sample list,
         # so warming distinct samples would pre-fill per-sample server caches,
         # such as the MOSS-TTS reference-audio cache, for requests that are
         # about to be timed. Repeat one sample to get the concurrency shape

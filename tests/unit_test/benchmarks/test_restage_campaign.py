@@ -174,7 +174,18 @@ async def test_resume_reuses_completed_cells_and_preserves_failed_attempt(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "changed", ["config", "snapshot", "sample", "audio", "slo", "quality", "identity"]
+    "changed",
+    [
+        "config",
+        "snapshot",
+        "sample",
+        "audio",
+        "slo",
+        "quality",
+        "identity",
+        "warmup",
+        "warmup_audio",
+    ],
 )
 async def test_resume_rejects_changed_evidence_identity(tmp_path, monkeypatch, changed):
     config = tmp_path / "config.yaml"
@@ -209,6 +220,12 @@ async def test_resume_rejects_changed_evidence_identity(tmp_path, monkeypatch, c
         },
         run_identity="frozen environment v1",
     )
+    if changed in ("warmup", "warmup_audio"):
+        warm_audio = tmp_path / "warm.wav"
+        warm_audio.write_bytes(b"warm audio")
+        options["trial_options"]["warmup_sample"] = SampleInput(
+            "warm", "ref", str(warm_audio), "warm text"
+        )
     await restage_campaign.execute_campaign(**options)
     if changed == "config":
         config.write_text("different layout")
@@ -218,6 +235,10 @@ async def test_resume_rejects_changed_evidence_identity(tmp_path, monkeypatch, c
         options["trial_options"]["samples"] = [SampleInput("a", "", "", "different")]
     elif changed == "audio":
         audio.write_bytes(b"different audio")
+    elif changed == "warmup":
+        options["trial_options"]["warmup_sample"].target_text = "changed warmup"
+    elif changed == "warmup_audio":
+        warm_audio.write_bytes(b"changed warm audio")
     elif changed == "slo":
         options["trial_options"]["slo"] = SLO(max_latency_s=2)
     elif changed == "quality":
@@ -621,3 +642,35 @@ async def test_resume_reuses_saved_generation_after_quality_failure(
         assert (p / "requests.jsonl").read_bytes() == originals[str(p)]
     rows = json.loads((tmp_path / "campaign/completed-trials.json").read_text())
     assert all("attempt-00001" in row["directory"] for row in rows)
+
+
+@pytest.mark.parametrize("task", ["asr", "tts"])
+def test_campaign_warmup_inputs_are_resolved_and_hashed(tmp_path, task):
+    (tmp_path / "measured.wav").write_bytes(b"measured")
+    (tmp_path / "warm.wav").write_bytes(b"warm")
+    (tmp_path / "asr.yaml").write_text("quality")
+    sample = lambda name: dict(
+        sample_id=name, ref_text=name, ref_audio=name + ".wav", target_text=name
+    )
+    options = {
+        "samples": [sample("measured")],
+        "warmup_sample": sample("warm"),
+        "slo": {},
+        "asr_config_path": "asr.yaml",
+    }
+    path = tmp_path / "campaign.json"
+    path.write_text(
+        json.dumps(
+            {"task": task, "configs": {"base": "base.yaml"}, "trial_options": options}
+        )
+    )
+    loaded = restage_campaign.load_campaign_spec(path)["trial_options"]
+    assert isinstance(loaded["warmup_sample"], SampleInput)
+    assert loaded["warmup_sample"].ref_audio == str(tmp_path / "warm.wav")
+    before = restage_campaign._input_identity(loaded)
+    assert str(tmp_path / "warm.wav") in before["local_input_sha256"]
+    (tmp_path / "warm.wav").write_bytes(b"changed warmup audio")
+    assert restage_campaign._input_identity(loaded) != before
+    (tmp_path / "warm.wav").unlink()
+    with pytest.raises(ValueError, match="Reference audio file does not exist"):
+        restage_campaign.load_campaign_spec(path)

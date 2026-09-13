@@ -195,3 +195,41 @@ async def test_seeded_arrivals_repeat_independently_of_sender_randomness():
     assert first_gaps == pytest.approx(second_gaps, abs=1e-8)
     expected = np.random.default_rng(42).exponential(0.001, size=4)[1:]
     assert first_gaps == pytest.approx(expected, abs=1e-8)
+
+
+@pytest.mark.asyncio
+async def test_separate_warmup_sample_is_excluded_from_measurement(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    sent = []
+    recorded = []
+
+    async def send(session, sample):
+        sent.append(sample)
+        clock[0] += 50 if sample.startswith("warm") else 1
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(
+        RunConfig(max_concurrency=0, warmup=3, disable_tqdm=True),
+        on_result=lambda result: recorded.append(result.request_id),
+    )
+    results = await runner.run(
+        ["measured-a", "measured-b"], send, warmup_sample="warm-a"
+    )
+    assert sent == ["warm-a", "warm-a", "warm-a", "measured-a", "measured-b"]
+    assert recorded == ["measured-a", "measured-b"]
+    assert [result.request_id for result in results] == recorded
+    assert runner.wall_clock_s == 2
+
+
+@pytest.mark.asyncio
+async def test_separate_warmup_sample_respects_zero_count():
+    seen = []
+
+    async def send(session, sample):
+        seen.append(sample)
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(RunConfig(warmup=0, disable_tqdm=True))
+    await runner.run(["measured"], send, warmup_sample="warm")
+    assert seen == ["measured"]
