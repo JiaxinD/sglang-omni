@@ -185,8 +185,35 @@ optimality claims. Failed trial execution stops the campaign and records
 
 The current campaign measures candidates sequentially and retains its order
 in the trial log. It does not yet randomize/interleave candidate order or
-resume interrupted runs. Prediction-based pruning and held-out calibration
-validation remain separate work.
+reuse a serving process across load points. Prediction-based pruning and
+held-out calibration validation remain separate work.
+
+### Resume an interrupted campaign
+
+Set `run_identity` in the original spec to a fixed identifier for the source
+revision, runtime image, GPU hardware and model/remote-asset snapshots. The
+caller must verify those resources still match when admitting the next run;
+this string does not discover or verify the environment automatically.
+Keep input assets immutable during measurement. Then resume with:
+
+```bash
+python -m benchmarks.benchmarker.restage_campaign --spec campaign.json --output campaign-results --resume
+```
+
+Resume compares the recorded identity, complete trial options, workload/SLO,
+candidate contents and saved candidate snapshots, local reference-audio
+hashes, and quality-config contents. A mismatch stops before any trial is
+launched. Campaigns created without an identity cannot be resumed by adding
+one afterward. Only one process may write a results directory at a time.
+
+`completed-trials.json` is replaced atomically after each completed trial;
+resume skips those cells and rebuilds `trials.jsonl` from that checkpoint.
+The checkpoint includes completed but infeasible evaluations. An unfinished
+cell is rerun in an `-attempt-00001` directory, preserving its previous raw
+files. A trial that finished but was interrupted before checkpointing may be
+rerun; partial measurements are never promoted to completed evaluations.
+`failure.json` retains the last execution failure as history even after a
+later successful resume produces `selection.json`.
 
 ### ASR campaigns
 
