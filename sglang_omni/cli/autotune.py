@@ -1,5 +1,8 @@
-"""Restage search planning commands."""
+"""Restage planning and measured search commands."""
 
+import asyncio
+import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
@@ -8,7 +11,9 @@ import typer
 from sglang_omni.cli.config import _resolve_sources
 from sglang_omni.restage.plan import SearchSpace, write_plan
 
-autotune_app = typer.Typer(help="Plan and inspect Restage configuration searches.")
+autotune_app = typer.Typer(
+    help="Plan candidates and run measured Restage configuration searches."
+)
 
 
 @autotune_app.command()
@@ -57,3 +62,39 @@ def plan(
         f"Exported {summary['accepted']} candidates; rejected {summary['rejected']}. "
         f"Search {scope}. Performance not measured. Results: {output}"
     )
+
+
+@autotune_app.command()
+def run(
+    spec: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Campaign JSON with configurations, workload and SLO.",
+        ),
+    ],
+    output: Annotated[
+        Path, typer.Option(help="Campaign results directory; new unless resuming.")
+    ],
+    resume: Annotated[
+        bool,
+        typer.Option(
+            help="Resume with the same recorded environment identity and inputs."
+        ),
+    ] = False,
+):
+    """Measure a campaign on caller-allocated GPUs and export its recommendation."""
+    from benchmarks.benchmarker.restage_campaign import (
+        execute_campaign,
+        load_campaign_spec,
+    )
+
+    try:
+        options = load_campaign_spec(spec)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--spec") from exc
+    selection = asyncio.run(
+        execute_campaign(destination=output, resume=resume, **options)
+    )
+    typer.echo(json.dumps(asdict(selection), indent=2))

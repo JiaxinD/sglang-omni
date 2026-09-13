@@ -365,20 +365,29 @@ async def _execute_campaign(
     return selection
 
 
+def load_campaign_spec(path: Path) -> dict:
+    """Load a campaign with local asset/config paths relative to its spec."""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    base = path.resolve().parent
+    spec["configs"] = {key: base / path for key, path in spec["configs"].items()}
+    options = spec["trial_options"]
+    options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
+    for sample in options["samples"]:
+        if sample.ref_audio:
+            sample.ref_audio = str(base / sample.ref_audio)
+    options["slo"] = SLO(**options["slo"])
+    if spec.get("task", "tts") == "tts":
+        options["asr_config_path"] = base / options["asr_config_path"]
+    return spec
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
-    spec = json.loads(args.spec.read_text(encoding="utf-8"))
-    base = args.spec.resolve().parent
-    spec["configs"] = {key: base / path for key, path in spec["configs"].items()}
-    options = spec["trial_options"]
-    options["samples"] = [SampleInput(**sample) for sample in options["samples"]]
-    options["slo"] = SLO(**options["slo"])
-    if spec.get("task", "tts") == "tts":
-        options["asr_config_path"] = base / options["asr_config_path"]
+    spec = load_campaign_spec(args.spec)
     selection = asyncio.run(
         execute_campaign(destination=args.output, resume=args.resume, **spec)
     )

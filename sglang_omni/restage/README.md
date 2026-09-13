@@ -1,8 +1,8 @@
 # Restage integration
 
 Restage plans stage placement, process replicas and resource configuration.
-The planning CLI exports **unmeasured candidates**. The source-checkout
-benchmark modules below measure supplied candidates and select a winner
+The planning CLI exports **unmeasured candidates**. The installed
+`sgl-omni autotune run` command measures supplied candidates and selects a winner
 within the tested configurations and load grid, subject to quality and SLO
 checks. Hardware calibration and prediction-based candidate ranking are not
 yet connected to that workflow.
@@ -171,7 +171,7 @@ profiling. The default is off.
 To compare explicit candidates, use:
 
 ```bash
-python -m benchmarks.benchmarker.restage_campaign --spec campaign.json --output campaign-results
+sgl-omni autotune run --spec campaign.json --output campaign-results
 ```
 
 The campaign spec contains `configs` (candidate key to YAML path), `baseline`
@@ -207,7 +207,7 @@ this string does not discover or verify the environment automatically.
 Keep input assets immutable during measurement. Then resume with:
 
 ```bash
-python -m benchmarks.benchmarker.restage_campaign --spec campaign.json --output campaign-results --resume
+sgl-omni autotune run --spec campaign.json --output campaign-results --resume
 ```
 
 Resume compares the recorded identity, complete trial options, workload/SLO,
@@ -308,3 +308,20 @@ receipt and runs again; a process interruption before the campaign checkpoints a
 new receipt can also require regeneration. Earlier campaigns without saved
 measurement checkpoints retain completed-only recovery. Receipt creation hashes
 saved audio after the measured serving window; this overhead is not serving time.
+
+### Installed measured-search command
+
+The wheel includes the shared `benchmarks` package used by Restage. Run an
+explicit campaign after installing SGLang-Omni and preparing the model assets:
+
+```bash
+sgl-omni autotune run --spec campaign.json --output results
+sgl-omni autotune run --spec campaign.json --output results --resume
+```
+
+The command uses the same campaign executor as the source module entry point.
+Local reference-audio and configuration paths are resolved relative to the spec;
+model identifiers remain unchanged. `--resume` requires the same recorded run
+identity and inputs. Hardware admission remains the caller's responsibility.
+A wheel/CLI test without model execution verifies packaging and dispatch only;
+it does not establish GPU support, quality, capacity or a best topology.
