@@ -121,34 +121,9 @@ class WhisperEncoderCudaGraphRunner:
                     self._graphs.pop(batch_size, None)
 
     @torch.no_grad()
-    def run(
-        self, input_features: torch.Tensor, *, observations: list[dict] | None = None
-    ) -> torch.Tensor:
-        """Replay a fitting bucket; optionally describe the host execution path."""
-        if observations is None:
-            return self._run(input_features, None)
-        execution = {
-            "component": "whisper_encoder",
-            "site": "graph_runner",
-            "input_shape": [int(size) for size in input_features.shape],
-            "path": "eager",
-            "bucket": None,
-            "step": "select",
-        }
-        observations.append(execution)
-        try:
-            output = self._run(input_features, execution)
-        except BaseException as exc:
-            execution.update(outcome="raised", error_type=type(exc).__name__)
-            raise
-        else:
-            execution["outcome"] = "host_returned"
-            return output
-
-    def _run(self, input_features, execution):
+    def run(self, input_features: torch.Tensor) -> torch.Tensor:
+        """Replay the smallest fitting bucket, or run the encoder eagerly."""
         if input_features.ndim != 3:
-            if execution is not None:
-                execution.update(step="encoder_call", reason="ndim")
             return self._encoder(input_features)
         batch_size = int(input_features.shape[0])
         bucket = min(
@@ -159,11 +134,7 @@ class WhisperEncoderCudaGraphRunner:
             or input_features.shape[1] != self._num_mel_bins
             or input_features.shape[2] != self._input_feature_len
         ):
-            if execution is not None:
-                execution.update(step="encoder_call", reason="no_fit")
             return self._encoder(input_features)
-        if execution is not None:
-            execution.update(path="cuda_graph", bucket=int(bucket), step="input_copy")
         captured = self._graphs[bucket]
         captured.input_features[:batch_size].copy_(input_features)
         if batch_size < bucket:
@@ -175,11 +146,7 @@ class WhisperEncoderCudaGraphRunner:
                 batch_size,
             )
             self._logged_replay_buckets.add(bucket)
-        if execution is not None:
-            execution["step"] = "replay"
         captured.graph.replay()
-        if execution is not None:
-            execution["step"] = "output_clone"
         return captured.output[:batch_size].clone()
 
 

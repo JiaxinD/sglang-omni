@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
 import torch
 
 from sglang_omni.models.whisper_asr.encoder_cuda_graph import (
@@ -58,12 +57,11 @@ def test_run_uses_smallest_bucket_and_zeroes_padding(caplog) -> None:
     )
 
     features = torch.arange(30, dtype=torch.float32).reshape(3, 2, 5)
-    observations = []
     with caplog.at_level(
         logging.INFO,
         logger="sglang_omni.models.whisper_asr.encoder_cuda_graph",
     ):
-        output = runner.run(features, observations=observations)
+        output = runner.run(features)
         runner.run(features)
 
     assert graph.replays == 2
@@ -81,41 +79,6 @@ def test_run_uses_smallest_bucket_and_zeroes_padding(caplog) -> None:
     ]
     assert len(replay_logs) == 1
     assert "batch=4 request_batch=3" in replay_logs[0].message
-    assert observations == [
-        {
-            "component": "whisper_encoder",
-            "site": "graph_runner",
-            "input_shape": [3, 2, 5],
-            "path": "cuda_graph",
-            "bucket": 4,
-            "step": "output_clone",
-            "outcome": "host_returned",
-        }
-    ]
-
-
-def test_failed_replay_is_an_attempt_not_a_success():
-    class FailedGraph:
-        def replay(self):
-            raise RuntimeError("replay failed")
-
-    runner = WhisperEncoderCudaGraphRunner(
-        _Encoder(),
-        num_mel_bins=2,
-        input_feature_len=5,
-    )
-    runner._graphs[4] = _CapturedGraph(
-        graph=FailedGraph(),
-        input_features=torch.zeros(4, 2, 5),
-        output=torch.zeros(4, 5),
-    )
-    observations = []
-    with pytest.raises(RuntimeError, match="replay failed"):
-        runner.run(torch.ones(3, 2, 5), observations=observations)
-    assert len(observations) == 1
-    assert observations[0]["outcome"] == "raised"
-    assert observations[0]["step"] == "replay"
-    assert observations[0]["bucket"] == 4
 
 
 def test_run_falls_back_for_uncaptured_or_wrong_feature_shape() -> None:
@@ -149,35 +112,3 @@ def test_capture_is_noop_for_cpu_encoder() -> None:
     runner.capture([1, 2])
 
     assert runner.captured_buckets == ()
-
-
-@pytest.mark.parametrize("step", ["input_copy", "output_clone"])
-def test_graph_preparation_and_output_errors_keep_their_actual_step(step):
-    class FailedTensor:
-        def __getitem__(self, key):
-            return self
-
-        def copy_(self, value):
-            raise RuntimeError("copy failed")
-
-        def clone(self):
-            raise RuntimeError("clone failed")
-
-    class Graph:
-        def replay(self):
-            pass
-
-    runner = WhisperEncoderCudaGraphRunner(
-        _Encoder(), num_mel_bins=2, input_feature_len=5
-    )
-    runner._graphs[4] = _CapturedGraph(
-        graph=Graph(),
-        input_features=FailedTensor() if step == "input_copy" else torch.zeros(4, 2, 5),
-        output=FailedTensor(),
-    )
-    observations = []
-    with pytest.raises(RuntimeError):
-        runner.run(torch.ones(3, 2, 5), observations=observations)
-    assert len(observations) == 1
-    assert observations[0]["outcome"] == "raised"
-    assert observations[0]["step"] == step
