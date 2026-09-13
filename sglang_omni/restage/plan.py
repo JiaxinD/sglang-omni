@@ -11,6 +11,12 @@ from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import dump_user_config
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.restage.candidates import enumerate_candidates
+from sglang_omni.restage.capacity import (
+    CapacityCatalog,
+    CapacityContext,
+    capacity_requirements,
+    predict_group_capacity,
+)
 from sglang_omni.restage.configurations import enumerate_configurations
 
 
@@ -62,6 +68,8 @@ def write_plan(
     destination: Path,
     *,
     max_candidates: int = 256,
+    capacity_catalog: CapacityCatalog | None = None,
+    capacity_context: CapacityContext | None = None,
 ) -> dict[str, Any]:
     """Write candidate YAML and rejection records without launching a server.
 
@@ -70,6 +78,8 @@ def write_plan(
     """
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
+    if (capacity_catalog is None) != (capacity_context is None):
+        raise ValueError("Capacity catalog and context must be supplied together")
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "search-space.json").write_text(
         space.model_dump_json(indent=2), encoding="utf-8"
@@ -83,6 +93,9 @@ def write_plan(
         "max_candidates": max_candidates,
     }
     records = iter(_records(config, space))
+    missing_requirements = {}
+    if capacity_catalog is not None:
+        summary.update(predicted=0, unranked=0)
     with (destination / "candidates.jsonl").open("w", encoding="utf-8") as log:
         for index in range(max_candidates):
             item = next(records, None)
@@ -97,6 +110,20 @@ def write_plan(
                     encoding="utf-8",
                 )
                 row["config_file"] = filename
+                if capacity_catalog is not None:
+                    requirements = capacity_requirements(
+                        candidate_config, row["assignments"], capacity_context
+                    )
+                    prediction = predict_group_capacity(requirements, capacity_catalog)
+                    row["prediction"] = prediction
+                    summary[prediction["status"]] += 1
+                    missing = set(prediction.get("missing_groups", []))
+                    for group in requirements:
+                        if group["key"] in missing:
+                            missing_requirements.setdefault(
+                                group["key"],
+                                {**group, "representative_candidate_config": filename},
+                            )
                 summary["accepted"] += 1
             else:
                 summary["rejected"] += 1
@@ -105,6 +132,10 @@ def write_plan(
             log.flush()
         else:
             summary["complete"] = next(records, None) is None
+    if capacity_catalog is not None:
+        (destination / "calibration-requirements.json").write_text(
+            json.dumps(list(missing_requirements.values()), indent=2), encoding="utf-8"
+        )
     (destination / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )

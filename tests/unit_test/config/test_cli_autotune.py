@@ -10,6 +10,50 @@ from sglang_omni.cli import app
 from sglang_omni.config.manager import ConfigManager
 
 
+def test_plan_capacity_options_export_missing_groups(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"config_cls": "Qwen3ASRPipelineConfig", "model_path": "test"})
+    )
+    space = tmp_path / "space.json"
+    space.write_text(json.dumps({"devices": [0], "replica_counts": [1]}))
+    catalog = tmp_path / "capacity.json"
+    catalog.write_text('{"points": []}')
+    context = tmp_path / "context.json"
+    context.write_text(
+        json.dumps(
+            {
+                "model_revision": "test",
+                "hardware": "test",
+                "stack": "test",
+                "workload": "test",
+            }
+        )
+    )
+    output = tmp_path / "output"
+    result = CliRunner().invoke(
+        app,
+        [
+            "autotune",
+            "plan",
+            "--config",
+            str(config),
+            "--search-space",
+            str(space),
+            "--output",
+            str(output),
+            "--capacity-catalog",
+            str(catalog),
+            "--capacity-context",
+            str(context),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["unranked"] == 1 and summary["predicted"] == 0
+    assert len(json.loads((output / "calibration-requirements.json").read_text())) == 1
+
+
 def test_plan_command_exports_loadable_candidate(tmp_path):
     config = tmp_path / "input.yaml"
     config.write_text(

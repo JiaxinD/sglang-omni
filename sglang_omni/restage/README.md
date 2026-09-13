@@ -4,8 +4,9 @@ Restage plans stage placement, process replicas and resource configuration.
 The planning CLI exports **unmeasured candidates**. The installed
 `sgl-omni autotune run` command measures supplied candidates and selects a winner
 within the tested configurations and load grid, subject to quality and SLO
-checks. Hardware calibration and prediction-based candidate ranking are not
-yet connected to that workflow.
+checks. Planning can annotate candidates with supplied GPU-group calibration
+data. Automatic calibration and prediction-based execution ordering are not
+yet connected to the measurement workflow.
 
 ## Generate candidates
 
@@ -48,6 +49,32 @@ The new output directory contains:
 `--max-candidates` counts accepted and rejected records. A truncated search
 does not cover the full declared space; enumeration order is not a ranking.
 No GPU serving process starts during planning.
+
+## Annotate candidates with calibrated capacity
+
+Pass both `--capacity-catalog capacity.json` and
+`--capacity-context context.json` to `autotune plan`. An empty catalog,
+`{"points": []}`, exports the missing measurements first. The context contains
+four nonempty identity strings: `model_revision`, `hardware`, `stack`, and
+`workload`. Record checkpoint revision, GPU UUIDs and their visible-device
+mapping, software versions and factory defaults, and the exact input workload
+respectively. These identities are supplied and verified by the caller.
+
+`calibration-requirements.json` lists distinct missing resource groups and a
+representative full candidate YAML for each. That YAML is not an isolated group
+replay launcher. Groups connect processes sharing a GPU and replicas of the
+same process, including partially overlapping TP assignments. Calibration must
+measure aggregate group capacity at the specified per-request demand with
+sufficient supplied work; throughput from an underloaded pipeline is insufficient.
+
+Each catalog point supplies `group_key`, `requests_per_s`, `run_id`, and
+`evidence`. Use the requirement's key and retain the measurement artifact in
+`evidence`. When all groups match, the candidate's `prediction` reports the
+minimum group capacity and the limiting groups. Missing groups leave the
+candidate `unranked`; all legal candidates remain exported in enumeration order.
+This GPU bottleneck estimate excludes CPU, transport, and cross-group coupling.
+It does not establish candidate capacity or SLO feasibility: use the measured
+campaign to select a recommendation. `performance_measured` remains false.
 
 ## Keep warmup inputs separate
 

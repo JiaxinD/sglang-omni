@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from sglang_omni.cli.config import _resolve_sources
+from sglang_omni.restage.capacity import CapacityCatalog, CapacityContext
 from sglang_omni.restage.plan import SearchSpace, write_plan
 
 autotune_app = typer.Typer(
@@ -39,6 +40,20 @@ def plan(
             help="Maximum examined records; includes rejections. Summary reports truncation.",
         ),
     ] = 256,
+    capacity_catalog: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True, dir_okay=False, help="Measured GPU-group capacity JSON."
+        ),
+    ] = None,
+    capacity_context: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Verified model, hardware, stack and workload identity JSON.",
+        ),
+    ] = None,
 ):
     """Export unmeasured candidates using the serving configuration rules."""
     try:
@@ -53,7 +68,24 @@ def plan(
             argv=[],
         )
         summary = write_plan(
-            resolution.resolved.config, space, output, max_candidates=max_candidates
+            resolution.resolved.config,
+            space,
+            output,
+            max_candidates=max_candidates,
+            capacity_catalog=(
+                CapacityCatalog.model_validate_json(
+                    capacity_catalog.read_text(encoding="utf-8")
+                )
+                if capacity_catalog is not None
+                else None
+            ),
+            capacity_context=(
+                CapacityContext.model_validate_json(
+                    capacity_context.read_text(encoding="utf-8")
+                )
+                if capacity_context is not None
+                else None
+            ),
         )
     except (ValueError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from exc
