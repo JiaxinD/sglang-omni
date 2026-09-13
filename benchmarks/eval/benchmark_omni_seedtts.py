@@ -321,7 +321,7 @@ def make_send_fn(
                 ]
             if text_first_time_holder:
                 result.text_ttft_s = text_first_time_holder[0] - start_time
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             result.error = str(exc)
         finally:
             result.latency_s = time.perf_counter() - start_time

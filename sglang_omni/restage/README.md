@@ -101,6 +101,22 @@ WER measures transcript agreement; speaker similarity and perceptual quality
 require separate evaluation. A single trial does not establish a best topology
 or the maximum sustainable arrival rate.
 
+For an Omni model's read-aloud workload, set `api` to `chat` in the TTS
+trial spec (or campaign `trial_options`). This reuses the existing Omni
+SeedTTS sender at `/v1/chat/completions`. Supply its required `sender_options`:
+`voice_clone`, `speaker`, `max_tokens`, `temperature`, and `stream`;
+`system_prompt` is optional. Choose these for the checkpoint and workload.
+For example, Ming may need a read-aloud system prompt to avoid chat responses.
+The audio must agree with the full `target_text` under the same WER check.
+
+This covers speech generation through the chat API, not arbitrary multimodal
+conversation or image/video understanding. The existing chat sender records
+streaming first-audio time but does not measure playback underrun; this mode
+rejects `max_underrun_s` until that metric has a producer. The default `api`
+is `speech`, preserving `/v1/audio/speech` trials.
+For either API, `max_ttfa_s` requires `sender_options.stream=true` because
+non-streaming responses do not provide a first-audio timestamp.
+
 To compare explicit candidates, use:
 
 ```bash

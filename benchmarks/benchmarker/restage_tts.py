@@ -32,6 +32,7 @@ async def execute_tts_trial(
     port: int,
     lang: str,
     max_wer: float,
+    api: str = "speech",
     sender_options: dict[str, Any] | None = None,
     warmup: int = 1,
     startup_timeout_s: int = 1800,
@@ -45,6 +46,12 @@ async def execute_tts_trial(
     The same port is reused sequentially. WER assesses transcript agreement,
     not speaker similarity or perceived audio quality.
     """
+    if api not in ("speech", "chat"):
+        raise ValueError(f"Unsupported speech generation API: {api}")
+    if slo.max_ttfa_s is not None and not (sender_options or {}).get("stream", False):
+        raise ValueError("First-audio SLO requires a streaming sender")
+    if api == "chat" and slo.max_underrun_s is not None:
+        raise ValueError("Chat sender does not yet measure playback underrun")
     targets = {sample.sample_id: sample.target_text for sample in samples}
     if len(targets) != len(samples):
         raise ValueError("Sample IDs must be unique")
@@ -99,6 +106,7 @@ async def execute_tts_trial(
             json.dumps(
                 {
                     "samples": [asdict(sample) for sample in samples],
+                    "api": api,
                     "sender_options": sender_options or {},
                 },
                 ensure_ascii=False,
@@ -106,6 +114,16 @@ async def execute_tts_trial(
             ),
             encoding="utf-8",
         )
+        if api == "chat":
+            from benchmarks.eval.benchmark_omni_seedtts import make_send_fn
+
+            return make_send_fn(
+                model_path,
+                f"{url}/v1/chat/completions",
+                lang=lang,
+                save_audio_dir=str(audio_dir),
+                **(sender_options or {}),
+            )
         return make_tts_send_fn(
             model_path,
             f"{url}/v1/audio/speech",
