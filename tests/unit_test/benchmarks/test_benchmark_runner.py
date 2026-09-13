@@ -94,3 +94,104 @@ async def test_open_loop_arrivals_overlap_in_flight_requests(
 
     assert len(starts) == 8
     assert max(starts) - min(starts) < 0.25
+
+
+@pytest.mark.asyncio
+async def test_request_timestamps_include_client_queue_wait():
+    async def send(_session, sample):
+        await asyncio.sleep(0.01)
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(RunConfig(max_concurrency=1, warmup=0, disable_tqdm=True))
+    first, second = await runner.run(["first", "second"], send)
+    assert first.scheduled_s <= first.dispatched_s <= first.completed_s
+    assert second.scheduled_s < first.completed_s <= second.dispatched_s
+    assert second.completed_s >= second.dispatched_s
+
+
+@pytest.mark.asyncio
+async def test_arrival_schedule_does_not_drift_with_blocked_event_loop(monkeypatch):
+    monkeypatch.setattr(np.random, "exponential", lambda _scale: 0.01)
+
+    async def send(_session, sample):
+        if sample == "first":
+            time.sleep(0.04)
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(
+        RunConfig(max_concurrency=0, request_rate=100, warmup=0, disable_tqdm=True)
+    )
+    results = await runner.run(["first", "second", "third"], send)
+    assert results[1].scheduled_s - results[0].scheduled_s == pytest.approx(0.01)
+    assert results[2].scheduled_s - results[1].scheduled_s == pytest.approx(0.01)
+    assert results[1].dispatched_s - results[1].scheduled_s > 0.02
+
+
+@pytest.mark.asyncio
+async def test_dispatch_failure_cancels_remaining_requests_before_return():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def send(_session, sample):
+        if sample == "fail":
+            await started.wait()
+            raise RuntimeError("dispatch failed")
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    runner = BenchmarkRunner(RunConfig(max_concurrency=0, warmup=0, disable_tqdm=True))
+    with pytest.raises(RuntimeError, match="dispatch failed"):
+        await runner.run(["fail", "pending"], send)
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_early_timer_wakeup_does_not_send_before_scheduled_time(monkeypatch):
+    clock = [100.0]
+    early = [True]
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        clock[0] += delay / 2 if early[0] else delay
+        early[0] = False
+        await real_sleep(0)
+
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(np.random, "exponential", lambda scale: 1.0)
+
+    async def send(session, sample):
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(
+        RunConfig(max_concurrency=0, request_rate=1, warmup=0, disable_tqdm=True)
+    )
+    result = (await runner._dispatch(None, ["a"], send))[0]
+    assert result.dispatched_s >= result.scheduled_s
+
+
+@pytest.mark.asyncio
+async def test_seeded_arrivals_repeat_independently_of_sender_randomness():
+    async def send(session, sample):
+        np.random.exponential(size=17)
+        return RequestResult(request_id=sample, is_success=True)
+
+    runner = BenchmarkRunner(
+        RunConfig(
+            max_concurrency=0,
+            request_rate=1000,
+            warmup=0,
+            disable_tqdm=True,
+            arrival_seed=42,
+        )
+    )
+    first = await runner.run(list("abcd"), send)
+    second = await runner.run(list("abcd"), send)
+    first_gaps = np.diff([r.scheduled_s for r in first])
+    second_gaps = np.diff([r.scheduled_s for r in second])
+    assert first_gaps == pytest.approx(second_gaps, abs=1e-8)
+    expected = np.random.default_rng(42).exponential(0.001, size=4)[1:]
+    assert first_gaps == pytest.approx(expected, abs=1e-8)

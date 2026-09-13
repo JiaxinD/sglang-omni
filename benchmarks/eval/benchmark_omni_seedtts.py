@@ -314,6 +314,7 @@ def make_send_fn(
 
             if chunk_times:
                 result.audio_ttfp_s = chunk_times[0] - start_time
+                result.first_audio_s = chunk_times[0]
                 result.inter_chunk_s = [
                     chunk_times[i + 1] - chunk_times[i]
                     for i in range(len(chunk_times) - 1)

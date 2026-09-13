@@ -1126,6 +1126,7 @@ async def _handle_raw_pcm_streaming_response(
             continue
         if not chunk_times:
             result.audio_ttfp_s = chunk_time - start_time
+            result.first_audio_s = chunk_time
             result.first_audio_payload_bytes = len(chunk)
         chunk_times.append(chunk_time)
         pcm_chunks.append(bytes(chunk))
