@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.pipeline import runtime_config, stage_workers
 from sglang_omni.pipeline.mp_runner import _build_stage_groups
 from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
@@ -43,6 +44,13 @@ def test_mps_search_exports_distinct_process_caps_reaching_child_environment(
     checked = set()
     for row in rows:
         config = ConfigManager.from_file(str(destination / row["config_file"])).config
+        engine = next(stage for stage in config.stages if stage.name == "tts_engine")
+        assert (
+            resolve_stage_typed_kwargs(engine)["server_args_overrides"][
+                "mem_fraction_static"
+            ]
+            == 0.4
+        )
         if config.mps != "on":
             continue
         expected = {s.process: s.env[CAP] for s in config.stages if CAP in s.env}

@@ -55,6 +55,14 @@ engine and vocoder in separate processes, and compares MPS off, MPS on at
 MPS-on control separates MPS scheduling effects from the effect of caps.
 Also include the shipped configuration as the campaign baseline.
 
+The example sets both `tts_engine.gpu_memory_fraction` and
+`tts_engine.engine.mem_fraction_static` to 0.4. The former declares a placement
+budget; the current Qwen3-TTS factory does not consume that value as an engine
+allocation setting. The latter reaches SGLang through `server_args_overrides`.
+Without it, the engine can retain its 0.85 default despite a smaller declared
+stage budget. These settings are not hard memory isolation; verify actual
+allocation before treating colocated candidates as feasible.
+
 These values are experimental choices, not measured recommendations.
 `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` limits the available client execution
 resources; it does not reserve an exclusive SM partition. Native MPS currently
