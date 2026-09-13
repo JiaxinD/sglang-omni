@@ -1,6 +1,8 @@
 """Record a finite Restage search and export its unmeasured candidates."""
 
+import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +112,9 @@ def write_plan(
                     encoding="utf-8",
                 )
                 row["config_file"] = filename
+                row["config_sha256"] = hashlib.sha256(
+                    (destination / filename).read_bytes()
+                ).hexdigest()
                 if capacity_catalog is not None:
                     requirements = capacity_requirements(
                         candidate_config, row["assignments"], capacity_context
@@ -140,3 +145,61 @@ def write_plan(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
     return summary
+
+
+def load_plan(directory: Path, baseline: str) -> tuple[dict, dict]:
+    """Order all exported candidates for measurement; predictions are not verdicts."""
+    directory = directory.resolve()
+    manifest = (directory / "candidates.jsonl").read_bytes()
+    summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
+    candidates = []
+    names = set()
+    for line in manifest.decode("utf-8").splitlines():
+        row = json.loads(line)
+        if row["status"] != "candidate":
+            continue
+        config = (directory / row["config_file"]).resolve()
+        if not config.is_relative_to(directory) or not config.is_file():
+            raise ValueError(
+                f"Plan configuration must exist inside its directory: {config}"
+            )
+        if row.get("config_sha256") != hashlib.sha256(config.read_bytes()).hexdigest():
+            raise ValueError(
+                f"Candidate file changed or has no planning hash; regenerate plan: {config}"
+            )
+        name = config.stem
+        if name in names:
+            raise ValueError(f"Duplicate plan candidate name: {name}")
+        names.add(name)
+        prediction = row.get("prediction") or {}
+        score = None
+        if prediction.get("status") == "predicted":
+            score = prediction["requests_per_s"]
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (float, int))
+                or not math.isfinite(score)
+                or score <= 0
+            ):
+                raise ValueError(f"Invalid predicted capacity for {name}")
+        candidates.append((name, config, score, prediction))
+    if baseline not in names:
+        raise ValueError("Include the baseline among accepted plan candidates")
+    candidates.sort(
+        key=lambda item: (item[0] != baseline, item[2] is None, -(item[2] or 0))
+    )
+    configs = {name: config for name, config, _, _ in candidates}
+    evidence = {
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+        "summary": summary,
+        "measurement_order": [
+            {
+                "candidate": name,
+                "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "prediction": prediction,
+            }
+            for name, config, _, prediction in candidates
+        ],
+        "scope": "Baseline first, then predicted capacity descending, then unranked; stable ties. All accepted candidates retained. Predictions only order measurements, not establish feasibility.",
+    }
+    return configs, evidence

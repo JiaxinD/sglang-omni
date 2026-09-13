@@ -76,6 +76,26 @@ This GPU bottleneck estimate excludes CPU, transport, and cross-group coupling.
 It does not establish candidate capacity or SLO feasibility: use the measured
 campaign to select a recommendation. `performance_measured` remains false.
 
+## Measure exported plans
+
+A campaign may use `"plan_directory": "plan"` instead of `configs`, with
+`baseline` naming an accepted candidate file stem such as `candidate-00000`.
+The directory is relative to the campaign JSON. Include your intended baseline
+in the declared search space; the loader does not invent a missing baseline.
+Use a newly generated plan with candidate content hashes. Changing a candidate
+YAML requires regenerating its plan.
+
+The baseline runs first, followed by candidates with predicted GPU-group
+capacity in descending order and then candidates lacking calibration. Ties
+retain enumeration order. All accepted candidates are measured, including those
+from a truncated plan; its `summary.complete` remains visible in the campaign
+evidence. The campaign records the plan manifest hash, summary, configuration
+hashes and measurement order, and rejects incompatible resume evidence.
+Predictions determine order only; recommendations still use measured quality
+and SLO. Calibration is not performed automatically by this loader. Result
+directory candidate filenames are snapshot indices; `campaign.json` maps them
+to their original candidate names.
+
 ## Keep warmup inputs separate
 
 A campaign can set `trial_options.warmup_sample` to a sample object with

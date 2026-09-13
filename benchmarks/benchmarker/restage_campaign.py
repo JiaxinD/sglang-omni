@@ -34,6 +34,7 @@ async def execute_campaign(
     run_identity: str | None = None,
     resume: bool = False,
     batch_quality: bool = False,
+    plan_evidence: dict | None = None,
 ) -> Selection:
     """Measure supplied candidates with identical workload/SLO and paired arrivals.
 
@@ -60,6 +61,7 @@ async def execute_campaign(
             run_identity=run_identity,
             resume=resume,
             batch_quality=batch_quality,
+            plan_evidence=plan_evidence,
         )
 
 
@@ -116,6 +118,7 @@ async def _execute_campaign(
     run_identity,
     resume,
     batch_quality,
+    plan_evidence,
 ):
     runners = {"tts": execute_tts_trial, "asr": execute_asr_trial}
     if task not in runners:
@@ -153,6 +156,8 @@ async def _execute_campaign(
     }
     if batch_quality:
         metadata["batch_quality"] = True
+    if plan_evidence is not None:
+        metadata["plan_evidence"] = plan_evidence
     manifest = destination / "campaign.json"
     completed = {}
     measured = {}
@@ -377,7 +382,20 @@ def load_campaign_spec(path: Path) -> dict:
     try:
         spec = json.loads(path.read_text(encoding="utf-8"))
         base = path.resolve().parent
-        spec["configs"] = {key: base / value for key, value in spec["configs"].items()}
+        if "plan_directory" in spec:
+            if "configs" in spec:
+                raise ValueError("Specify either configs or plan_directory, not both")
+            if "plan_evidence" in spec:
+                raise ValueError("plan_evidence is generated from plan_directory")
+            from sglang_omni.restage.plan import load_plan
+
+            spec["configs"], spec["plan_evidence"] = load_plan(
+                base / spec.pop("plan_directory"), spec["baseline"]
+            )
+        else:
+            spec["configs"] = {
+                key: base / value for key, value in spec["configs"].items()
+            }
         options = spec["trial_options"]
         task = spec.get("task", "tts")
         sender = options.get("sender_options") or {}
