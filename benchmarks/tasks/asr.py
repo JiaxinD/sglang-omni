@@ -360,7 +360,6 @@ def make_asr_send_fn(
         start_time = time.perf_counter()
         try:
             async with session.post(api_url, data=form, headers=headers) as response:
-                result.server_request_id = response.headers.get("X-Request-ID")
                 if response.status != 200:
                     result.error = f"HTTP {response.status}: {await response.text()}"
                 elif stream:

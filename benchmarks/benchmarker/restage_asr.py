@@ -31,7 +31,6 @@ async def execute_asr_trial(
     startup_timeout_s: int = 1800,
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
-    profile: bool = False,
     corpus_repeats: int = 1,
 ) -> Evaluation:
     """Measure latency/RTF and score the returned transcript without another service.
@@ -122,5 +121,4 @@ async def execute_asr_trial(
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,
-        profile=profile,
     )

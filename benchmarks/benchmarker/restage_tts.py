@@ -6,20 +6,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from benchmarks.benchmarker.restage_corpus import repeat_corpus
 from benchmarks.benchmarker.restage_quality import evaluate_tts_quality
-from benchmarks.benchmarker.restage_trial import (
-    TrialMeasurement,
-    evaluate_trial,
-    execute_trial,
-    measure_trial,
-)
+from benchmarks.benchmarker.restage_trial import execute_trial
 from benchmarks.benchmarker.utils import managed_omni_server
 from benchmarks.dataset.seedtts import SampleInput
 from benchmarks.tasks.asr import run_asr_transcription
@@ -48,10 +41,8 @@ async def execute_tts_trial(
     request_timeout_s: int = 300,
     asr_concurrency: int = 8,
     arrival_seed: int | None = None,
-    profile: bool = False,
-    defer_quality: bool = False,
     corpus_repeats: int = 1,
-) -> Evaluation | TrialMeasurement:
+) -> Evaluation:
     """Measure one admitted configuration, then transcribe its saved audio.
 
     Both services use the caller's visible devices and supplied configurations.
@@ -92,16 +83,26 @@ async def execute_tts_trial(
         return results
 
     async def quality(results):
-        return await _quality(
+        (destination / "quality-protocol.json").write_text(
+            json.dumps(
+                {
+                    "asr_model_path": asr_model_path,
+                    "asr_config_path": str(asr_config_path.resolve()),
+                    "lang": lang,
+                    "max_wer": max_wer,
+                    "asr_concurrency": asr_concurrency,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return await evaluate_tts_quality(
             results,
-            destination=destination,
-            asr_model_path=asr_model_path,
-            asr_config_path=asr_config_path,
-            lang=lang,
-            max_wer=max_wer,
-            asr_concurrency=asr_concurrency,
             targets=targets,
             transcribe=transcribe,
+            output=destination / "quality-detail.json",
+            lang=lang,
+            max_wer=max_wer,
         )
 
     def sender(url, audio_dir):
@@ -147,13 +148,12 @@ async def execute_tts_trial(
             **(sender_options or {}),
         )
 
-    runner = measure_trial if defer_quality else execute_trial
-    return await runner(
+    return await execute_trial(
         config_path=config_path,
         model_path=model_path,
         samples=samples,
         send_factory=sender,
-        **({} if defer_quality else {"quality": quality}),
+        quality=quality,
         slo=slo,
         rate=rate,
         destination=destination,
@@ -163,115 +163,7 @@ async def execute_tts_trial(
         startup_timeout_s=startup_timeout_s,
         request_timeout_s=request_timeout_s,
         arrival_seed=arrival_seed,
-        profile=profile,
     )
-
-
-async def _quality(
-    results,
-    *,
-    destination,
-    asr_model_path,
-    asr_config_path,
-    lang,
-    max_wer,
-    asr_concurrency,
-    targets,
-    transcribe,
-):
-    (destination / "quality-protocol.json").write_text(
-        json.dumps(
-            {
-                "asr_model_path": asr_model_path,
-                "asr_config_path": str(asr_config_path.resolve()),
-                "lang": lang,
-                "max_wer": max_wer,
-                "asr_concurrency": asr_concurrency,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return await evaluate_tts_quality(
-        results,
-        targets=targets,
-        transcribe=transcribe,
-        output=destination / "quality-detail.json",
-        lang=lang,
-        max_wer=max_wer,
-    )
-
-
-async def evaluate_tts_batch(
-    measurements: list[TrialMeasurement],
-    *,
-    samples: list[SampleInput],
-    asr_config_path: Path,
-    asr_model_path: str,
-    port: int,
-    lang: str,
-    max_wer: float,
-    on_evaluated: Callable[[TrialMeasurement, Evaluation], None],
-    startup_timeout_s: int = 1800,
-    request_timeout_s: int = 300,
-    asr_concurrency: int = 8,
-    corpus_repeats: int = 1,
-) -> None:
-    """Finalize each measurement using one lazily started ASR service.
-
-    Generation services must already be stopped. Transcriptions are sequential
-    across trials, with distinct saved audio paths; ASR timing is not a serving
-    measurement. The callback checkpoints every completed quality decision.
-    """
-    samples, _ = repeat_corpus(samples, corpus_repeats)
-    targets = {sample.sample_id: sample.target_text for sample in samples}
-    started = False
-    with ExitStack() as stack:
-
-        async def transcribe(valid_samples):
-            nonlocal started
-            if not valid_samples:
-                return []
-            if not started:
-                stack.enter_context(
-                    managed_omni_server(
-                        model_path=asr_model_path,
-                        server_config=str(asr_config_path.resolve()),
-                        host="127.0.0.1",
-                        port=port,
-                        log_file=measurements[0].destination / "asr-batch-server.log",
-                        timeout=startup_timeout_s,
-                        wait_for_gpu_release=False,
-                    )
-                )
-                started = True
-            results, _ = await run_asr_transcription(
-                valid_samples,
-                port=port,
-                model_path=asr_model_path,
-                lang=lang,
-                concurrency=asr_concurrency,
-                request_timeout_s=request_timeout_s,
-            )
-            return results
-
-        for measurement in measurements:
-
-            async def quality(results):
-                return await _quality(
-                    results,
-                    destination=measurement.destination,
-                    asr_model_path=asr_model_path,
-                    asr_config_path=asr_config_path,
-                    lang=lang,
-                    max_wer=max_wer,
-                    asr_concurrency=asr_concurrency,
-                    targets=targets,
-                    transcribe=transcribe,
-                )
-
-            evaluation = await evaluate_trial(measurement, quality=quality)
-            on_evaluated(measurement, evaluation)
 
 
 def main():

@@ -108,23 +108,6 @@ def test_replicas_roundtrip_with_noncontiguous_device_budget():
     assert source.model_dump() == before
 
 
-def test_tp_rank_mapping_is_preserved():
-    result = materialize_candidate(
-        pipeline(2), {"engine": ((2, 5),), "tail": ((7,), (9,))}, (2, 5, 7, 9)
-    )
-    logical, _ = compile_logical_processes(result)
-    assert logical.get("engine").tp_size == 2
-    assert logical.get("engine").replica_devices is None
-    assert result.stage_named("engine").gpu == [2, 5]
-
-
-def test_replica_memory_is_checked_after_expansion():
-    source = pipeline()
-    source.stages[-1].gpu_memory_fraction = 0.6
-    with pytest.raises(ValueError, match="exceeds placement limit"):
-        materialize_candidate(source, {"engine": ((0,),), "tail": ((1,), (1,))}, (0, 1))
-
-
 def test_shared_process_members_are_replicated_together():
     source = pipeline()
     source.stages[0].process = "engine"

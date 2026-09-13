@@ -120,14 +120,12 @@ class SuccessfulSpeechClient:
         self.finish_reason = finish_reason
         self.generate_requests: list[GenerateRequest] = []
         self.speech_requests: list[GenerateRequest] = []
-        self.request_ids: list[str | None] = []
 
     def health(self) -> dict[str, Any]:
         return {"running": True}
 
     async def generate(self, request: Any, request_id: str | None = None):
         self.generate_requests.append(request)
-        self.request_ids.append(request_id)
         yield GenerateChunk(
             request_id=request_id or "speech-1",
             modality="audio",
@@ -147,8 +145,7 @@ class SuccessfulSpeechClient:
     ):
         from sglang_omni.client.types import SpeechResult
 
-        del speed, allow_format_fallback
-        self.request_ids.append(request_id)
+        del request_id, speed, allow_format_fallback
         self.speech_requests.append(request)
         return SpeechResult(
             audio_bytes=b"RIFF",
@@ -1251,26 +1248,6 @@ def test_chat_request_does_not_mark_null_sampling_params_explicit() -> None:
     assert gen_req.sampling.top_p == 1.0
     assert gen_req.sampling.top_k == -1
     assert EXPLICIT_GENERATION_PARAMS_KEY not in gen_req.metadata
-
-
-@pytest.mark.parametrize("stream", [False, True])
-def test_speech_response_exposes_unique_pipeline_request_id(stream) -> None:
-    backend = SuccessfulSpeechClient()
-    client = TestClient(create_app(backend, model_name="tts"))
-    ids = []
-    for _ in range(2):
-        response = client.post(
-            "/v1/audio/speech",
-            json={
-                "input": "hello",
-                "stream": stream,
-                "response_format": "pcm" if stream else "wav",
-            },
-        )
-        assert response.status_code == 200
-        assert response.headers["x-request-id"] == backend.request_ids[-1]
-        ids.append(response.headers["x-request-id"])
-    assert len(set(ids)) == 2
 
 
 def test_speech_stream_defaults_to_raw_pcm() -> None:
@@ -2568,50 +2545,6 @@ def test_unprobeable_audio_with_chunking_enabled_stays_one_request() -> None:
         transcription_client.requests[0][1].prompt["audio_bytes"]
         == b"RIFF not really audio"
     )
-
-
-@pytest.mark.parametrize("stream", [False, True])
-def test_transcription_response_exposes_unique_pipeline_request_id(stream) -> None:
-    class RecordingClient(SuccessfulTranscriptionClient):
-        request_ids = []
-
-        async def completion(self, request, *, request_id, **kwargs):
-            self.request_ids.append(request_id)
-            return await super().completion(request, request_id=request_id, **kwargs)
-
-        async def generate(self, request, request_id=None):
-            self.request_ids.append(request_id)
-            async for chunk in super().generate(request, request_id=request_id):
-                yield chunk
-
-    backend = RecordingClient()
-    client = TestClient(create_app(backend, model_name="openai/whisper-large-v3"))
-    ids = []
-    for _ in range(2):
-        response = client.post(
-            "/v1/audio/transcriptions",
-            data={"stream": str(stream).lower(), "language": "en"},
-            files={"file": ("sample.wav", b"RIFF", "audio/wav")},
-        )
-        assert response.status_code == 200
-        assert response.headers["x-request-id"] == backend.request_ids[-1]
-        ids.append(response.headers["x-request-id"])
-    assert len(set(ids)) == 2
-
-
-def test_chunked_transcription_exposes_parent_request_id() -> None:
-    backend = ChunkRecordingTranscriptionClient()
-    client = _chunking_test_client(backend)
-    response = client.post(
-        "/v1/audio/transcriptions",
-        data={"model": "asr"},
-        files={"file": ("long.wav", _wav_upload(2.5), "audio/wav")},
-    )
-    assert response.status_code == 200
-    parent = response.headers["x-request-id"]
-    assert parent.startswith("transcription-")
-    assert len(backend.requests) > 1
-    assert all(rid.startswith(f"{parent}-chunk-") for rid, _ in backend.requests)
 
 
 def test_transcription_endpoint_returns_text_json() -> None:

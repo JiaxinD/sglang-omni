@@ -45,29 +45,6 @@ def _sglang_prefill_ladder(max_bs: int) -> list[int]:
     return generate_prefill_cuda_graph_batch_sizes(max_bs)
 
 
-def test_capture_factory_options_reach_builder(monkeypatch, tmp_path):
-    config = Qwen3ASRPipelineConfig(model_path="checkpoint")
-    stage = config.stage_named("asr")
-    stage.factory.encoder_capture_directory = str(tmp_path)
-    kwargs = resolve_stage_typed_kwargs(stage)
-    assert "encoder_capture_max_batches" not in kwargs
-    observed = {}
-
-    def fake_build(self, *args, **kwargs):
-        observed.update(
-            directory=self.encoder_capture_directory,
-            maximum=self.encoder_capture_max_batches,
-        )
-        return "executor"
-
-    monkeypatch.setattr(qwen3_asr_builder.Qwen3ASREngineBuilder, "build", fake_build)
-    assert create_sglang_qwen3_asr_executor("checkpoint", **kwargs) == "executor"
-    assert observed == {"directory": str(tmp_path), "maximum": 16}
-    stage.factory.encoder_capture_max_batches = 3
-    create_sglang_qwen3_asr_executor("checkpoint", **resolve_stage_typed_kwargs(stage))
-    assert observed["maximum"] == 3
-
-
 def _fake_server_args_builder(
     build_kwargs: dict[str, object],
     *,

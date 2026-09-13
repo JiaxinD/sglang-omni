@@ -64,8 +64,6 @@ async def test_adaptive_campaign_shared_grid_duration_and_resume(
     progress = json.loads((parent / "adaptive-search.json").read_text())
     assert progress["stop_reason"] == "trial_failure"
     assert progress["rates"] == [1]
-    partial = json.loads((parent / "partial-selection.json").read_text())
-    assert partial["baseline_rate"] == 1
     assert not (parent / "selection.json").exists()
     result = await restage_campaign.execute_campaign(**options, resume=True)
     assert result.recommended == "dual"
@@ -79,7 +77,6 @@ async def test_adaptive_campaign_shared_grid_duration_and_resume(
     saved = json.loads((tmp_path / "campaign/adaptive-search.json").read_text())
     assert saved["rates"] == [1, 2, 4]
     assert saved["stop_reason"] == "all_candidates_failed"
-    assert not saved["gpu_group_calibration"]
     with pytest.raises(ValueError, match="identity"):
         await restage_campaign.execute_campaign(
             **{**options, "adaptive_search": {"max_rate": 16}}, resume=True

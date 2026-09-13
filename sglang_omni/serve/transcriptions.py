@@ -191,7 +191,7 @@ def register_transcriptions(app: FastAPI) -> None:
                 request_id=request_id,
                 error_log_message="Error transcribing audio for request %s",
             )
-            response = speech_to_text.assemble_speech_to_text_response(
+            return speech_to_text.assemble_speech_to_text_response(
                 text=result.text,
                 response_format=form.response_format,
                 endpoint_path=TRANSCRIPTIONS_ENDPOINT,
@@ -202,8 +202,6 @@ def register_transcriptions(app: FastAPI) -> None:
                 duration_s=duration_s,
                 response_formats=TRANSCRIPTION_RESPONSE_FORMATS,
             )
-            response.headers["X-Request-ID"] = request_id
-            return response
 
         try:
             adapter = speech_to_text.resolve_speech_to_text_adapter(
@@ -239,7 +237,7 @@ def register_transcriptions(app: FastAPI) -> None:
             logger.exception("Error transcribing audio for request %s", request_id)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         text = join_transcript_parts(chunk_texts)
-        response = _assemble_chunked_response(
+        return _assemble_chunked_response(
             text=text,
             response_format=form.response_format,
             language=form.language,
@@ -247,8 +245,6 @@ def register_transcriptions(app: FastAPI) -> None:
             chunk_texts=chunk_texts,
             architectures=getattr(app.state, "architectures", None),
         )
-        response.headers["X-Request-ID"] = request_id
-        return response
 
 
 def _assemble_chunked_response(

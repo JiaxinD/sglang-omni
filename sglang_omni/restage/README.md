@@ -1,13 +1,10 @@
 # Restage integration
 
-Restage plans stage placement, process replicas and resource configuration.
-The planning CLI exports **unmeasured candidates**. The installed
-`sgl-omni autotune run` command measures supplied candidates and selects a winner
-within the tested configurations and load grid, subject to quality and SLO
-checks. Planning can annotate candidates with supplied GPU-group calibration
-data. Campaigns loading an exported plan use those predictions to order
-measurements after the baseline. Automatic calibration and measurement
-feedback into the performance model remain unfinished.
+Restage plans stage placement, process replicas and resource configuration,
+then measures the exported candidates. `sgl-omni autotune plan` exports
+**unmeasured candidates**; `sgl-omni autotune run` measures them and selects a
+winner within the tested configurations and load grid, subject to quality and
+SLO checks.
 
 ## Generate candidates
 
@@ -21,17 +18,17 @@ sgl-omni autotune plan \
   --max-candidates 256
 ```
 
-The example varies Qwen3-TTS engine memory budgets on two visible GPUs,
-setting both the declared stage budget and `engine.mem_fraction_static`.
-Its values are search choices, not recommended memory settings. Use device IDs
-in the same visible-device namespace as the serving process. A four-GPU
-budget can use `"devices": [0, 1, 2, 3]`.
+Use device IDs in the same visible-device namespace as the serving process.
+`replica_counts` lists the replica choices for each GPU process, either as one
+list applied to every process or as a mapping from process name to its choices.
+`examples/configs/restage_moss_td_pd_search.json` uses the mapping form to vary
+MOSS-TD decode replicas over 1/2/3 on two GPUs while Prefill stays single.
 
-`replica_counts` lists the choices for each GPU process. Each named dimension
-contains alternative groups of ordinary serving CLI overrides. Related
-changes, such as `thinker.tp_size` and `thinker.gpu`, belong in the same
-group. Different dimensions are combined. Only use TP sizes supported by
-the model; schema acceptance alone does not establish runtime support.
+Each named dimension contains alternative groups of ordinary serving CLI
+overrides. Related changes, such as `thinker.tp_size` and `thinker.gpu`, belong
+in the same group; different dimensions are combined. Only use TP sizes
+supported by the model; schema acceptance alone does not establish runtime
+support.
 
 Every accepted placement obeys the existing process and declared memory
 constraints. Actual memory usage and model correctness still need runtime
@@ -51,53 +48,37 @@ The new output directory contains:
 does not cover the full declared space; enumeration order is not a ranking.
 No GPU serving process starts during planning.
 
-## Annotate candidates with calibrated capacity
+## Measure candidates
 
-Pass both `--capacity-catalog capacity.json` and
-`--capacity-context context.json` to `autotune plan`. An empty catalog,
-`{"points": []}`, exports the missing measurements first. The context contains
-four nonempty identity strings: `model_revision`, `hardware`, `stack`, and
-`workload`. Record checkpoint revision, GPU UUIDs and their visible-device
-mapping, software versions and factory defaults, and the exact input workload
-respectively. These identities are supplied and verified by the caller.
+```bash
+sgl-omni autotune run --spec campaign.json --output campaign-results
+```
 
-`calibration-requirements.json` lists distinct missing resource groups and a
-representative full candidate YAML for each. That YAML is not an isolated group
-replay launcher. Groups connect processes sharing a GPU and replicas of the
-same process, including partially overlapping TP assignments. Calibration must
-measure aggregate group capacity at the specified per-request demand with
-sufficient supplied work; throughput from an underloaded pipeline is insufficient.
+The campaign spec contains `configs` (candidate key to YAML path), `baseline`
+(one of those keys), `rates`, `repeats`, `arrival_seed`, and `trial_options`.
+A spec may instead use `"plan_directory": "plan"` with `baseline` naming an
+accepted candidate file stem such as `candidate-00000`; the directory is
+relative to the campaign JSON and every accepted candidate is measured, with
+the baseline first. All candidates share one workload, SLO and load grid, and
+each repeat uses the same seeded arrival sequence across candidates.
+Configurations are copied into the results directory before measurement; use
+absolute model paths so the copies resolve the same checkpoint.
 
-Each catalog point supplies `group_key`, `requests_per_s`, `run_id`, and
-`evidence`. Use the requirement's key and retain the measurement artifact in
-`evidence`. When all groups match, the candidate's `prediction` reports the
-minimum group capacity and the limiting groups. Missing groups leave the
-candidate `unranked`; all legal candidates remain exported in enumeration order.
-This GPU bottleneck estimate excludes CPU, transport, and cross-group coupling.
-It does not establish candidate capacity or SLO feasibility: use the measured
-campaign to select a recommendation. `performance_measured` remains false.
+`selection.json` ranks candidates by the highest prefix of the tested rate grid
+that passed every repeat, then median goodput at that prefix endpoint. An
+isolated passing point above a failed lower rate remains visible as
+`best_tested_rate`, but does not raise the `passing_prefix_rate` used for
+ranking. Exact ties retain the baseline. `recommended.yaml` is written only
+when a candidate has a passing rate. These are empirical comparisons within the
+measured space, not confidence bounds or global optimality claims. Failed trial
+execution stops the campaign and records `failure.json`; it is not silently
+converted into a low performance score.
 
-## Measure exported plans
+Candidates are measured sequentially in the recorded order. The campaign does
+not randomize/interleave candidate order or reuse a serving process across load
+points.
 
-A campaign may use `"plan_directory": "plan"` instead of `configs`, with
-`baseline` naming an accepted candidate file stem such as `candidate-00000`.
-The directory is relative to the campaign JSON. Include your intended baseline
-in the declared search space; the loader does not invent a missing baseline.
-Use a newly generated plan with candidate content hashes. Changing a candidate
-YAML requires regenerating its plan.
-
-The baseline runs first, followed by candidates with predicted GPU-group
-capacity in descending order and then candidates lacking calibration. Ties
-retain enumeration order. All accepted candidates are measured, including those
-from a truncated plan; its `summary.complete` remains visible in the campaign
-evidence. The campaign records the plan manifest hash, summary, configuration
-hashes and measurement order, and rejects incompatible resume evidence.
-Predictions determine order only; recommendations still use measured quality
-and SLO. Calibration is not performed automatically by this loader. Result
-directory candidate filenames are snapshot indices; `campaign.json` maps them
-to their original candidate names.
-
-## Adapt the measured load grid
+### Adapt the measured load grid
 
 Add an optional `adaptive_search` object to the campaign spec:
 
@@ -110,116 +91,85 @@ Add an optional `adaptive_search` object to the campaign spec:
 ```
 
 The campaign measures every candidate at each initial `rates` entry, then
-increases the common rate while at least one candidate passes every repeat.
-It stops when every candidate fails the latest rate or `max_rate` is reached.
-Every candidate retains the same measured grid and paired arrival seeds.
-There is no binary refinement or inference about rates between measured points.
+increases the common rate while at least one candidate passes every repeat. It
+stops when every candidate fails the latest rate or `max_rate` is reached.
+Every candidate retains the same measured grid and paired arrival seeds. There
+is no binary refinement or inference about rates between measured points.
 
-`target_arrival_duration_s` is optional for ASR and TTS campaigns. It
-increases `corpus_repeats` to supply at least `rate * duration` requests,
-rounded to a whole corpus. This targets the nominal arrival window; Poisson
-arrivals and final draining change actual duration. Repeated inputs are not
-new independent data and may change cache behavior. Omit this setting to
-keep the supplied corpus repetition count at every rate.
+`target_arrival_duration_s` increases `corpus_repeats` to supply at least
+`rate * duration` requests, rounded to a whole corpus. This targets the nominal
+arrival window; Poisson arrivals and final draining change actual duration.
+Repeated inputs are not new independent data and may change cache behavior.
 
-The parent records `adaptive-campaign.json`, `adaptive-search.json` and the
-aggregate recommendation. Each `rate-*` directory is a regular campaign with
-its own complete trial evidence. Resume reuses completed child trials and
-rejects changes to the original inputs, settings or caller-supplied identity.
-Execution errors still stop the run rather than becoming performance failures.
-The parent records the failed rate and child directory in `failure.json`.
-`partial-selection.json`, when present, compares only fully completed common
-rates after an interruption. It is not the final adaptive recommendation.
-Use the root `selection.json` for the completed search; child selections
-describe only their individual rate. Changing `max_rate` starts a new campaign
-identity, since a capped final rate also changes the tested grid.
-These are deployment-level observations, not GPU-group calibration: a failed
-SLO point is not a mathematical upper bound on GPU capacity, and a passing
-maximum rate leaves the boundary unmeasured.
+Each `rate-*` directory is a regular campaign with its own trial evidence. The
+parent records `adaptive-campaign.json`, `adaptive-search.json` with the stop
+reason, and the aggregate `selection.json`. Execution errors stop the run
+rather than becoming performance failures. A failed SLO point is
+not a mathematical upper bound on capacity, and a passing maximum rate leaves
+the boundary unmeasured.
 
-## Keep warmup inputs separate
+### Resume an interrupted campaign
 
-A campaign can set `trial_options.warmup_sample` to a sample object with
-`sample_id`, `ref_text`, `ref_audio`, and `target_text`, just like a measured
-sample. The runner repeats this separate input for the configured `warmup`
-count before timing starts. If omitted, it retains the existing first-sample
-warmup behavior. A zero count disables warmup in either case.
+Set `run_identity` in the original spec to a fixed identifier for the source
+revision, runtime image, GPU hardware and model snapshots. The caller must
+verify those resources still match when admitting the next run; this string
+does not discover or verify the environment. Then resume with:
 
-For new-audio ASR comparisons, choose a warmup waveform outside the measured
-set: Whisper caches encoder outputs by the decoded waveform fingerprint, so
-different filenames alone do not establish different inputs. Record that
-choice before measuring. The option does not guarantee coverage of all batch
-shapes or cold caches for shared text prefixes.
+```bash
+sgl-omni autotune run --spec campaign.json --output campaign-results --resume
+```
 
-Warmup results are excluded from request records, quality evaluation and the
-SLO denominator. Campaign input identity includes the separate sample and its
-local audio hash, so changing it prevents resuming the old campaign. Trial and
-workload metadata retain the supplied sample; old specs are not populated with
-a new default field.
+Resume compares the recorded campaign identity and skips trials already listed
+in `completed-trials.json`, which is replaced atomically after each completed
+trial. An unfinished cell reruns in a new `-attempt-00001` directory,
+preserving its previous raw files. Partial measurements are never promoted to
+completed evaluations.
 
-For Qwen3-ASR repeated-audio measurements, setting
-`asr.factory.pre_lm_cache_size_bytes: 0` disables storage of completed encoder
-results while preserving the encoder worker and batching. In-flight requests
-with the same audio fingerprint can still share one encoding. This setting
-does not disable radix KV reuse or preprocessing caches. Record those policies
-and actual reuse counts separately; changing request IDs does not change audio
-fingerprints. Disabling result storage also avoids cache-write costs, so its
-capacity is specific to that configuration, not a guaranteed production bound.
+### Workload options
 
-ASR and TTS campaigns can set `trial_options.corpus_repeats` to a positive integer
-(default `1`) to send the supplied corpus in order that many times. Repeated
-requests receive unique IDs; `workload.json` records their original sample IDs
-in `request_sources`. ASR responses use their original reference transcripts;
-TTS outputs use their original target texts, including deferred batch quality.
-Each generated output retains its own quality verdict. Warmup stays separate.
-This increases request count, not distinct input count,
-and does not clear caches. At rate `r`, `N` samples repeated `k` times provide
-an expected offered interval of approximately `N*k/r` seconds; Poisson arrivals
-and draining change the actual duration. Report measured time and queue behavior
-before interpreting the result as sustained capacity. Changing this option
-changes campaign input identity and prevents resuming an incompatible run.
+`trial_options` contains the single-trial fields below except `config_path`,
+`rate`, and `arrival_seed`.
 
-## Explore MPS client limits
+`warmup_sample` is a separate sample object repeated for the configured
+`warmup` count before timing starts; omitting it keeps the existing
+first-sample warmup, and a zero count disables warmup. For new-audio ASR
+comparisons, choose a warmup waveform outside the measured set. Warmup results
+are excluded from request records, quality evaluation and the SLO denominator.
+
+`corpus_repeats` (default `1`) sends the supplied corpus in order that many
+times. Repeated requests receive unique IDs; `workload.json` records their
+original sample IDs in `request_sources`. This increases request count, not
+distinct input count, and does not clear caches.
+
+For Qwen3-ASR repeated-audio measurements, `asr.factory.pre_lm_cache_size_bytes: 0`
+disables storage of completed encoder results while preserving the encoder
+worker and batching. In-flight requests with the same audio fingerprint can
+still share one encoding, and this does not disable radix KV reuse or
+preprocessing caches.
+
+### Explore MPS client limits
 
 `examples/configs/restage_qwen3_tts_mps_search.json` uses the existing native
 MPS runtime and stage environment defaults. It puts preprocessing, the TTS
 engine and vocoder in separate processes, and compares MPS off, MPS on at
 100/100, and client percentages of 50/50, 75/25 and 25/75. Keeping an uncapped
 MPS-on control separates MPS scheduling effects from the effect of caps.
-Also include the shipped configuration as the campaign baseline.
 
 The example sets both `tts_engine.gpu_memory_fraction` and
-`tts_engine.engine.mem_fraction_static` to 0.4. The former declares a placement
-budget; the current Qwen3-TTS factory does not consume that value as an engine
-allocation setting. The latter reaches SGLang through `server_args_overrides`.
-Without it, the engine can retain its 0.85 default despite a smaller declared
-stage budget. These settings are not hard memory isolation; verify actual
-allocation before treating colocated candidates as feasible.
-
-These values are experimental choices, not measured recommendations.
-`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` limits the available client execution
-resources; it does not reserve an exclusive SM partition. Native MPS currently
-supports non-TP processes on one physical GPU each. Stages sharing a process
-share its client limit; different limits require separate processes.
+`tts_engine.engine.mem_fraction_static`. The former declares a placement
+budget; the latter reaches SGLang through `server_args_overrides`, which
+otherwise keeps its 0.85 default. These settings are not hard memory
+isolation; verify actual allocation before treating colocated candidates as
+feasible.
 
 Use `mps=on` for capped trials: auto mode can leave single-client GPUs without
 MPS. Stage env values are defaults, so remove an inherited
-`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` when testing these choices. Keep daemon
-limits and per-context partition settings fixed across comparisons, and
-record them. Actual MPS attachment and the SM count visible to each CUDA
-worker/context must be verified on the target stack before accepting a
-capped result. The CPU contract test proves configuration-to-child-environment
-propagation only. Green Context and exclusive SM partitioning remain separate
-runtime work. See the [NVIDIA MPS environment reference](https://docs.nvidia.com/deploy/mps/appendix-environment-variables.html).
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` when testing these choices.
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` limits available client execution
+resources; it does not reserve an exclusive SM partition. Keep daemon limits
+and per-context partition settings fixed across comparisons, and record them.
 
-Profiled Whisper pre-LM execution records include worker-side device properties:
-the visible device index, device-reported SM count, and requested MPS percentage.
-Property-query failures remain diagnostic metadata. These potentially cached
-device properties do not prove context affinity or MPS attachment; correlate
-them with stage construction provenance and the daemon's client list. The
-default unprofiled encoder path does not query these properties.
-
-## Measure a TTS candidate
+## Measure a single TTS or Omni trial
 
 After allocating the visible GPUs, run one candidate with a JSON trial spec:
 
@@ -230,193 +180,42 @@ python -m benchmarks.benchmarker.restage_tts --spec trial.json --output trial-re
 The spec supplies `config_path`, `model_path`, `asr_config_path`,
 `asr_model_path`, `port`, `rate`, `lang`, `max_wer`, `slo`, and `samples`.
 Each sample has `sample_id`, `ref_text`, `ref_audio`, and `target_text`.
-Use unique sample IDs, immutable checkpoint paths and a fixed evaluation
-dataset. Config paths are relative to the spec; audio paths should be absolute.
+Config paths are relative to the spec; audio paths should be absolute.
 Optional `sender_options` are the existing TTS sender options, such as
-`stream`, `voice`, `task_type`, and `no_ref_audio`. Set them for the checkpoint's
-supported task. `warmup` defaults to one request.
+`stream`, `voice`, `task_type`, and `no_ref_audio`. `warmup` defaults to one
+request.
 
 The trial launches TTS, records an open-loop arrival cohort, stops TTS, then
-launches the configured ASR model on the same allocated devices and port.
-ASR does not run during the timed TTS cohort. Both services clean up only
-their own process group. The caller must ensure the GPU allocation remains
-available throughout the trial; this command is not an allocation manager.
+launches the configured ASR model on the same allocated devices and port. ASR
+does not run during the timed TTS cohort, and both services clean up only their
+own process group. The caller must keep the GPU allocation available throughout
+the trial.
 
-Outputs include the workload and sender settings, incrementally saved raw request records,
-service logs, the ASR quality protocol, per-request audio/WER evidence and
-joint SLO results. Missing or failed transcription is not quality success.
-WER measures transcript agreement; speaker similarity and perceptual quality
-require separate evaluation. A single trial does not establish a best topology
-or the maximum sustainable arrival rate.
+Outputs include the workload and sender settings, incrementally saved raw
+request records, service logs, the ASR quality protocol, per-request audio/WER
+evidence and joint SLO results. Missing or failed transcription is not quality
+success. WER measures transcript agreement; speaker similarity and perceptual
+quality require separate evaluation.
 
-The low-level `measure_trial` API returns a `TrialMeasurement` after stopping
-the measured service and records `status: awaiting_quality`. `evaluate_trial`
-then runs the supplied quality callback and writes the joint evaluation;
-quality failure preserves the original timings and request records. A
-measurement may be finalized only once. The existing `execute_trial` API
-composes both phases, so the TTS/ASR commands keep their current lifecycle.
-Pending measurements are not completed quality evaluations. Batch campaigns
-can restore a generation receipt into a new quality attempt with
-`restore_measurement`; see the batched-quality section below.
+For an Omni model's read-aloud workload, set `api` to `chat` in the trial spec
+or campaign `trial_options`. This reuses the existing Omni SeedTTS sender at
+`/v1/chat/completions` with its required `sender_options`: `voice_clone`,
+`speaker`, `max_tokens`, `temperature`, and `stream` (`system_prompt` is
+optional). The audio must agree with the full `target_text` under the same WER
+check. This covers speech generation through the chat API, not arbitrary
+multimodal conversation. The chat sender records first-audio time, per-chunk
+PCM duration and maximum playback underrun for streaming responses.
 
-For an Omni model's read-aloud workload, set `api` to `chat` in the TTS
-trial spec (or campaign `trial_options`). This reuses the existing Omni
-SeedTTS sender at `/v1/chat/completions`. Supply its required `sender_options`:
-`voice_clone`, `speaker`, `max_tokens`, `temperature`, and `stream`;
-`system_prompt` is optional. Choose these for the checkpoint and workload.
-For example, Ming may need a read-aloud system prompt to avoid chat responses.
-The audio must agree with the full `target_text` under the same WER check.
+The default `api` is `speech`, preserving `/v1/audio/speech` trials. For either
+API, `max_ttfa_s` and `max_underrun_s` require `sender_options.stream=true`,
+because non-streaming responses provide no first-audio timestamp. Fewer than
+two chunks leaves continuity unmeasured; such a request does not pass an
+explicit playback constraint.
 
-This covers speech generation through the chat API, not arbitrary multimodal
-conversation or image/video understanding. The chat sender records first-audio
-time, per-chunk PCM duration and maximum playback underrun for streaming
-responses. The default `api`
-is `speech`, preserving `/v1/audio/speech` trials.
-For either API, `max_ttfa_s` requires `sender_options.stream=true` because
-non-streaming responses do not provide a first-audio timestamp.
-`max_underrun_s` also requires streaming. As with the existing speech sender,
-fewer than two chunks leaves continuity unmeasured; such a request does not
-pass an explicit playback constraint. Playback starts at the first chunk,
-without an additional client buffering allowance.
+## ASR campaigns
 
-Omni speech request records also include `server_request_id`, the unique ID
-sent through the chat API and used by server request profiling. It differs
-from the dataset `request_id`: repeated samples and warmup calls get distinct
-server IDs. Use it to join raw request events to the measured workload when
-profiling is enabled. This does not itself enable profiling or turn stage
-residence time into isolated service time. The `/v1/audio/speech` sender
-records the same field from the server's `X-Request-ID` response header for
-both streaming and non-streaming audio. Older servers without that header
-leave it unset. The ASR sender also records this header for streaming and
-non-streaming transcriptions. Chunked transcriptions return the parent request
-ID; their chunk and retry event IDs are joined to that parent. Error responses
-may lack this header; those requests remain in the report without correlated events.
-
-Set `profile=true` in a TTS or ASR trial or its campaign `trial_options` to collect
-the existing JSONL request profiler alongside serving. This starts before
-warmup and stops after the measured cohort; the report joins only measured
-server IDs. The owned service stops before `profile-report.json` is built,
-so raw files can be flushed. `request-events/` retains the original events.
-The report selects this run and pairs stage intervals within each request ID and PID,
-preserving separate worker timelines and requests without correlated events.
-ASR child intervals retain their own IDs, so overlapping chunks and retries
-are not paired with one another or collapsed into a single service duration.
-
-`recorder_coverage` compares recorder joins against the launched process/stage
-inventory, including colocated stages and TP ranks. Separate `lifecycle_*.jsonl`
-files record host/process identity, wall and monotonic timestamps, joins, write
-failures and the observed close outcome. Event counts use session byte offsets
-because request files append across runs. A missing close is `unobserved`;
-`clean` describes flush/close calls, not complete instrumentation. Writer counts,
-parsed records and damaged lines are reported separately. GPU indices are runtime
-metadata, not proof of physical device binding. Older runs without an inventory
-report it as unavailable. Identical inventory snapshots are combined; different
-snapshots for the same run are labeled ambiguous. Each worker lists its observed
-sessions so restarts remain visible. Use a distinct run ID for each trial.
-
-Pre-LM encoder workers also write `work_units_*.jsonl`. Each execution attempt
-has a batch ID, retry index, component/PID identity, input feature shapes and
-available audio fingerprints/token counts. The host envelope starts after the
-begin record and ends before future callbacks; it includes the model's existing
-synchronization and cache paths, with no added CUDA synchronization. Failed batch
-attempts and single-item retries remain separate. Recovery hooks between attempts
-are outside these envelopes. A stop during execution leaves an unmatched begin;
-its completion cannot enter a later session, even with the same run ID.
-
-The `work_units` report retains unfinished attempts and recording errors without
-creating request IDs. Cache hits and merged followers bypass this worker, so
-these records are not request coverage. Feature shapes describe the submitted
-items, not confirmed physical GPU work. Whisper's pre-LM path additionally records
-`executions`: the concatenated input shape, selected CUDA graph bucket, eager or
-graph path, and host-returned or raised outcome. A graph failure and subsequent
-eager fallback remain separate observations. `input_copy`, `replay` and
-`output_clone` identify where a graph attempt raised. Host return does not prove
-GPU completion; asynchronous errors can surface at the worker's later barrier.
-Missing or empty executions mean unobserved, not eager execution. Other models
-and the non-pre-LM forward path do not provide these observations. Component
-identity is not an inferred stage mapping. Isolated replay, execution shape
-capture for other models and held-out validation remain necessary before fitting
-stage laws.
-Services created synchronously inside a stage factory also retain `constructed_in`
-with the stage name, TP role/rank/size, local GPU ID and placement GPU ID. This is
-construction provenance, not proof of exclusive ownership or physical CUDA
-context binding. Services created outside that thread's factory scope, including
-lazy or separate-thread construction, retain `null`; no PID-based guess is made.
-The report uses compact unit rows; member details remain in the JSONL. Existing
-aggregate `encoder_time_s` statistics include recording overhead when profiling
-is enabled and are not substituted for these per-execution intervals.
-
-This is diagnostic collection, not an isolated calibration or a readiness
-acknowledgement from every worker. Event pairs do not prove complete stage
-coverage or GPU service time; the report explicitly leaves `calibration_ready`
-false. Omni, audio-speech and ASR requests support per-request reports when server
-IDs are available. Profiling overhead may affect performance:
-keep the same setting across comparisons and validate final capacity without
-profiling. The default is off.
-
-To compare explicit candidates, use:
-
-```bash
-sgl-omni autotune run --spec campaign.json --output campaign-results
-```
-
-The campaign spec contains `configs` (candidate key to YAML path), `baseline`
-(one of those keys), `rates`, `repeats`, `arrival_seed`, and `trial_options`.
-`trial_options` contains the single-trial fields above except `config_path`,
-`rate`, and `arrival_seed`. All candidates share those options. Each repeat
-uses the same seeded arrival sequence across candidates. Configurations are
-copied into the results directory before measurement; use absolute model
-paths so the copies resolve the same checkpoint.
-
-`selection.json` ranks candidates by the highest prefix of the tested rate grid
-that passed every repeat, then median goodput at that prefix endpoint.
-An isolated passing point above a failed lower rate remains visible as
-`best_tested_rate`, but does not raise the `passing_prefix_rate` used for ranking. Exact ties retain the
-baseline. It records comparison with the baseline, nonmonotonic observations
-and whether the highest tested rate still passed. `recommended.yaml` is
-written only when a candidate has a passing rate. These are empirical
-comparisons within the measured space, not confidence bounds or global
-optimality claims. Failed trial execution stops the campaign and records
-`failure.json`; it is not silently converted into a low performance score.
-
-The current campaign measures candidates sequentially and retains its order
-in the trial log. It does not yet randomize/interleave candidate order or
-reuse a serving process across load points. Prediction-based pruning and
-held-out calibration validation remain separate work.
-
-### Resume an interrupted campaign
-
-Set `run_identity` in the original spec to a fixed identifier for the source
-revision, runtime image, GPU hardware and model/remote-asset snapshots. The
-caller must verify those resources still match when admitting the next run;
-this string does not discover or verify the environment automatically.
-Keep input assets immutable during measurement. Then resume with:
-
-```bash
-sgl-omni autotune run --spec campaign.json --output campaign-results --resume
-```
-
-Resume compares the recorded identity, complete trial options, workload/SLO,
-candidate contents and saved candidate snapshots, local reference-audio
-hashes, and quality-config contents. A mismatch stops before any trial is
-launched. Campaigns created without an identity cannot be resumed by adding
-one afterward. Only one process may write a results directory at a time.
-
-`completed-trials.json` is replaced atomically after each completed trial;
-resume skips those cells and rebuilds `trials.jsonl` from that checkpoint.
-The checkpoint includes completed but infeasible evaluations. An unfinished
-cell uses a new `-attempt-00001` directory, preserving its previous raw files.
-Batch TTS campaigns can reuse its finalized generation receipt; other unfinished
-cells rerun generation. A trial that finished but was interrupted before checkpointing may be
-rerun; partial measurements are never promoted to completed evaluations.
-Each failed attempt retains `execution-failure.json`. The top-level
-`failure.json` retains the last execution failure as history even after a
-later successful resume produces `selection.json`.
-
-### ASR campaigns
-
-Use the same campaign command with `"task": "asr"` in the spec (`tts` is
-the default). ASR `trial_options` supplies `model_path`, `port`, `lang`,
+Use the same campaign command with `"task": "asr"` in the spec (`tts` is the
+default). ASR `trial_options` supplies `model_path`, `port`, `lang`,
 `max_wer`, `samples`, and `slo`; optional fields include `stream`, `warmup`
 and the startup/request timeouts. It does not need `asr_config_path` or a
 second quality model. Each sample's `ref_audio` is the input clip and
@@ -424,93 +223,30 @@ second quality model. Each sample's `ref_audio` is the input clip and
 
 For example, an ASR SLO can use `{"max_latency_s": 5, "max_rtf": 1,
 "min_good_fraction": 0.99}`. Choose thresholds for the intended workload;
-these example values are not validated model limits. Per-request WER must
-also meet `max_wer`. Failed requests remain failed even if their text matches.
+these example values are not validated model limits. Per-request WER must also
+meet `max_wer`. Failed requests remain failed even if their text matches.
 Scoring uses the existing ASR normalizer and preserves normalized transcripts
 and edit counts in `quality-detail.json`.
 
 ASR supports latency and RTF constraints. Audio TTFA and playback-underrun
-constraints are rejected because the response is text. Streaming text TTFT
-is recorded by the sender but is not yet a selection constraint. This adapter
-has CPU contract coverage; real-model ASR candidate measurements remain pending.
+constraints are rejected because the response is text. Streaming text TTFT is
+recorded by the sender but is not yet a selection constraint.
 
-## Source method and remaining work
+## Installed command
 
-This integration follows `yl3469/sglang-omni` branch
-`lisa/restage-planner-polish` at
-`ca4c87ab93ad68d63320b4b199308c7364cb8b0e`: the workload law, fixed-budget
-enumeration, process replication and provenance distinction are inherited
-from that work. Runtime configuration uses current SGLang-Omni process and
-placement compilation.
+The wheel includes the shared `benchmarks` package used by Restage, so both
+subcommands are available after installing SGLang-Omni and preparing the model
+assets. Local reference-audio and configuration paths are resolved relative to
+the spec; model identifiers and supported HTTP/data/file media references
+remain unchanged. Required local audio and ASR configuration files are checked
+before launching a model. Hardware admission remains the caller's
+responsibility.
 
-Historical service-law constants retain their original hardware and stack
-labels. They are not calibration for a new system. Per-process capacity,
-sharing interference, SLO-constrained measurements, SM binding and model
-coverage remain necessary before recommending a topology.
+## Source method
 
-
-## Fit isolated service measurements
-
-`fit_service_law` in `calibration.py` fits the inherited four-term service
-model using nonnegative least squares. Supply accepted isolated measurements
-with request IDs, context tokens, audio seconds and service seconds. The
-context and duration probes must identify all four terms; constant or
-confounded workloads are rejected. Supply independent validation requests to
-retain per-request predictions and a held-out error separate from fit error.
-The returned dataclass can be serialized with `dataclasses.asdict`.
-
-The caller supplies provenance and separately measured stall parameters.
-This API does not collect model measurements, verify provenance against a
-running server or infer saturated serving capacity from serial latency.
-Those integrations remain necessary before prediction can rank new-hardware
-placements.
-
-### Batched TTS quality evaluation
-
-A campaign spec may set `"batch_quality": true` for TTS or Omni speech trials.
-For each candidate, generation still starts and stops an independent service
-for every rate/repeat. After those measurements finish, one ASR service evaluates
-the saved audio sequentially across the pending trials. Generation cache policy
-is unchanged; ASR remains warm across quality batches, and its timing is excluded
-from the measured serving results. This mode changes evaluator lifecycle and is
-recorded in campaign identity, so resume cannot mix it with the default mode.
-
-Every completed quality decision is checkpointed immediately, including rejected
-trials. A later quality error preserves those decisions and the remaining raw
-measurements. Resume reuses completed evaluations. In batch mode, it also restores saved
-generation for pending or failed quality cells into fresh quality-attempt
-directories, without launching generation again. The campaign checks the saved
-measurement receipt, requests and audio hashes first. Original attempts remain
-unchanged. Missing/corrupt saved evidence stops restoration instead of silently
-substituting new measurements. The shared ASR
-log is `asr-batch-server.log` in the first pending trial directory, while each
-trial retains its own quality protocol, transcript details and result. This
-reduces ASR launches per candidate; it does not yet reuse generation services.
-
-Generation receipts (`measurement.json`) are written only after the generation
-service and profiler finish. Batch campaigns record these in `measured-trials.json`
-separately from completed quality evaluations. Interrupted generation has no
-receipt and runs again; a process interruption before the campaign checkpoints a
-new receipt can also require regeneration. Earlier campaigns without saved
-measurement checkpoints retain completed-only recovery. Receipt creation hashes
-saved audio after the measured serving window; this overhead is not serving time.
-
-### Installed measured-search command
-
-The wheel includes the shared `benchmarks` package used by Restage. Run an
-explicit campaign after installing SGLang-Omni and preparing the model assets:
-
-```bash
-sgl-omni autotune run --spec campaign.json --output results
-sgl-omni autotune run --spec campaign.json --output results --resume
-```
-
-The command uses the same campaign executor as the source module entry point.
-Local reference-audio and configuration paths are resolved relative to the spec;
-model identifiers and supported HTTP/data/file media references remain unchanged.
-Required local audio and ASR configuration files are checked before launching a
-model. Unused reference audio does not require a local file. URI contents are
-not fetched or hashed by the CLI; their identity remains the caller's responsibility. `--resume` requires the same recorded run
-identity and inputs. Hardware admission remains the caller's responsibility.
-A wheel/CLI test without model execution verifies packaging and dispatch only;
-it does not establish GPU support, quality, capacity or a best topology.
+This integration follows `yl3469/sglang-omni` branch `lisa/restage-planner-polish`
+at `ca4c87ab93ad68d63320b4b199308c7364cb8b0e`: the fixed-budget enumeration,
+process replication and provenance distinction are inherited from that work.
+Runtime configuration uses current SGLang-Omni process and placement
+compilation. Per-process capacity prediction, sharing interference and
+SM binding remain outside this integration.

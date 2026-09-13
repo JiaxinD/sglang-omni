@@ -1,4 +1,4 @@
-"""Shared-grid adaptive deployment measurements, separate from GPU calibration."""
+"""Grow the measured load grid while any candidate still meets its SLO."""
 
 import hashlib
 import json
@@ -34,15 +34,12 @@ async def execute_adaptive_campaign(
     task,
     run_identity,
     resume,
-    batch_quality,
-    plan_evidence,
     adaptive_search,
 ):
     # Use the existing campaign for every common rate, including its checkpoints,
-    # quality gates and failure handling. The parent lock is held by the caller.
+    # quality gates and failure handling.
     from benchmarks.benchmarker.restage_campaign import (
         _atomic_write,
-        _file_hash,
         _input_identity,
         execute_campaign,
     )
@@ -82,8 +79,6 @@ async def execute_adaptive_campaign(
         arrival_seed=arrival_seed,
         adaptive_search=settings.model_dump(),
         trial_inputs=_input_identity(trial_options),
-        batch_quality=batch_quality,
-        plan_evidence=plan_evidence,
         configs={
             name: dict(
                 file=snapshots[name].name, sha256=hashlib.sha256(data).hexdigest()
@@ -95,9 +90,6 @@ async def execute_adaptive_campaign(
     if resume:
         if json.loads(manifest.read_text(encoding="utf-8")) != identity:
             raise ValueError("Adaptive campaign identity differs from the recorded run")
-        for name, path in snapshots.items():
-            if _file_hash(path) != identity["configs"][name]["sha256"]:
-                raise ValueError(f"Candidate snapshot changed: {name}")
     else:
         destination.mkdir(parents=True, exist_ok=False)
         for name, path in snapshots.items():
@@ -127,8 +119,6 @@ async def execute_adaptive_campaign(
                 task=task,
                 run_identity=run_identity,
                 resume=child.exists(),
-                batch_quality=batch_quality,
-                plan_evidence=plan_evidence,
             )
         except BaseException as exc:
             _atomic_write(
@@ -149,20 +139,10 @@ async def execute_adaptive_campaign(
                         rates=grid[:index],
                         stop_reason="trial_failure",
                         failed_rate=rate,
-                        gpu_group_calibration=False,
                     ),
                     indent=2,
                 ),
             )
-            if results:
-                partial = asdict(select_candidate(results, baseline=baseline))
-                partial["scope"] = (
-                    "Partial comparison at completed common rates; adaptive search interrupted"
-                )
-                _atomic_write(
-                    destination / "partial-selection.json",
-                    json.dumps(partial, indent=2),
-                )
             raise
         for row in json.loads(
             (child / "completed-trials.json").read_text(encoding="utf-8")
@@ -182,11 +162,7 @@ async def execute_adaptive_campaign(
         _atomic_write(
             destination / "adaptive-search.json",
             json.dumps(
-                dict(
-                    rates=measured_rates,
-                    stop_reason="running",
-                    gpu_group_calibration=False,
-                ),
+                dict(rates=measured_rates, stop_reason="running"),
                 indent=2,
             ),
         )
@@ -220,8 +196,7 @@ async def execute_adaptive_campaign(
             dict(
                 rates=measured_rates,
                 stop_reason=stop_reason,
-                gpu_group_calibration=False,
-                scope="Finite shared-grid deployment observations; failures are not mathematical capacity upper bounds",
+                scope="Finite shared-grid deployment observations; failures are not capacity upper bounds",
             ),
             indent=2,
         ),

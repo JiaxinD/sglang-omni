@@ -116,8 +116,6 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         cache_max_bytes: int = _CACHE_MAX_BYTES,
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 0,
-        capture_directory: str | None = None,
-        capture_max_batches: int = 16,
     ) -> None:
         self._model = model
         reference = next(model.audio_tower.parameters())
@@ -153,23 +151,6 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         self._queue_wait_total_s = 0.0
         self._queue_wait_max_s = 0.0
         self._encoder_time_s = 0.0
-        self._capture = None
-        if capture_directory is not None:
-            import uuid
-            from pathlib import Path
-
-            from sglang_omni.profiler.qwen_encoder_replay import QwenEncoderCapture
-
-            self._capture = QwenEncoderCapture(
-                Path(capture_directory) / uuid.uuid4().hex,
-                max_batches=capture_max_batches,
-                metadata={
-                    "cache_namespace": cache_namespace,
-                    "device": str(self._device),
-                    "dtype": str(self._dtype),
-                    "scope": "calibration capture; timings include snapshot overhead",
-                },
-            )
         super().__init__(worker_name="qwen3-asr-audio-encode")
 
     def close(self) -> None:
@@ -180,8 +161,6 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             self._closed = True
             self._queue.put(_SHUTDOWN)
         self._thread.join(timeout=5)
-        if not self._thread.is_alive() and self._capture is not None:
-            self._capture.close()
         logger.info(
             "Qwen3-ASR pre-LM encoder shutdown: worker_stopped=%s stats=%s",
             not self._thread.is_alive(),
@@ -365,14 +344,6 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
                 "cache_entries": len(self._cache),
                 "cache_bytes": self._cache.current_bytes,
                 "cache_evictions": self._cache.eviction_count,
-                **(
-                    {
-                        "capture_saved_batches": self._capture.saved,
-                        "capture_failed": self._capture.failed,
-                    }
-                    if self._capture is not None
-                    else {}
-                ),
             }
 
     def _cache_key(self, item: Any) -> str | None:
@@ -449,34 +420,8 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
                 with device_stream_context(self._stream):
                     yield
 
-    def calibration_capture_metadata(self) -> dict | None:
-        if self._capture is None:
-            return None
-        return {
-            "session": str(self._capture.directory),
-            "affects_timing_and_batching": True,
-        }
-
     def encode_batch(self, items: list[Any]) -> torch.Tensor:
-        capture = self._capture
-        if capture is None or capture.failed or capture.saved >= capture.max_batches:
-            return self._model.get_audio_feature(items)
-        from sglang_omni.profiler.work_units import (
-            collect_execution_observations,
-            current_execution_observations,
-        )
-
-        observations = current_execution_observations()
-        context = (
-            collect_execution_observations()
-            if observations is None
-            else contextlib.nullcontext(observations)
-        )
-        with context as observations:
-            first = len(observations)
-            output = self._model.get_audio_feature(items)
-            capture.record(items, output, executions=observations[first:])
-        return output
+        return self._model.get_audio_feature(items)
 
     def split_embeddings(
         self,

@@ -794,7 +794,6 @@ class VoiceCloneOmni:
         chunk_times_out: list[float] | None = None,
         text_first_time_holder: list[float] | None = None,
         chunk_durations_out: list[float] | None = None,
-        request_id: str | None = None,
     ) -> tuple[bytes, float, dict]:
         if max_tokens is None:
             max_tokens = self.THINKER_MAX_NEW_TOKENS
@@ -836,9 +835,6 @@ class VoiceCloneOmni:
         }
         if voice_clone:
             payload["audios"] = [sample.ref_audio]
-
-        if request_id is not None:
-            payload["request_id"] = request_id
 
         t0 = time.perf_counter()
         async with session.post(api_url, json=payload) as response:
@@ -1317,7 +1313,6 @@ def make_tts_send_fn(
         start_time = time.perf_counter()
         try:
             async with session.post(api_url, json=payload) as response:
-                result.server_request_id = response.headers.get("X-Request-ID")
                 if response.status != 200:
                     result.error = f"HTTP {response.status}: {await response.text()}"
                 elif stream:

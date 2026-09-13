@@ -14,11 +14,10 @@ from sglang_omni.restage.evaluation import SLO
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("batch_quality", [False, True])
 @pytest.mark.parametrize("api", ["speech", "chat"])
 @pytest.mark.parametrize("adaptive", [False, True])
 async def test_repeated_tts_outputs_keep_independent_quality(
-    tmp_path, monkeypatch, batch_quality, api, adaptive
+    tmp_path, monkeypatch, api, adaptive
 ):
     @contextmanager
     def server(**kwargs):
@@ -65,7 +64,6 @@ async def test_repeated_tts_outputs_keep_independent_quality(
         repeats=1,
         arrival_seed=42,
         destination=output,
-        batch_quality=batch_quality,
         adaptive_search=(
             {"max_rate": 100, "target_arrival_duration_s": 0.04} if adaptive else None
         ),

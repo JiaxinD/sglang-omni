@@ -149,31 +149,6 @@ async def test_dispatch_failure_cancels_remaining_requests_before_return():
 
 
 @pytest.mark.asyncio
-async def test_early_timer_wakeup_does_not_send_before_scheduled_time(monkeypatch):
-    clock = [100.0]
-    early = [True]
-    real_sleep = asyncio.sleep
-
-    async def sleep(delay):
-        clock[0] += delay / 2 if early[0] else delay
-        early[0] = False
-        await real_sleep(0)
-
-    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-    monkeypatch.setattr(np.random, "exponential", lambda scale: 1.0)
-
-    async def send(session, sample):
-        return RequestResult(request_id=sample, is_success=True)
-
-    runner = BenchmarkRunner(
-        RunConfig(max_concurrency=0, request_rate=1, warmup=0, disable_tqdm=True)
-    )
-    result = (await runner._dispatch(None, ["a"], send))[0]
-    assert result.dispatched_s >= result.scheduled_s
-
-
-@pytest.mark.asyncio
 async def test_seeded_arrivals_repeat_independently_of_sender_randomness():
     async def send(session, sample):
         np.random.exponential(size=17)

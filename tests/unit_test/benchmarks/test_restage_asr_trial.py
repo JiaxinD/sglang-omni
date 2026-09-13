@@ -9,54 +9,6 @@ from sglang_omni.restage.evaluation import SLO
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_asr_sender_records_server_request_id(tmp_path, stream):
-    import wave
-
-    from benchmarks.tasks.asr import make_asr_send_fn
-
-    audio = tmp_path / "sample.wav"
-    with wave.open(str(audio), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(b"\0\0" * 16000)
-
-    class Response:
-        status = 200
-        headers = {"X-Request-ID": "transcription-measured"}
-
-        @property
-        def content(self):
-            async def chunks():
-                yield b'data: {"type":"transcript.text.done","text":"hello"}\n'
-                yield b"data: [DONE]\n"
-
-            return chunks()
-
-        async def json(self):
-            return {"text": "hello"}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            pass
-
-    class Session:
-        def post(self, *args, **kwargs):
-            return Response()
-
-    result = await make_asr_send_fn("asr", "http://localhost/asr", stream=stream)(
-        Session(), SampleInput("sample", "hello", str(audio), "")
-    )
-    assert result.is_success
-    assert result.text == "hello"
-    assert result.request_id == "sample"
-    assert result.server_request_id == "transcription-measured"
-
-
-@pytest.mark.asyncio
 async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
     tmp_path, monkeypatch
 ):
@@ -64,7 +16,6 @@ async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
 
     async def trial(**kwargs):
         assert kwargs["warmup_sample"] is warmup
-        assert kwargs["profile"] is True
         kwargs["destination"].mkdir()
         kwargs["send_factory"]("http://localhost:18000", tmp_path)
         return await kwargs["quality"](
@@ -98,7 +49,6 @@ async def test_asr_scores_reference_audio_transcript_and_preserves_failures(
         port=18000,
         lang="en",
         max_wer=0.2,
-        profile=True,
         warmup_sample=warmup,
     )
     assert result == {"a": True, "b": False, "c": False}

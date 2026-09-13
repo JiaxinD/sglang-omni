@@ -31,4 +31,3 @@ class RequestResult:
     dispatched_s: float | None = None
     completed_s: float | None = None
     first_audio_s: float | None = None
-    server_request_id: str | None = None

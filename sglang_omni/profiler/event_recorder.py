@@ -2,8 +2,8 @@
 """Request-level event recorder.
 
 Each process appends events to ``<dir>/events_<stage>_<pid>.jsonl``; the
-views layer merges files by ``request_id``. Dependencies stay within the
-profiler package so it can be loaded without importing the serving runtime.
+views layer merges files by ``request_id``. Kept free of sglang-omni
+imports so it can be loaded from any process without circular risk.
 """
 
 from __future__ import annotations
@@ -13,15 +13,11 @@ import functools
 import json
 import logging
 import os
-import socket
 import threading
 import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
-
-from sglang_omni.profiler.work_units import WorkUnitRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +86,6 @@ class RequestEventRecorder:
         self._fp: Any = None
         self._pid: int = os.getpid()
         self._dropped: int = 0
-        self._written: int = 0
-        self._lifecycle_fp: Any = None
-        self._work_units: WorkUnitRecorder | None = None
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -105,17 +98,7 @@ class RequestEventRecorder:
     def active_path(self) -> str | None:
         return None if self._path is None else str(self._path)
 
-    def work_unit_recorder(self) -> WorkUnitRecorder | None:
-        return self._work_units
-
-    def start(
-        self,
-        run_id: str,
-        event_dir: str,
-        stage: str,
-        *,
-        worker: Mapping[str, Any] | None = None,
-    ) -> str:
+    def start(self, run_id: str, event_dir: str, stage: str) -> str:
         """Open (or join) the per-process JSONL file for ``run_id``.
 
         Co-located stages share one file per ``(run_id, pid)``; only a
@@ -126,7 +109,6 @@ class RequestEventRecorder:
                 if self._run_id == run_id:
                     if stage not in self._stages:
                         self._stages.add(stage)
-                        self._lifecycle("join", stage=stage, worker=dict(worker or {}))
                     assert self._path is not None
                     return str(self._path)
                 logger.warning(
@@ -135,7 +117,7 @@ class RequestEventRecorder:
                     self._run_id,
                     run_id,
                 )
-                self._close_unlocked(reason="rotated")
+                self._close_unlocked()
 
             directory = Path(event_dir).expanduser().resolve()
             directory.mkdir(parents=True, exist_ok=True)
@@ -148,40 +130,6 @@ class RequestEventRecorder:
             self._stages = {stage}
             self._path = path
             self._dropped = 0
-            self._written = 0
-            try:
-                self._work_units = WorkUnitRecorder(directory, run_id)
-            except OSError:
-                logger.warning("Failed to open work-unit file", exc_info=True)
-            # Note (Jiaxin Deng): lifecycle records must not become requests in
-            # timeline views. A session id also keeps user run ids out of paths.
-            try:
-                lifecycle_path = (
-                    directory / f"lifecycle_{self._pid}_{uuid.uuid4().hex}.jsonl"
-                )
-                self._lifecycle_fp = lifecycle_path.open(
-                    "x", buffering=1, encoding="utf-8"
-                )
-                try:
-                    boot_id = (
-                        Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-                    )
-                except OSError:
-                    boot_id = None
-                self._lifecycle(
-                    "open",
-                    events_file=path.name,
-                    events_start_bytes=path.stat().st_size,
-                    hostname=socket.gethostname(),
-                    host_boot_id=boot_id,
-                    ppid=os.getppid(),
-                    work_units_file=(
-                        self._work_units.path.name if self._work_units else None
-                    ),
-                )
-                self._lifecycle("join", stage=stage, worker=dict(worker or {}))
-            except OSError:
-                logger.warning("Failed to open recorder lifecycle file", exc_info=True)
             logger.info(
                 "RequestEventRecorder started run_id=%s stage=%s path=%s",
                 run_id,
@@ -190,7 +138,7 @@ class RequestEventRecorder:
             )
             return str(path)
 
-    def stop(self, *, run_id: str | None = None, reason: str = "stop") -> str | None:
+    def stop(self, *, run_id: str | None = None) -> str | None:
         """Close the active file. ``run_id=None`` stops any active session."""
         with self._lock:
             if self._fp is None:
@@ -207,65 +155,18 @@ class RequestEventRecorder:
                 )
                 return None
             path = str(self._path) if self._path is not None else None
-            self._close_unlocked(reason=reason)
+            self._close_unlocked()
             return path
 
-    def _lifecycle(self, kind: str, **fields: Any) -> None:
-        if self._lifecycle_fp is None:
-            return
-        try:
-            self._lifecycle_fp.write(
-                json.dumps(
-                    {
-                        "kind": kind,
-                        "run_id": self._run_id,
-                        "pid": self._pid,
-                        "wall_ns": time.time_ns(),
-                        "monotonic_ns": time.monotonic_ns(),
-                        **fields,
-                    }
-                )
-                + "\n"
-            )
-        except Exception:
-            logger.warning("Failed to write recorder lifecycle record", exc_info=True)
-
-    def _close_unlocked(self, *, reason: str = "stop") -> None:
-        if self._work_units is not None:
-            self._work_units.close()
-            self._work_units = None
-        errors = []
+    def _close_unlocked(self) -> None:
         if self._fp is not None:
-            # Note (Jiaxin Deng): attempt close even if flush failed; the
-            # sidecar reports these outcomes without asserting event coverage.
-            for operation in (self._fp.flush, self._fp.close):
-                try:
-                    operation()
-                except Exception as exc:
-                    errors.append(f"{type(exc).__name__}: {exc}")
-                    logger.warning(
-                        "RequestEventRecorder failed to close cleanly", exc_info=True
-                    )
-        try:
-            end_bytes = self._path.stat().st_size if self._path else None
-        except OSError:
-            end_bytes = None
-        self._lifecycle(
-            "close",
-            reason=reason,
-            close_ok=not errors,
-            close_error="; ".join(errors) or None,
-            events_written=self._written,
-            write_failures=self._dropped,
-            events_end_bytes=end_bytes,
-            stages_joined=sorted(self._stages),
-        )
-        if self._lifecycle_fp is not None:
             try:
-                self._lifecycle_fp.close()
+                self._fp.flush()
+                self._fp.close()
             except Exception:
-                logger.warning("Failed to close recorder lifecycle file", exc_info=True)
-        self._lifecycle_fp = None
+                logger.warning(
+                    "RequestEventRecorder failed to close cleanly", exc_info=True
+                )
         self._fp = None
         self._run_id = None
         self._stage = None
@@ -305,8 +206,8 @@ class RequestEventRecorder:
                 metadata=dict(metadata) if metadata else {},
             )
             try:
-                fp.write(json.dumps(event.to_dict(), default=_json_default) + "\n")
-                self._written += 1
+                fp.write(json.dumps(event.to_dict(), default=_json_default))
+                fp.write("\n")
             except Exception:
                 self._dropped += 1
                 if self._dropped == 1:

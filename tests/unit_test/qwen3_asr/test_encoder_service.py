@@ -149,75 +149,6 @@ def test_encode_attaches_lm_ready_embedding_and_clears_feature() -> None:
     assert service.stats()["misses"] == 1
 
 
-def test_explicit_calibration_capture_keeps_native_output(tmp_path):
-    import json
-
-    from sglang_omni.profiler.qwen_encoder_replay import QwenEncoderSnapshot
-
-    model = _StubModel()
-    service = Qwen3ASRPreLMEncoderService(
-        model,
-        cache_namespace=_NAMESPACE,
-        capture_directory=str(tmp_path),
-        capture_max_batches=1,
-    )
-    _SERVICES.append(service)
-    first, second = _item(7, 3), _item(8, 2)
-    service.encode_item(first)
-    service.encode_item(second)
-    paths = list(tmp_path.glob("*/batch-*.pt"))
-    assert len(paths) == 1
-    snapshot = QwenEncoderSnapshot.load(paths[0])
-    assert snapshot.metadata["work_unit"]["batch_id"]
-    assert snapshot.metadata["work_unit"]["attempt"] == 0
-    assert snapshot.metadata["work_unit"]["unit_id"] is None
-    assert snapshot.restore_items()[0].model_specific_data["num_audio_tokens"] == 3
-    torch.testing.assert_close(snapshot.output.squeeze(0), first.precomputed_embeddings)
-    assert first.feature is None and second.feature is None
-    assert service.stats()["capture_saved_batches"] == 1
-    assert service.stats()["capture_failed"] is False
-    service.close()
-    assert (
-        json.loads((paths[0].parent / "status.json").read_text())["state"] == "closed"
-    )
-
-
-def test_capture_snapshot_links_native_work_unit(tmp_path):
-    import json
-
-    from sglang_omni.profiler.event_recorder import get_recorder
-    from sglang_omni.profiler.qwen_encoder_replay import QwenEncoderSnapshot
-
-    recorder = get_recorder()
-    recorder.start("native-capture", str(tmp_path), "asr")
-    service = Qwen3ASRPreLMEncoderService(
-        _StubModel(),
-        cache_namespace=_NAMESPACE,
-        capture_directory=str(tmp_path / "capture"),
-        capture_max_batches=1,
-    )
-    _SERVICES.append(service)
-    try:
-        item = _item(19, 3)
-        service.encode_item(item)
-    finally:
-        service.close()
-        recorder.stop()
-    snapshot = QwenEncoderSnapshot.load(next(tmp_path.glob("capture/*/batch-*.pt")))
-    records = [
-        json.loads(line)
-        for path in tmp_path.glob("work_units_*.jsonl")
-        for line in path.read_text().splitlines()
-    ]
-    begin = next(row for row in records if row["kind"] == "begin")
-    assert begin["members"][0]["num_audio_tokens"] == 3
-    assert snapshot.metadata["work_unit"] == {
-        key: begin[key] for key in ("run_id", "unit_id", "batch_id", "attempt")
-    }
-    assert begin["calibration_capture"]["session"] == str(service._capture.directory)
-    assert begin["calibration_capture"]["affects_timing_and_batching"] is True
-
-
 def test_submit_returns_before_encoding_completes() -> None:
     model = _StubModel()
     gate = threading.Event()
@@ -320,43 +251,6 @@ def test_cache_hit_skips_reencode() -> None:
     assert torch.equal(first.precomputed_embeddings, second.precomputed_embeddings)
     assert second.feature is None
     assert service.stats()["hits"] == 1
-
-
-def test_zero_cache_budget_reencodes_completed_requests() -> None:
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRFactoryArgs
-
-    factory = Qwen3ASRFactoryArgs(pre_lm_cache_size_bytes=0)
-    restored = Qwen3ASRFactoryArgs.model_validate_json(factory.model_dump_json())
-    model = _StubModel()
-    service = _make_service(model, cache_max_bytes=restored.pre_lm_cache_size_bytes)
-    first = _item(11, 3)
-    second = _item(11, 3)
-
-    service.encode_item(first)
-    assert service.lookup_cached_embedding(first.audio_fingerprint, 3) is None
-    service.encode_item(second)
-
-    assert model.encode_calls == 2
-    assert torch.equal(first.precomputed_embeddings, second.precomputed_embeddings)
-    assert first.feature is None and second.feature is None
-    assert service.stats()["hits"] == 0
-    assert service.stats()["cache_entries"] == 0
-    assert service.stats()["cache_bytes"] == 0
-
-
-def test_close_reports_stopped_worker_stats_once(caplog) -> None:
-    service = _make_service(cache_max_bytes=0)
-    service.encode_item(_item(11, 3))
-    service.encode_item(_item(11, 3))
-    with caplog.at_level("INFO"):
-        service.close()
-        service.close()
-    records = [r for r in caplog.records if "pre-LM encoder shutdown" in r.message]
-    assert len(records) == 1
-    assert records[0].args[0] is True
-    stats = records[0].args[1]
-    assert stats["items"] == 2
-    assert stats["hits"] == stats["merged"] == stats["cache_bytes"] == 0
 
 
 def test_lookup_cached_embedding_returns_only_valid_entries() -> None:

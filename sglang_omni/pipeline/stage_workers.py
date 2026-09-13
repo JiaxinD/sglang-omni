@@ -515,12 +515,6 @@ def _run_process(
             reason=f"stage process {spec.process_name} failure",
         )
         raise
-    finally:
-        # Note (Jiaxin Deng): close only after all colocated stages finish;
-        # a stage-local close would cut off its siblings' final events.
-        from sglang_omni.profiler.event_recorder import get_recorder
-
-        get_recorder().stop(reason="process_exit")
 
 
 def _cleanup_constructed_stages(
@@ -866,7 +860,6 @@ def _construct_scheduler(
 ) -> Any:
     """Build a scheduler, serializing GPU factory work per visible device."""
 
-    from sglang_omni.profiler.work_units import stage_construction_scope
     from sglang_omni.scheduling.stage_kv_budget import stage_kv_cache_budget
 
     _apply_total_reserve_cap(spec, gpu_id, log)
@@ -887,20 +880,10 @@ def _construct_scheduler(
     )
 
     def _invoke() -> Any:
-        with stage_construction_scope(
-            {
-                "stage": spec.stage_name,
-                "role": spec.role,
-                "tp_rank": spec.tp_rank,
-                "tp_size": spec.tp_size,
-                "gpu_id": gpu_id,
-                "placement_gpu_id": spec.placement_gpu_id,
-            }
-        ):
-            if kv_cache_bytes is None:
-                return factory(**factory_args)
-            with stage_kv_cache_budget(spec.stage_name, kv_cache_bytes):
-                return factory(**factory_args)
+        if kv_cache_bytes is None:
+            return factory(**factory_args)
+        with stage_kv_cache_budget(spec.stage_name, kv_cache_bytes):
+            return factory(**factory_args)
 
     if gpu_id is None:
         return _invoke()

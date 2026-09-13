@@ -137,7 +137,6 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from dataclasses import asdict, dataclass
 from functools import partial
 
@@ -266,7 +265,6 @@ def make_send_fn(
     ) -> RequestResult:
         result = RequestResult(
             request_id=sample.sample_id,
-            server_request_id=str(uuid.uuid4()),
             text=sample.target_text[:TEXT_PREVIEW_LENGTH],
         )
         chunk_times: list[float] = []
@@ -288,7 +286,6 @@ def make_send_fn(
                 system_prompt=system_prompt,
                 chunk_times_out=chunk_times if stream else None,
                 chunk_durations_out=chunk_durations if stream else None,
-                request_id=result.server_request_id,
                 text_first_time_holder=text_first_time_holder if stream else None,
             )
             result.audio_duration_s = get_wav_duration(wav_bytes)

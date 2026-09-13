@@ -1341,7 +1341,6 @@ def _register_speech(app: FastAPI) -> None:
 
         headers = {
             "Content-Disposition": f'attachment; filename="speech.{result.format}"',
-            "X-Request-ID": request_id,
         }
         if result.finish_reason is not None:
             # note (Junnan Li): the body is binary audio, so the terminal state
@@ -1571,7 +1570,6 @@ async def _speech_audio_response(
         _body(),
         media_type="audio/pcm",
         headers={
-            "X-Request-ID": request_id,
             "X-Sample-Rate": str(stream_sample_rate),
             "X-Channels": "1",
             "X-Bit-Depth": "16",

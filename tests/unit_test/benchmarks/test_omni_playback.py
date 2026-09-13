@@ -33,7 +33,6 @@ async def test_chat_sender_measures_playback_from_wav_frames(
         }
     )
     now = [10.0]
-    sent_ids = []
     monkeypatch.setattr(benchmark_omni_seedtts.time, "perf_counter", lambda: now[0])
 
     class Response:
@@ -62,7 +61,6 @@ async def test_chat_sender_measures_playback_from_wav_frames(
 
     class Session:
         def post(self, url, **kwargs):
-            sent_ids.append(kwargs["json"]["request_id"])
             return Response()
 
     send = benchmark_omni_seedtts.make_send_fn(
@@ -86,9 +84,3 @@ async def test_chat_sender_measures_playback_from_wav_frames(
         assert result.max_playback_underrun_s == pytest.approx(underrun)
     assert result.audio_chunk_count == len(arrivals)
     assert result.first_audio_s == 10.0
-    assert result.server_request_id == sent_ids[0]
-    now[0] = 10.0
-    repeat = await send(Session(), SampleInput("a", "", "", "hello"))
-    assert repeat.request_id == result.request_id == "a"
-    assert repeat.server_request_id == sent_ids[1]
-    assert repeat.server_request_id != result.server_request_id

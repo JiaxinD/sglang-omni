@@ -10,50 +10,6 @@ from sglang_omni.cli import app
 from sglang_omni.config.manager import ConfigManager
 
 
-def test_plan_capacity_options_export_missing_groups(tmp_path):
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        yaml.safe_dump({"config_cls": "Qwen3ASRPipelineConfig", "model_path": "test"})
-    )
-    space = tmp_path / "space.json"
-    space.write_text(json.dumps({"devices": [0], "replica_counts": [1]}))
-    catalog = tmp_path / "capacity.json"
-    catalog.write_text('{"points": []}')
-    context = tmp_path / "context.json"
-    context.write_text(
-        json.dumps(
-            {
-                "model_revision": "test",
-                "hardware": "test",
-                "stack": "test",
-                "workload": "test",
-            }
-        )
-    )
-    output = tmp_path / "output"
-    result = CliRunner().invoke(
-        app,
-        [
-            "autotune",
-            "plan",
-            "--config",
-            str(config),
-            "--search-space",
-            str(space),
-            "--output",
-            str(output),
-            "--capacity-catalog",
-            str(catalog),
-            "--capacity-context",
-            str(context),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    summary = json.loads((output / "summary.json").read_text())
-    assert summary["unranked"] == 1 and summary["predicted"] == 0
-    assert len(json.loads((output / "calibration-requirements.json").read_text())) == 1
-
-
 def test_plan_command_exports_loadable_candidate(tmp_path):
     config = tmp_path / "input.yaml"
     config.write_text(
@@ -238,19 +194,10 @@ def test_run_rejects_invalid_inputs_before_model_execution(
 
 
 @pytest.mark.parametrize(
-    "reference",
-    [
-        "https://example.invalid/audio.wav",
-        "data:audio/wav;base64," + "AAAA" * 3000,
-        "file:///reference.wav",
-    ],
-    ids=["https", "data", "file"],
+    "reference", ["https://example.invalid/audio.wav", "file:///reference.wav"]
 )
 def test_campaign_loader_preserves_media_references(tmp_path, reference):
-    from benchmarks.benchmarker.restage_campaign import (
-        _input_identity,
-        load_campaign_spec,
-    )
+    from benchmarks.benchmarker.restage_campaign import load_campaign_spec
 
     (tmp_path / "asr.yaml").write_text("asr")
     spec = tmp_path / "spec.json"
@@ -275,9 +222,6 @@ def test_campaign_loader_preserves_media_references(tmp_path, reference):
     )
     options = load_campaign_spec(spec)["trial_options"]
     assert options["samples"][0].ref_audio == reference
-    assert list(_input_identity(options)["local_input_sha256"]) == [
-        str(tmp_path / "asr.yaml")
-    ]
 
 
 def test_unused_reference_does_not_require_a_local_file(tmp_path):
