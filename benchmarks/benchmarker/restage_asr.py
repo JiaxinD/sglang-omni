@@ -3,7 +3,7 @@
 
 import json
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from benchmarks.benchmarker.restage_trial import execute_trial
@@ -31,6 +31,7 @@ async def execute_asr_trial(
     request_timeout_s: int = 300,
     arrival_seed: int | None = None,
     profile: bool = False,
+    corpus_repeats: int = 1,
 ) -> Evaluation:
     """Measure latency/RTF and score the returned transcript without another service.
 
@@ -41,9 +42,20 @@ async def execute_asr_trial(
         raise ValueError("ASR does not support audio-output SLOs")
     if not math.isfinite(max_wer) or max_wer < 0:
         raise ValueError("max_wer must be finite and nonnegative")
-    targets = {sample.sample_id: sample.ref_text for sample in samples}
-    if len(targets) != len(samples):
+    if type(corpus_repeats) is not int or corpus_repeats < 1:
+        raise ValueError("corpus_repeats must be a positive integer")
+    if len({sample.sample_id for sample in samples}) != len(samples):
         raise ValueError("Sample IDs must be unique")
+    request_sources = {}
+    if corpus_repeats > 1:
+        expanded = []
+        for cycle in range(corpus_repeats):
+            for index, sample in enumerate(samples):
+                request_id = f"restage-repeat-{cycle}-{index}"
+                expanded.append(replace(sample, sample_id=request_id))
+                request_sources[request_id] = sample.sample_id
+        samples = expanded
+    targets = {sample.sample_id: sample.ref_text for sample in samples}
 
     async def quality(results):
         details = {}
@@ -80,6 +92,14 @@ async def execute_asr_trial(
             json.dumps(
                 {
                     "samples": [asdict(sample) for sample in samples],
+                    **(
+                        {
+                            "corpus_repeats": corpus_repeats,
+                            "request_sources": request_sources,
+                        }
+                        if corpus_repeats > 1
+                        else {}
+                    ),
                     **(
                         {"warmup_sample": asdict(warmup_sample)}
                         if warmup_sample is not None

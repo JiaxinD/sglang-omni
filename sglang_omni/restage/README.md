@@ -96,6 +96,26 @@ local audio hash, so changing it prevents resuming the old campaign. Trial and
 workload metadata retain the supplied sample; old specs are not populated with
 a new default field.
 
+For Qwen3-ASR repeated-audio measurements, setting
+`asr.factory.pre_lm_cache_size_bytes: 0` disables storage of completed encoder
+results while preserving the encoder worker and batching. In-flight requests
+with the same audio fingerprint can still share one encoding. This setting
+does not disable radix KV reuse or preprocessing caches. Record those policies
+and actual reuse counts separately; changing request IDs does not change audio
+fingerprints. Disabling result storage also avoids cache-write costs, so its
+capacity is specific to that configuration, not a guaranteed production bound.
+
+ASR campaigns can set `trial_options.corpus_repeats` to a positive integer
+(default `1`) to send the supplied corpus in order that many times. Repeated
+requests receive unique IDs; `workload.json` records their original sample IDs
+in `request_sources`, and each response is scored against its original reference.
+Warmup stays separate. This increases request count, not distinct audio count,
+and does not clear caches. At rate `r`, `N` samples repeated `k` times provide
+an expected offered interval of approximately `N*k/r` seconds; Poisson arrivals
+and draining change the actual duration. Report measured time and queue behavior
+before interpreting the result as sustained capacity. Changing this option
+changes campaign input identity and prevents resuming an incompatible run.
+
 ## Explore streaming vocoder criticality
 
 For Qwen3-TTS, `vocoder.factory.criticality_slack_s` enables the optional

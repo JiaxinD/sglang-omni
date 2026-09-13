@@ -38,7 +38,9 @@ class Qwen3ASRFactoryArgs(FactoryArgs):
 
     enable_pre_lm_encoder: bool | None = None
     pre_lm_cache_max_entries: int | None = Field(default=None, ge=1)
-    pre_lm_cache_size_bytes: int | None = Field(default=None, ge=1)
+    pre_lm_cache_size_bytes: int | None = Field(
+        default=None, ge=0, description="Zero disables pre-LM result storage."
+    )
     pre_lm_max_batch_size: int | None = Field(default=None, ge=1)
     pre_lm_max_batch_wait_ms: int | None = Field(default=None, ge=0)
 

@@ -253,6 +253,28 @@ def test_cache_hit_skips_reencode() -> None:
     assert service.stats()["hits"] == 1
 
 
+def test_zero_cache_budget_reencodes_completed_requests() -> None:
+    from sglang_omni.models.qwen3_asr.config import Qwen3ASRFactoryArgs
+
+    factory = Qwen3ASRFactoryArgs(pre_lm_cache_size_bytes=0)
+    restored = Qwen3ASRFactoryArgs.model_validate_json(factory.model_dump_json())
+    model = _StubModel()
+    service = _make_service(model, cache_max_bytes=restored.pre_lm_cache_size_bytes)
+    first = _item(11, 3)
+    second = _item(11, 3)
+
+    service.encode_item(first)
+    assert service.lookup_cached_embedding(first.audio_fingerprint, 3) is None
+    service.encode_item(second)
+
+    assert model.encode_calls == 2
+    assert torch.equal(first.precomputed_embeddings, second.precomputed_embeddings)
+    assert first.feature is None and second.feature is None
+    assert service.stats()["hits"] == 0
+    assert service.stats()["cache_entries"] == 0
+    assert service.stats()["cache_bytes"] == 0
+
+
 def test_lookup_cached_embedding_returns_only_valid_entries() -> None:
     model = _StubModel()
     service = _make_service(model)
