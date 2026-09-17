@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from sglang_omni.config.schema import StageConfig
 from sglang_omni.config.topology import LogicalProcess
-from sglang_omni.restage.capacity import StageCapacity, Workload
+from sglang_omni.restage.capacity import SharingDiscount, StageCapacity, Workload
 
 
 class StageConstants(BaseModel):
@@ -25,6 +25,13 @@ class StageConstants(BaseModel):
     weights_gib: float = Field(ge=0)
     kv_bytes_per_token: int | None = Field(default=None, gt=0)
     delta_s: float = Field(default=0.0, ge=0)
+
+
+class SharingConstants(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: float = Field(gt=0, le=1)
+    provenance: str
 
 
 class Constants(BaseModel):
@@ -39,10 +46,19 @@ class Constants(BaseModel):
     pipeline_throughput: float | None = Field(default=None, gt=0)
     pipeline_provenance: str = ""
     stages: dict[str, StageConstants]
+    sharing_discounts: dict[str, SharingConstants] = Field(default_factory=dict)
 
     @property
     def workload(self) -> Workload:
         return Workload(self.context_tokens, self.audio_seconds, self.slo_rtf)
+
+    @property
+    def discounts(self) -> dict[str, SharingDiscount]:
+        """Sharing discounts measured on this model, keyed ``"<mode>@<k>"``."""
+        return {
+            key: SharingDiscount(row.value, row.provenance)
+            for key, row in self.sharing_discounts.items()
+        }
 
     @classmethod
     def load(cls, path: Path) -> "Constants":

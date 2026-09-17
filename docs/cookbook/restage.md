@@ -50,7 +50,10 @@ from `X-Engine-Time`, then runs a closed-loop sweep at the listed
 concurrencies and keeps the throughput of the largest one whose rtf p99 is
 inside the SLO. `constants.json` records every number with its provenance;
 stage throughputs derived from the share are `PREDICTED` until a measured
-cell replaces them.
+cell replaces them, and the sharing discounts of colocated flows are `PRIOR`
+(Qwen3-Omni tails) until `sharing_discounts` carries a value measured on this
+model at that fan-in (`"mps@3"`). A plan stays `PREDICTED` while any of its
+inputs is.
 
 ## Plan
 

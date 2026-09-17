@@ -3,6 +3,7 @@ import math
 import pytest
 
 from sglang_omni.restage.capacity import (
+    SharingDiscount,
     StageCapacity,
     Workload,
     footprint_gib,
@@ -29,7 +30,9 @@ def capacity(name, throughput, *, kv=None, weights=1.0, provenance="MEASURED tes
 CAPS = {"engine": capacity("engine", 30.0), "tail": capacity("tail", 20.0)}
 
 
-def utility(assignments, flows, *, fractions=FULL, mode="timeslice", caps=CAPS):
+def utility(
+    assignments, flows, *, fractions=FULL, mode="timeslice", caps=CAPS, discounts=None
+):
     return plan_utility(
         assignments,
         flows,
@@ -38,6 +41,7 @@ def utility(assignments, flows, *, fractions=FULL, mode="timeslice", caps=CAPS):
         gpu_mem_gib=80.0,
         fractions=fractions,
         sharing_mode=mode,
+        discounts=discounts,
     )
 
 
@@ -104,6 +108,29 @@ def test_competing_flows_retain_the_sharing_discount():
     assert consolidated.utility == pytest.approx(2 * 20.0 * 0.85)
     assert consolidated.binding == "gpu2"
     assert [row.capacity for row in consolidated.gpus] == [1.0, 1.0, pytest.approx(1.7)]
+
+
+def test_prior_discount_marks_the_plan_predicted_until_measured_at_that_fan_in():
+    assignments = {"engine": ((0,), (0,)), "tail": ((0,), (0,))}
+    flows = {"engine": (0, 1), "tail": (0, 1)}
+    prior = utility(assignments, flows, mode="mps")
+    assert prior.provenance == "PREDICTED"
+    assert prior.sharing["mps@2"].provenance.startswith("PRIOR")
+    other_fan_in = {"mps@3": SharingDiscount(0.9, "MEASURED this model c8")}
+    assert (
+        utility(assignments, flows, mode="mps", discounts=other_fan_in).provenance
+        == "PREDICTED"
+    )
+    measured = utility(
+        assignments,
+        flows,
+        mode="mps",
+        discounts={"mps@2": SharingDiscount(0.7, "MEASURED this model c8")},
+    )
+    assert measured.provenance == "MEASURED"
+    assert measured.utility == pytest.approx(2 * 0.7 / (1 / 30 + 1 / 20))
+    with pytest.raises(ValueError):
+        SharingDiscount(1.2, "MEASURED")
 
 
 def test_pool_bound_caps_a_starved_kv_pool():

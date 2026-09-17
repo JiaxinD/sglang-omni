@@ -5,7 +5,12 @@ import yaml
 
 from sglang_omni.config.sources import sources_from_config_file
 from sglang_omni.config.topology import compile_logical_processes
-from sglang_omni.restage.calibration import Constants, StageConstants, process_capacity
+from sglang_omni.restage.calibration import (
+    Constants,
+    SharingConstants,
+    StageConstants,
+    process_capacity,
+)
 from sglang_omni.restage.plan import SearchSpace, load_plan, rank_shapes, write_plan
 from tests.unit_test.restage.conftest_seed import pipeline
 
@@ -179,3 +184,43 @@ def test_colocated_candidates_pass_the_placement_memory_check(tmp_path):
     assert shapes["colocate_x2_timeslice"]["status"] == "candidate", rows
     total = 2 * sum(shapes["colocate_x2_timeslice"]["fractions"].values())
     assert total <= 0.91
+
+
+def test_measured_sharing_discount_flips_only_its_fan_in_to_measured(tmp_path):
+    from sglang_omni.models.qwen3_tts.config import Qwen3TTSPipelineConfig
+
+    config = Qwen3TTSPipelineConfig(model_path="unused-checkpoint")
+    stages = {
+        "tts_engine": StageConstants(
+            throughput=30.0,
+            provenance="PREDICTED share 0.7",
+            weights_gib=3.4,
+            kv_bytes_per_token=20480,
+            delta_s=0.08,
+        ),
+        "vocoder": StageConstants(
+            throughput=70.0, provenance="PREDICTED share 0.3", weights_gib=1.0
+        ),
+    }
+    measured = constants(
+        stages=stages,
+        pipeline_throughput=21.0,
+        pipeline_provenance="MEASURED probe",
+        sharing_discounts={
+            "mps@2": SharingConstants(value=0.7, provenance="MEASURED c8")
+        },
+    )
+    path = tmp_path / "constants.json"
+    measured.save(path)
+    rows = rank_shapes(config, SearchSpace(devices=[0]), Constants.load(path))
+    by_shape = {r["shape"]: r["predicted"] for r in rows if r["status"] == "candidate"}
+    assert by_shape["colocate_x2_mps"]["provenance"] == "MEASURED"
+    assert by_shape["colocate_x2_mps"]["sharing"] == {
+        "mps@2": {"value": 0.7, "provenance": "MEASURED c8"}
+    }
+    assert by_shape["colocate_x2_mps"]["utility"] == pytest.approx(2 * 0.7 * 21.0)
+    assert by_shape["colocate_x3_mps"]["provenance"] == "PREDICTED"
+    assert by_shape["colocate_x3_mps"]["sharing"]["mps@3"]["provenance"].startswith(
+        "PRIOR"
+    )
+    assert by_shape["colocate_x2_timeslice"]["provenance"] == "PREDICTED"

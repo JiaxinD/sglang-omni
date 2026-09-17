@@ -149,6 +149,7 @@ def rank_shapes(
                     gpu_mem_gib=constants.gpu_mem_gib,
                     fractions=fractions,
                     sharing_mode=shape.sharing_mode,
+                    discounts=constants.discounts,
                 )
             except ValueError as exc:
                 rows.append({**row, "status": "rejected", "rejection": str(exc)})
@@ -183,6 +184,7 @@ def _utility_row(utility: PlanUtility, constants: Constants) -> dict[str, Any]:
         "requests_per_s": utility.utility / constants.audio_seconds,
         "binding": utility.binding,
         "provenance": utility.provenance,
+        "sharing": {key: asdict(row) for key, row in utility.sharing.items()},
         "gpus": [asdict(row) for row in utility.gpus],
         "pool_bounds": utility.pool_bounds,
     }

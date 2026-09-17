@@ -23,10 +23,28 @@ from dataclasses import dataclass
 
 Z99 = 2.326
 
+RUNTIME_MARGIN_GIB = 2.0
+
+
+@dataclass(frozen=True)
+class SharingDiscount:
+    """Per-flow share of a GPU retained by k competing flows, with its origin."""
+
+    value: float
+    provenance: str
+
+    def __post_init__(self):
+        if not 0 < self.value <= 1:
+            raise ValueError("A sharing discount must be in (0, 1]")
+
+
 # Note (Jiaxin Deng): measured on sglang-omni Qwen3-Omni tails (sgl-dm 20057386,
 # matched c8); every other model reuses them as a prior until measured.
-SHARING_DISCOUNT = {"dedicated": 1.0, "timeslice": 0.58, "mps": 0.85}
-RUNTIME_MARGIN_GIB = 2.0
+SHARING_PRIORS = {
+    "dedicated": SharingDiscount(1.0, "MEASURED one flow per GPU"),
+    "timeslice": SharingDiscount(0.58, "PRIOR Qwen3-Omni tails c8"),
+    "mps": SharingDiscount(0.85, "PRIOR Qwen3-Omni tails c8"),
+}
 
 
 @dataclass(frozen=True)
@@ -73,6 +91,7 @@ class PlanUtility:
     gpus: tuple[GpuLoad, ...]
     pool_bounds: dict[str, float]
     provenance: str
+    sharing: dict[str, SharingDiscount]
 
 
 def kappa_lower(throughput: float, delta_s: float, audio_seconds: float) -> float:
@@ -124,17 +143,20 @@ def plan_utility(
     gpu_mem_gib: float,
     fractions: Mapping[str, float],
     sharing_mode: str = "timeslice",
+    discounts: Mapping[str, SharingDiscount] | None = None,
 ) -> PlanUtility:
     """Aggregate throughput a placement sustains, bounded by its busiest GPU.
 
     A process with n instances spreads the flow F over them, so an instance on
     a GPU costs F / (n * T) of that GPU. Instances of one pipeline flow share a
     GPU serially (capacity 1); instances of k different flows retain k * d(mode)
-    of a GPU, the measured sharing discount. A KV-holding process is further
+    of a GPU, the sharing discount. ``discounts`` holds discounts measured on
+    this model, keyed ``"<mode>@<k>"``; a fan-in without one falls back to the
+    prior and leaves the plan PREDICTED. A KV-holding process is further
     bounded by the requests its pool can hold against the kappa the SLO admits.
     ``fractions`` is the per-device memory fraction of each process instance.
     """
-    if sharing_mode not in SHARING_DISCOUNT:
+    if sharing_mode not in SHARING_PRIORS:
         raise ValueError(f"Unknown sharing mode {sharing_mode!r}")
     if set(assignments) != set(capacities) or set(flows) != set(assignments):
         raise ValueError(
@@ -154,11 +176,17 @@ def plan_utility(
             for device in ranks:
                 per_device.setdefault(device, []).append((name, flow, len(ranks)))
     gpus = []
+    sharing: dict[str, SharingDiscount] = {}
     for device, instances in sorted(per_device.items()):
         distinct = len({flow for _, flow, _ in instances})
-        capacity_units = (
-            1.0 if distinct == 1 else distinct * SHARING_DISCOUNT[sharing_mode]
-        )
+        capacity_units = 1.0
+        if distinct > 1:
+            key = f"{sharing_mode}@{distinct}"
+            discount = (discounts or {}).get(key) or SHARING_PRIORS[sharing_mode]
+            if "PREDICTED" in discount.provenance or "PRIOR" in discount.provenance:
+                predicted = True
+            sharing[key] = discount
+            capacity_units = distinct * discount.value
         load = 0.0
         for name, _, tp_size in instances:
             capacity = capacities[name]
@@ -198,4 +226,5 @@ def plan_utility(
         gpus=tuple(gpus),
         pool_bounds=pool_bounds,
         provenance="PREDICTED" if predicted else "MEASURED",
+        sharing=sharing,
     )
