@@ -79,6 +79,9 @@ CHUNK_MASK_COMPILE_DISABLED = False
 CAUSAL_CONV_CACHE_PATCHED = False
 
 FLOW_CUDA_GRAPH_FRAME_BUCKET = 16
+HIFT_DECODE_CONTEXT_FRAMES = 32
+HIFT_SOURCE_GROUP_SAMPLES = 1_000_000
+HIFT_DECODE_GROUP_FRAMES = 1024
 # Note (chenyang):
 # Mel-frame step size for buffered flow CUDA Graph keys. Capture shapes
 # must use a T that is a multiple of this step size. For example, 489
@@ -1464,6 +1467,7 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         self.hift_autocast_dtype = AUTOCAST_DTYPES[hift_dtype]
         self.hift_max_padding_waste = hift_max_padding_waste
         self.hift_samples_per_mel_frame: int | None = None
+        self.hift_geometry_cache: tuple[int, int] | None = None
         # note(ratish): the AR shares this process and the default stream; on its
         # own stream the vocoder's kernels and host copies do not queue behind the
         # AR's. It waits once for what the default stream holds at this point.
@@ -1694,6 +1698,100 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         held = max(int(speech_offset), 0)
         delta = tts_speech[:, held:].detach().cpu()
         return delta, tts_mel.detach(), int(tts_speech.shape[1])
+
+    @torch.inference_mode()
+    def hift_geometry(self) -> tuple[int, int]:
+        """Samples per mel frame and the frames a non-final call holds back,
+        measured on the module so fakes and real HiFT follow the same path."""
+        if self.hift_geometry_cache is None:
+            frames = 16
+            device = next(self.flow.parameters()).device
+            probe = torch.zeros(1, self.flow.output_size, frames, device=device)
+            final, _ = self.hift.inference(speech_feat=probe, finalize=True)
+            partial, _ = self.hift.inference(speech_feat=probe, finalize=False)
+            stride = int(final.shape[1]) // frames
+            self.hift_geometry_cache = (
+                stride,
+                frames - int(partial.shape[1]) // stride,
+            )
+        else:
+            pass
+        return self.hift_geometry_cache
+
+    @torch.inference_mode()
+    def hift_step(
+        self, rows: Sequence[tuple[torch.Tensor, int, bool]]
+    ) -> list[tuple[torch.Tensor, int]]:
+        """One batched HiFT call for the rows of a streaming step, each
+        (mel history, emitted samples, finalize). Returns each row's new
+        samples and its emitted sample count afterwards."""
+        # Note (Jiaxin Deng): the decode only sees the frames past the emitted
+        # prefix plus 32 of context, its measured left receptive field (bit-exact
+        # at 32 with TF32 off). F0 and the sine source keep the whole history:
+        # the source phase is a cumulative sum and its noise is position-indexed.
+        stride, hold = self.hift_geometry()
+        hift = self.hift
+        histories = [mel for mel, _, _ in rows]
+        frames = [int(mel.shape[2]) for mel in histories]
+        emitted = [int(samples) // stride for _, samples, _ in rows]
+        starts = [max(done - HIFT_DECODE_CONTEXT_FRAMES, 0) for done in emitted]
+        ends = [
+            total if finalize else total - hold
+            for total, (_, _, finalize) in zip(frames, rows, strict=True)
+        ]
+        widths = [total - start for total, start in zip(frames, starts, strict=True)]
+        width = max(widths)
+        device = histories[0].device
+        history = torch.zeros(
+            len(rows),
+            self.flow.output_size,
+            max(frames),
+            device=device,
+            dtype=histories[0].dtype,
+        )
+        for index, mel in enumerate(histories):
+            history[index, :, : frames[index]] = mel[0]
+        f0_device = next(hift.f0_predictor.parameters()).device
+        f0 = hift.f0_predictor(
+            history.to(device=f0_device, dtype=torch.float64), finalize=True
+        ).to(history)
+        source = history.new_empty(len(rows), 1, max(frames) * stride)
+        # Note (Jiaxin Deng): the sine generator holds several (rows, samples,
+        # harmonics) intermediates at once, so its rows are grouped by samples.
+        group = max(1, HIFT_SOURCE_GROUP_SAMPLES // int(source.shape[2]))
+        for start in range(0, len(rows), group):
+            excitation = hift.f0_upsamp(f0[start : start + group, None]).transpose(1, 2)
+            excitation, _, _ = hift.m_source(excitation)
+            source[start : start + group] = excitation.transpose(1, 2)
+        # Note (Jiaxin Deng): the decode's activations run to a few hundred KB
+        # per frame, so its rows are grouped by frames as well.
+        group = max(1, HIFT_DECODE_GROUP_FRAMES // width)
+        outputs: list[tuple[torch.Tensor, int]] = []
+        for first in range(0, len(rows), group):
+            last = min(first + group, len(rows))
+            group_width = max(widths[first:last])
+            window = history.new_zeros(last - first, self.flow.output_size, group_width)
+            window_source = source.new_zeros(last - first, 1, group_width * stride)
+            for index in range(first, last):
+                start, total = starts[index], frames[index]
+                window[index - first, :, : widths[index]] = history[
+                    index, :, start:total
+                ]
+                window_source[index - first, :, : widths[index] * stride] = source[
+                    index, :, start * stride : total * stride
+                ]
+            speech = (
+                hift.decode(x=window, s=window_source, finalize=True).detach().cpu()
+            )
+            for index in range(first, last):
+                start, done = starts[index], emitted[index]
+                end = max(ends[index], done)
+                delta = speech[
+                    index - first : index - first + 1,
+                    (done - start) * stride : (end - start) * stride,
+                ]
+                outputs.append((delta.contiguous(), end * stride))
+        return outputs
 
     def make_flow_input(
         self,

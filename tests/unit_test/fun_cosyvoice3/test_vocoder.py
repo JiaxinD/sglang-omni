@@ -29,21 +29,48 @@ from sglang_omni.scheduling.message import IncomingMessage
 from tests.unit_test.fun_cosyvoice3.test_flow_batch import FakeFlow as _PackedFlow
 
 
+class FakeF0Predictor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, finalize=True):
+        del finalize
+        return torch.zeros(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
+
+
 class FakeHiFT(torch.nn.Module):
+    """Emits the absolute sample index of every mel frame: `inference` over a
+    whole mel and the streaming `decode` over a window (whose source carries
+    the absolute positions) agree, so sliced deltas can be checked exactly."""
+
     # cosyvoice3.yaml: upsample_rates [8, 5, 3], istft_params.hop_len 4.
     upsample_rates: ClassVar[list[int]] = [8, 5, 3]
     istft_params: ClassVar[dict[str, int]] = {"n_fft": 16, "hop_len": 4}
+    samples_per_frame: ClassVar[int] = 480
 
     def __init__(self):
         super().__init__()
         self.anchor = torch.nn.Parameter(torch.zeros(1))
         self.calls = []
+        self.f0_predictor = FakeF0Predictor()
 
     def inference(self, *, speech_feat, finalize):
         self.calls.append((speech_feat, finalize))
         batch, _, frames = speech_feat.shape
-        row = torch.arange(frames * 480, dtype=torch.float32).reshape(1, -1)
-        return row.repeat(batch, 1), None
+        row = torch.arange(frames * self.samples_per_frame, dtype=torch.float32)
+        return row.reshape(1, -1).repeat(batch, 1), None
+
+    def f0_upsamp(self, f0):
+        return f0.repeat_interleave(self.samples_per_frame, dim=-1)
+
+    def m_source(self, s):
+        positions = torch.arange(s.shape[1], dtype=torch.float32, device=s.device)
+        return positions.reshape(1, -1, 1).repeat(s.shape[0], 1, 1), None, None
+
+    def decode(self, x, s, finalize=True):
+        del x, finalize
+        return s[:, 0, :]
 
 
 class FakeEstimator(torch.nn.Module):

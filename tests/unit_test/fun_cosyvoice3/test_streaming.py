@@ -34,6 +34,7 @@ from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from tests.unit_test.fun_cosyvoice3.test_flow_batch import FakeFlow as _PackedFlow
+from tests.unit_test.fun_cosyvoice3.test_vocoder import FakeHiFT as _FakeHiFT
 
 AR_INITIAL_FLUSH_TOKENS = TOKEN_HOP_LEN + PRE_LOOKAHEAD_LEN
 AR_FOLLOWUP_FLUSH_TOKENS = TOKEN_HOP_LEN
@@ -86,17 +87,10 @@ class FakeFlow(_PackedFlow):
         self.input_embedding = torch.nn.Embedding(VOCAB_SIZE, 80)
 
 
-class FakeHiFT(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.anchor = torch.nn.Parameter(torch.zeros(1))
-        self.calls: list[tuple] = []
-        self.upsample_rates = [8, 5, 3]
-        self.istft_params = {"n_fft": 16, "hop_len": 4}
+class FakeHiFT(_FakeHiFT):
+    """One sample per mel frame."""
 
-    def inference(self, *, speech_feat, finalize):
-        self.calls.append((speech_feat, finalize))
-        return torch.arange(speech_feat.shape[-1]).reshape(1, -1).float(), None
+    samples_per_frame = 1
 
 
 def drain(scheduler: FunCosyVoice3StreamingVocoderScheduler) -> list[OutgoingMessage]:
