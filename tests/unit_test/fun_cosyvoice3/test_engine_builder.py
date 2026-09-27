@@ -104,3 +104,14 @@ def test_torch_mps_uses_single_request_native_attention(
 
     with pytest.raises(ValueError, match="max_running_requests=1"):
         builder.validate_before_infrastructure(SimpleNamespace(max_running_requests=2))
+
+
+def test_cuda_engine_caps_the_kv_pool_at_the_running_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mlx_runtime, "use_mlx", lambda: False)
+    builder = FunCosyVoice3EngineBuilder()
+    builder.device = "cuda:0"
+    defaults = builder.generation_defaults(dtype="bfloat16")
+
+    assert defaults["max_total_tokens"] == 32 * builder.context_length
