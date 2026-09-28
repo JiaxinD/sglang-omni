@@ -5,7 +5,7 @@ along the sequence for every per token module, attention within each row."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 
@@ -292,6 +292,9 @@ class PackedDiT:
         device = torch.device(device)
         self.is_ragged = device.type == "cuda" and _is_fa3_supported()
         self.is_compiled = False
+        # Note (Jiaxin Deng): the prefix-cache contract, installed by the compile
+        # warmup when the vocoder has a prefix pool.
+        self.compiled_prefix_forward: Callable[..., object] | None = None
         logger.info(
             "Fun-CosyVoice3 Flow row attention on %s: %s",
             device,
