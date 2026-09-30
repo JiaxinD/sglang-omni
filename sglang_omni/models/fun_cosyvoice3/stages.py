@@ -1997,15 +1997,36 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
             else:
                 final_width = None
             groups.setdefault(final_width, []).append(index)
+        # Note (Jiaxin Deng): every group is queued before the first host copy,
+        # so the device runs one group while the host launches the next.
+        decoded = [
+            (members, *self.hift_group([windows[index] for index in members]))
+            for members in groups.values()
+        ]
+        samples_per_frame = self.hift_samples_per_mel_frame
         outputs: dict[int, tuple[torch.Tensor, int]] = {}
-        for members in groups.values():
-            decoded = self.hift_group([windows[index] for index in members])
-            outputs.update(zip(members, decoded, strict=True))
+        for members, speech, origin_frames in decoded:
+            speech = speech.cpu()
+            for row, (index, origin) in enumerate(
+                zip(members, origin_frames, strict=True)
+            ):
+                window = windows[index]
+                outputs[index] = (
+                    speech[
+                        row : row + 1,
+                        (window.emitted_frame - origin)
+                        * samples_per_frame : (window.end_frame - origin)
+                        * samples_per_frame,
+                    ].contiguous(),
+                    window.end_frame * samples_per_frame,
+                )
         return [outputs[index] for index in range(len(rows))]
 
     def hift_group(
         self, windows: Sequence[HiftDecodeWindow]
-    ) -> list[tuple[torch.Tensor, int]]:
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Decode one group's windows; the samples stay on the device, with
+        each row's origin frame."""
         hift = self.hift
         samples_per_frame = self.hift_samples_per_mel_frame
         channels = self.flow.output_size
@@ -2075,21 +2096,7 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
                     * samples_per_frame,
                 ]
         speech = hift.decode(x=window_mel, s=window_source, finalize=True)
-        speech = speech.detach().cpu()
-        return [
-            (
-                speech[
-                    index : index + 1,
-                    (window.emitted_frame - origin)
-                    * samples_per_frame : (window.end_frame - origin)
-                    * samples_per_frame,
-                ].contiguous(),
-                window.end_frame * samples_per_frame,
-            )
-            for index, (window, origin) in enumerate(
-                zip(windows, origin_frames, strict=True)
-            )
-        ]
+        return speech.detach(), origin_frames
 
     def make_flow_input(
         self,
