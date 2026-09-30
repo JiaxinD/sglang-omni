@@ -21,7 +21,11 @@ import torch
 
 from sglang_omni.models.fun_cosyvoice3.packed_dit import PackedDiT
 from sglang_omni.models.fun_cosyvoice3.payload_types import FunCosyVoice3State
-from sglang_omni.models.fun_cosyvoice3.stages import CosyVoice3Vocoder, FlowBatchInput
+from sglang_omni.models.fun_cosyvoice3.stages import (
+    CosyVoice3Vocoder,
+    FlowBatchInput,
+    HiftStepRow,
+)
 from sglang_omni.models.fun_cosyvoice3.streaming import (
     PRE_LOOKAHEAD_LEN,
     TOKEN_HOP_LEN,
@@ -145,10 +149,14 @@ class FunCosyVoice3StreamingVocoderScheduler(
         started = time.monotonic()
         with self.vocoder.stream_context:
             mel = self.vocoder.hop_batch([item])[0]
-            self.vocoder.hift_step([(mel, 0, False)])
+            self.vocoder.hift_step(
+                [HiftStepRow(history=mel, emitted_samples=0, is_final=False)]
+            )
             hop_s = time.monotonic() - started
             mel = self.vocoder.leftover_batch([item])[0]
-            self.vocoder.hift_step([(mel, 0, True)])
+            self.vocoder.hift_step(
+                [HiftStepRow(history=mel, emitted_samples=0, is_final=True)]
+            )
         final_s = time.monotonic() - started - hop_s
         logger.info(
             f"Fun-CosyVoice3 vocoder warmup: hop {hop_s:.1f} s, final {final_s:.1f} s"
@@ -404,7 +412,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
             mels = self.vocoder.leftover_batch(items)
             for (_, state), (delta, offset) in zip(
                 participants,
-                self.hift_step(participants, mels, finalize=True),
+                self.hift_step(participants, mels, is_final=True),
                 strict=True,
             ):
                 state.leftover, state.speech_offset = delta, offset
@@ -431,7 +439,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
             decoded: dict[str, torch.Tensor] = {}
             for (request_id, state), (delta, offset) in zip(
                 participants,
-                self.hift_step(participants, mels, finalize=False),
+                self.hift_step(participants, mels, is_final=False),
                 strict=True,
             ):
                 state.speech_offset = offset
@@ -462,18 +470,26 @@ class FunCosyVoice3StreamingVocoderScheduler(
         participants: list[tuple[str, CosyVoice3StreamState]],
         mels: list[torch.Tensor],
         *,
-        finalize: bool,
+        is_final: bool,
     ) -> list[tuple[torch.Tensor, int]]:
         """Append each participant's new mel frames to its history and run one
         HiFT call over the step."""
-        rows: list[tuple[torch.Tensor, int, bool]] = []
+        rows: list[HiftStepRow] = []
         for (_, state), mel in zip(participants, mels, strict=True):
-            new = mel[:, :, state.token_offset * TOKEN_MEL_RATIO :].detach()
+            new_frames = mel[:, :, state.token_offset * TOKEN_MEL_RATIO :].detach()
             if state.hift_mel is None:
-                state.hift_mel = new
+                state.hift_mel = new_frames
             else:
-                state.hift_mel = torch.cat([state.hift_mel.to(new.device), new], dim=2)
-            rows.append((state.hift_mel, state.speech_offset, finalize))
+                state.hift_mel = torch.cat(
+                    [state.hift_mel.to(new_frames.device), new_frames], dim=2
+                )
+            rows.append(
+                HiftStepRow(
+                    history=state.hift_mel,
+                    emitted_samples=state.speech_offset,
+                    is_final=is_final,
+                )
+            )
         return self.vocoder.hift_step(rows)
 
     def decode_delta(

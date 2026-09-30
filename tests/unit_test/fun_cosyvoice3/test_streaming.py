@@ -90,7 +90,8 @@ class FakeFlow(_PackedFlow):
 class FakeHiFT(_FakeHiFT):
     """One sample per mel frame."""
 
-    samples_per_frame = 1
+    upsample_rates = [1]
+    istft_params = {"n_fft": 4, "hop_len": 1}
 
 
 def drain(scheduler: FunCosyVoice3StreamingVocoderScheduler) -> list[OutgoingMessage]:
