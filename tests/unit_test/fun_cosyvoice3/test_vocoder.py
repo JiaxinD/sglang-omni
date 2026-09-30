@@ -1452,3 +1452,37 @@ def test_hift_step_matches_the_whole_history_chain(
             ):
                 assert emitted_after == reference_after
                 torch.testing.assert_close(delta, reference, atol=1e-4, rtol=0)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("is_final", [False, True])
+def test_hift_step_window_is_bit_identical_to_the_whole_history_call(
+    monkeypatch: pytest.MonkeyPatch, is_final: bool
+) -> None:
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    vocoder = stages.CosyVoice3Vocoder(HiftFlowStub(), make_causal_hift(10.0))
+    torch.manual_seed(1)
+    mel = torch.randn(1, 80, 300, device="cuda") * 3
+    end_frame = 300 if is_final else 256
+    with torch.inference_mode():
+        _, hift_mel, emitted_samples = vocoder.hift_delta(
+            mel[:, :, :156], hift_mel=None, speech_offset=0, finalize=False
+        )
+        reference, _, _ = vocoder.hift_delta(
+            mel[:, :, 156:end_frame],
+            hift_mel=hift_mel,
+            speech_offset=emitted_samples,
+            finalize=is_final,
+        )
+        ((delta, _),) = vocoder.hift_step(
+            [
+                stages.HiftStepRow(
+                    history=mel[:, :, :end_frame],
+                    emitted_samples=emitted_samples,
+                    is_final=is_final,
+                )
+            ]
+        )
+    assert torch.equal(delta, reference)
