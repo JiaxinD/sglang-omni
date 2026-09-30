@@ -1752,12 +1752,12 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         and its emitted sample count afterwards."""
         windows: list[HiftDecodeWindow] = []
         for row in rows:
-            total_frames = int(row.history.shape[2])
+            history_frames = int(row.history.shape[2])
             emitted_frame = row.emitted_samples // self.hift_samples_per_mel_frame
             if row.is_final:
-                end_frame = total_frames
+                end_frame = history_frames
             else:
-                end_frame = max(total_frames - self.hift_hold_frames, emitted_frame)
+                end_frame = max(history_frames - self.hift_hold_frames, emitted_frame)
             windows.append(
                 HiftDecodeWindow(
                     row=row,
@@ -1789,63 +1789,72 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         hift = self.hift
         samples_per_frame = self.hift_samples_per_mel_frame
         channels = self.flow.output_size
-        total_frames = [int(window.row.history.shape[2]) for window in windows]
-        widths = [
-            total - window.start_frame
-            for total, window in zip(total_frames, windows, strict=True)
+        history_frame_counts = [int(window.row.history.shape[2]) for window in windows]
+        window_frame_counts = [
+            history_frames - window.start_frame
+            for history_frames, window in zip(
+                history_frame_counts, windows, strict=True
+            )
         ]
-        widest = max(widths)
-        history = windows[0].row.history.new_zeros(
-            len(windows), channels, max(total_frames)
+        max_history_frames = max(history_frame_counts)
+        max_window_frames = max(window_frame_counts)
+        mel_history = windows[0].row.history.new_zeros(
+            len(windows), channels, max_history_frames
         )
-        for index, (window, total) in enumerate(
-            zip(windows, total_frames, strict=True)
+        for index, (window, history_frames) in enumerate(
+            zip(windows, history_frame_counts, strict=True)
         ):
-            history[index, :, :total] = window.row.history[0]
+            mel_history[index, :, :history_frames] = window.row.history[0]
+        # note(ratish): a final right aligned ends at the decode's edge as in its own
+        # call, and the padding before its context is past the decode's receptive field.
+        origin_frames = [
+            window.start_frame
+            - (max_window_frames - window_frames if window.row.is_final else 0)
+            for window, window_frames in zip(windows, window_frame_counts, strict=True)
+        ]
+        window_mel = mel_history.new_zeros(len(windows), channels, max_window_frames)
+        window_source = mel_history.new_zeros(
+            len(windows), 1, max_window_frames * samples_per_frame
+        )
+        for index, (window, history_frames, origin) in enumerate(
+            zip(windows, history_frame_counts, origin_frames, strict=True)
+        ):
+            window_mel[
+                index, :, window.start_frame - origin : history_frames - origin
+            ] = mel_history[index, :, window.start_frame : history_frames]
         # Note (Jiaxin Deng): F0 and the sine source keep the whole history: the
         # source phase is a cumulative sum and its noise is position-indexed.
         # note(ratish): hops run F0 finalized too. Only its look right frames
         # differ, and a hop's emitted frames end before them.
         f0_device = next(hift.f0_predictor.parameters()).device
         f0 = hift.f0_predictor(
-            history.to(device=f0_device, dtype=torch.float64), finalize=True
-        ).to(history)
-        source = history.new_empty(
-            len(windows), 1, max(total_frames) * samples_per_frame
-        )
-        # note(ratish): source chunks cover no more frames than this group's decode,
-        # which needs more memory per frame (0.22 against 0.09 MiB, measured).
-        source_rows = max(1, len(windows) * widest // max(total_frames))
+            mel_history.to(device=f0_device, dtype=torch.float64), finalize=True
+        ).to(mel_history)
+        # note(ratish): source chunks aim at this group's decode frames, at least one
+        # whole history; the source needs less memory per frame than the decode.
+        source_rows = max(1, len(windows) * max_window_frames // max_history_frames)
         for first in range(0, len(windows), source_rows):
             excitation = hift.f0_upsamp(f0[first : first + source_rows, None])
             excitation, _, _ = hift.m_source(excitation.transpose(1, 2))
-            source[first : first + source_rows] = excitation.transpose(1, 2)
-        # note(ratish): a final right aligned ends at the decode's edge as in its own
-        # call, and the padding before its context is past the decode's receptive field.
-        origin_frames = [
-            window.start_frame - (widest - width if window.row.is_final else 0)
-            for window, width in zip(windows, widths, strict=True)
-        ]
-        window_frames = history.new_zeros(len(windows), channels, widest)
-        window_source = source.new_zeros(len(windows), 1, widest * samples_per_frame)
-        for index, (window, total, origin) in enumerate(
-            zip(windows, total_frames, origin_frames, strict=True)
-        ):
-            window_frames[index, :, window.start_frame - origin : total - origin] = (
-                history[index, :, window.start_frame : total]
-            )
-            window_source[
-                index,
-                :,
-                (window.start_frame - origin)
-                * samples_per_frame : (total - origin)
-                * samples_per_frame,
-            ] = source[
-                index,
-                :,
-                window.start_frame * samples_per_frame : total * samples_per_frame,
-            ]
-        speech = hift.decode(x=window_frames, s=window_source, finalize=True)
+            excitation = excitation.transpose(1, 2)
+            for index in range(first, min(first + source_rows, len(windows))):
+                window = windows[index]
+                origin = origin_frames[index]
+                history_frames = history_frame_counts[index]
+                window_source[
+                    index,
+                    :,
+                    (window.start_frame - origin)
+                    * samples_per_frame : (history_frames - origin)
+                    * samples_per_frame,
+                ] = excitation[
+                    index - first,
+                    :,
+                    window.start_frame
+                    * samples_per_frame : history_frames
+                    * samples_per_frame,
+                ]
+        speech = hift.decode(x=window_mel, s=window_source, finalize=True)
         speech = speech.detach().cpu()
         return [
             (

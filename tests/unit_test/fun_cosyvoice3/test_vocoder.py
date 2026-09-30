@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -32,19 +33,16 @@ from tests.unit_test.fun_cosyvoice3.test_flow_batch import FakeFlow as _PackedFl
 class FakeF0Predictor(torch.nn.Module):
     condnet: ClassVar[list[SimpleNamespace]] = [SimpleNamespace(causal_padding=0)]
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.anchor = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, x, finalize=True):
-        del finalize
+    def forward(self, x: torch.Tensor, finalize: bool = True) -> torch.Tensor:
         return torch.zeros(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
 
 
 class FakeHiFT(torch.nn.Module):
-    """Emits the absolute sample index of every mel frame: inference over a
-    whole mel and the streaming decode over a window (whose source carries
-    the absolute positions) agree, so sliced deltas can be checked exactly."""
+    """Emits the absolute sample index of every mel frame, so sliced deltas check exactly."""
 
     # cosyvoice3.yaml: upsample_rates [8, 5, 3], istft_params.hop_len 4.
     upsample_rates: ClassVar[list[int]] = [8, 5, 3]
@@ -67,15 +65,16 @@ class FakeHiFT(torch.nn.Module):
         row = torch.arange(frames * self.samples_per_frame, dtype=torch.float32)
         return row.reshape(1, -1).repeat(batch, 1), None
 
-    def f0_upsamp(self, f0):
+    def f0_upsamp(self, f0: torch.Tensor) -> torch.Tensor:
         return f0.repeat_interleave(self.samples_per_frame, dim=-1)
 
-    def m_source(self, s):
+    def m_source(self, s: torch.Tensor) -> tuple[torch.Tensor, None, None]:
         positions = torch.arange(s.shape[1], dtype=torch.float32, device=s.device)
         return positions.reshape(1, -1, 1).repeat(s.shape[0], 1, 1), None, None
 
-    def decode(self, x, s, finalize=True):
-        del x, finalize
+    def decode(
+        self, x: torch.Tensor, s: torch.Tensor, finalize: bool = True
+    ) -> torch.Tensor:
         return s[:, 0, :]
 
 
@@ -1354,13 +1353,13 @@ def test_vocoder_hift_defaults_to_float32(monkeypatch) -> None:
 
 
 class HiftFlowStub:
-    output_size = 80
+    output_size: ClassVar[int] = 80
 
-    def parameters(self):
+    def parameters(self) -> Iterator[torch.Tensor]:
         yield torch.zeros(1, device="cuda")
 
     @property
-    def decoder(self):
+    def decoder(self) -> SimpleNamespace:
         return SimpleNamespace(estimator=torch.nn.Identity())
 
 
@@ -1493,6 +1492,7 @@ def test_hift_step_window_is_bit_identical_to_the_whole_history_call(
 def test_hift_step_final_is_bit_identical_beside_finals_of_other_widths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Each final's samples and cursor equal its own call, whatever it shares a step with and in which order."""
     monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     vocoder = stages.CosyVoice3Vocoder(HiftFlowStub(), make_causal_hift(10.0))
@@ -1504,7 +1504,13 @@ def test_hift_step_final_is_bit_identical_beside_finals_of_other_widths(
             emitted_samples=emitted_frames * samples_per_frame,
             is_final=True,
         )
-        for total_frames, emitted_frames in ((300, 200), (240, 148), (120, 0), (90, 0))
+        for total_frames, emitted_frames in (
+            (300, 200),
+            (240, 148),
+            (24, 0),
+            (18, 0),
+            (24, 0),
+        )
     ]
     with torch.inference_mode():
         batched = vocoder.hift_step(rows)
