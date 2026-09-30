@@ -190,6 +190,21 @@ Setting up and tearing down MPS is more involved than running a single replica, 
 
 The throughput results in the table and H100 case study are from an 80 GB H100 with Higgs. The H200 DP8 profile was validated separately on the full SeedTTS English dataset at concurrency 64 per replica. Re-evaluate replica count, CPU allocation, token capacity, and saturation concurrency before applying either profile to different hardware or workloads.
 
+## Fun-CosyVoice3 DP3 on one H200
+
+Three Fun-CosyVoice3 replicas under MPS on one 141 GB H200 serve 2.9x the throughput of one main-branch server, with lower mean time to first audio and SM Active rising from 35% to 87%.
+
+```bash
+CONFIG=examples/mps_dp/configs/fun_cosyvoice3_h200_dp3.yaml N=3 CORE_BLOCKS="56-64 65-73 74-83" HEALTH_TRIES=100 bash examples/mps_dp/launch.sh up
+```
+
+| Setup (c=16 streaming per server, full SeedTTS EN set per server) | Throughput (sum) | Audio s/s (sum) | TTFA mean | Latency p95 | SM Active mean | WER excl. >50% | Failed |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| main, one server (reference) | 6.56 req/s | 32.1 | 1.28 s | 3.58 s | 35% | 1.17% | 0 of 1088 |
+| this config, 3 servers without MPS (ablation) | 11.73 req/s | 57.9 | 1.88 s | 5.02 to 5.60 s | 47% | 1.23 to 1.28% | 0 of 3264 |
+| this config, `launch.sh` DP3 with MPS | 18.70 req/s | 93.9 | 1.15 s | 3.25 to 3.50 s | 87% | 1.07 to 1.24% | 0 of 3264 |
+
+The config needs [#2406](https://github.com/sgl-project/sglang-omni/pull/2406) (Flow prefix KV cache), [#2443](https://github.com/sgl-project/sglang-omni/pull/2443) (compiled HiFT decode, ONNX pools no longer spin) and [#2441](https://github.com/sgl-project/sglang-omni/pull/2441) (streaming with the vocoder in its own process). Each replica is two MPS clients (AR engine 4.5 GiB, vocoder 12.2 GiB including the 8 GB prefix pool); the card held 50 GiB after startup and 73 GiB after the run. The in-process `processes.pipeline.num_replicas` path is not recommended for this model yet: at N >= 2 it hit CUDA illegal memory access on long runs.
 
 ## Shared weights across replicas (opt-in, default off)
 
