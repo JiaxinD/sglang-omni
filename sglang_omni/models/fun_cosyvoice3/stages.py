@@ -8,7 +8,8 @@ import gc
 import importlib
 import logging
 import os
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from types import ModuleType
@@ -45,6 +46,7 @@ from sglang_omni.models.fun_cosyvoice3.flow_estimator_trt import (
 )
 from sglang_omni.models.fun_cosyvoice3.packed_dit import (
     DIT_INDUCTOR_OPTIONS,
+    PACKED_INDUCTOR_OPTIONS,
     PackedDiT,
     gather_rows,
     pack_rows,
@@ -1642,6 +1644,28 @@ def adaptive_flow_requests_grouping(
     raise AssertionError("valid Flow requests must have a feasible partition")
 
 
+def hift_decode_body(
+    hift: torch.nn.Module, x: torch.Tensor, s_stft: torch.Tensor
+) -> torch.Tensor:
+    """CausalHiFTGenerator.decode(finalize=True) between the source STFT and
+    the inverse STFT: mel window and source spectrum in, output spectrum out."""
+    x = hift.conv_pre(x)
+    for stage in range(hift.num_upsamples):
+        x = F.leaky_relu(x, hift.lrelu_slope)
+        x = hift.ups[stage](x)
+        if stage == hift.num_upsamples - 1:
+            x = hift.reflection_pad(x)
+        else:
+            pass
+        x = x + hift.source_resblocks[stage](hift.source_downs[stage](s_stft))
+        first = stage * hift.num_kernels
+        mixed = hift.resblocks[first](x)
+        for kernel in range(1, hift.num_kernels):
+            mixed = mixed + hift.resblocks[first + kernel](x)
+        x = mixed / hift.num_kernels
+    return hift.conv_post(F.leaky_relu(x))
+
+
 class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
     def __init__(
         self,
@@ -1652,6 +1676,7 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
         hift_max_padding_waste: float = 1.5,
         flow_merge_max_gap_frames: int = 384,
         flow_merge_pad_budget_percent: float = 25.0,
+        enable_hift_torch_compile: bool = False,
     ) -> None:
         if hift_max_padding_waste < 1.0:
             raise ValueError("hift_max_padding_waste must be at least 1.0")
@@ -1691,6 +1716,28 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
         self.hift_hold_frames = (
             hift.f0_predictor.condnet[0].causal_padding + hift.conv_pre_look_right + 1
         )
+        self.hift_body: Callable[..., torch.Tensor] | None = None
+        if enable_hift_torch_compile:
+            for module in hift.modules():
+                # Note (Jiaxin Deng): the downsample convs hold numpy stride,
+                # kernel and pad sizes, which trace as data; ints are constants.
+                if hasattr(module, "causal_padding"):
+                    module.causal_padding = int(module.causal_padding)
+                    module.stride = tuple(int(size) for size in module.stride)
+                    module.kernel_size = tuple(int(size) for size in module.kernel_size)
+                else:
+                    pass
+            # Note (Jiaxin Deng): the eager decode is some 1200 launches per
+            # group (Snake, pad, conv); Inductor fuses the pointwise chain.
+            self.hift_body = torch.compile(
+                hift_decode_body,
+                backend="inductor",
+                dynamic=True,
+                fullgraph=True,
+                options=dict(PACKED_INDUCTOR_OPTIONS),
+            )
+        else:
+            pass
         # note(ratish): the AR shares this process and the default stream; on its
         # own stream the vocoder's kernels and host copies do not queue behind the
         # AR's. It waits once for what the default stream holds at this point.
@@ -2022,6 +2069,18 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
                 )
         return [outputs[index] for index in range(len(rows))]
 
+    def warmup_hift_step(self, frames: int = 64) -> None:
+        """Run one and two rows through the step so the compiled decode's
+        batch-one and batched contracts exist before the first request."""
+        device = next(self.flow.parameters()).device
+        row = HiftStepRow(
+            history=torch.zeros(1, self.flow.output_size, frames, device=device),
+            emitted_samples=0,
+            is_final=False,
+        )
+        for count in (2, 1):
+            self.hift_step([row] * count)
+
     def hift_group(
         self, windows: Sequence[HiftDecodeWindow]
     ) -> tuple[torch.Tensor, list[int]]:
@@ -2095,7 +2154,18 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
                     * samples_per_frame : history_frames
                     * samples_per_frame,
                 ]
-        speech = hift.decode(x=window_mel, s=window_source, finalize=True)
+        if self.hift_body is None:
+            speech = hift.decode(x=window_mel, s=window_source, finalize=True)
+        else:
+            # Note (Jiaxin Deng): the STFT pair stays eager; Inductor has no
+            # codegen for complex tensors.
+            real, imag = hift._stft(window_source.squeeze(1))
+            spectrum = self.hift_body(hift, window_mel, torch.cat([real, imag], dim=1))
+            bins = hift.istft_params["n_fft"] // 2 + 1
+            speech = hift._istft(
+                torch.exp(spectrum[:, :bins]), torch.sin(spectrum[:, bins:])
+            )
+            speech = torch.clamp(speech, -hift.audio_limit, hift.audio_limit)
         return speech.detach(), origin_frames
 
     def make_flow_input(
@@ -2549,6 +2619,7 @@ def create_vocoder_executor(
     enable_flow_estimator_trt: bool = False,
     hift_dtype: str = "float32",
     hift_max_padding_waste: float = 1.5,
+    enable_hift_torch_compile: bool = True,
     token_hop_len: int = TOKEN_HOP_LEN,
     token_max_hop_len: int = TOKEN_MAX_HOP_LEN,
     disable_hop_growth: bool = False,
@@ -2695,6 +2766,9 @@ def create_vocoder_executor(
         flow_merge_pad_budget_percent=flow_merge_pad_budget_percent,
         hift_dtype=hift_dtype,
         hift_max_padding_waste=hift_max_padding_waste,
+        enable_hift_torch_compile=(
+            enable_hift_torch_compile and device_obj.type == "cuda"
+        ),
     )
 
     scheduler = FunCosyVoice3StreamingVocoderScheduler(
@@ -2709,6 +2783,16 @@ def create_vocoder_executor(
     )
     if enable_dit_torch_compile:
         scheduler.warmup_packed_dit_compile()
+    else:
+        pass
+    if vocoder.hift_body is not None:
+        started = time.monotonic()
+        with vocoder.stream_context:
+            vocoder.warmup_hift_step()
+        logger.info(
+            "Compiled Fun-CosyVoice3 HiFT decode (dynamic=True) in %.1f s",
+            time.monotonic() - started,
+        )
     else:
         pass
     scheduler.warmup_now()
