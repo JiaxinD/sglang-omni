@@ -1807,7 +1807,7 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         # differ, and a hop's emitted frames end before them.
         f0_device = next(hift.f0_predictor.parameters()).device
         f0 = hift.f0_predictor(
-            history.to(device=f0_device).to(torch.float64), finalize=True
+            history.to(device=f0_device, dtype=torch.float64), finalize=True
         ).to(history)
         source = history.new_empty(
             len(windows), 1, max(total_frames) * samples_per_frame
