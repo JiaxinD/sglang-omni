@@ -102,14 +102,10 @@ class GraphRunnableFakeFlow(RunnableFakeFlow):
 class RecordingPackedDiT(PackedDiT):
     def __init__(self) -> None:
         self.is_ragged = True
-        self.disable_calls = 0
 
     def compile(self, dtype: torch.dtype | None) -> bool:
         del dtype
         return True
-
-    def disable_compile(self) -> None:
-        self.disable_calls += 1
 
 
 def packed_compile_scheduler(
@@ -161,10 +157,12 @@ def test_packed_dit_compile_warmup_materializes_serving_variants() -> None:
 
     scheduler.warmup_packed_dit_compile()
 
-    assert len(hop_batches) == len(leftover_batches) == 1
+    assert [len(batch) for batch in hop_batches] == [1, 2]
+    assert [len(batch) for batch in leftover_batches] == [1, 2]
+    assert hop_batches[1][0].token.shape != hop_batches[1][1].token.shape
 
 
-def test_packed_dit_compile_warmup_failure_disables_compiled_path() -> None:
+def test_packed_dit_compile_warmup_failure_fails_startup() -> None:
     packed_estimator = RecordingPackedDiT()
     scheduler, _, leftover_batches = packed_compile_scheduler(
         packed_estimator,
@@ -174,7 +172,6 @@ def test_packed_dit_compile_warmup_failure_disables_compiled_path() -> None:
     with pytest.raises(RuntimeError, match="causal materialization failed"):
         scheduler.warmup_packed_dit_compile()
 
-    assert packed_estimator.disable_calls == 1
     assert leftover_batches == []
 
 
@@ -1156,7 +1153,7 @@ def test_create_vocoder_executor_compiles_before_flow_graph_capture(
     assert ("packed_warmup" in startup_events) is enable_dit_torch_compile
 
 
-def test_create_vocoder_executor_trt_alone_skips_the_default_compile(
+def test_create_vocoder_executor_trt_without_compile_skips_the_compile(
     monkeypatch,
 ) -> None:
     compiled, _scheduler = create_scheduler_recording_native_compile(
@@ -1328,7 +1325,6 @@ def test_pipeline_config_sets_flow_batch_admission_by_default() -> None:
         "max_batch_size": 16,
         "max_batch_wait_ms": 30,
         "enable_flow_cuda_graph": True,
-        "enable_dit_torch_compile": True,
         "enable_flow_estimator_trt": False,
         "token_hop_len": 25,
         "token_max_hop_len": 100,
