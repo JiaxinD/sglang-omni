@@ -123,6 +123,49 @@ decode, it continues coalescing until the target or deadline. Override the two
 limits with `--prefill-coalesce-requests` and `--prefill-coalesce-wait-ms`, or
 set the request target to `0` to disable coalescing.
 
+### Minimal Prefill/Decode Disaggregation
+
+The `pd` variant uses the shared Omni prefill/decode schedulers and CUDA IPC
+KV transfer. It runs on a single host with TP=1 and `stream=false`.
+P owns audio encoding and prompt prefill, including the first sampled token;
+D resumes from the transferred prompt KV and that token, then returns the
+normal transcription response. Raw audio and encoder embeddings stay on P.
+The transfer uses the existing reserve/copy/commit/ACK lifecycle, and P retains
+its source KV until the transfer releases it.
+
+Launch 1P + 1D on GPUs 0 and 1:
+
+```bash
+sgl-omni serve --config examples/configs/moss_td_pd.yaml --port 8000
+```
+
+Use the transcription requests below with `stream=false`
+(the default). Streaming requests are rejected. Radix caching is disabled,
+page size is 1, and both stages use synchronous decoding by default.
+D currently loads the full checkpoint but does not run/capture the encoder.
+
+P and D can be replicated independently using the existing process-level DP
+configuration. For example, 1P + 2D on three GPUs:
+
+```bash
+sgl-omni serve --config examples/configs/moss_td_pd.yaml \
+  --processes.asr_decode.num_replicas 2 \
+  --processes.asr_decode.replica_devices '[1,2]'
+```
+
+For 2P + 2D on four GPUs, also set
+`--processes.asr_prefill.num_replicas 2
+--processes.asr_prefill.replica_devices '[0,1]'` and use `[2,3]` for D.
+The coordinator binds each request to one P and one D replica at admission;
+the KV target uses that D instance's pool (for example, `asr_decode@r1:kv`).
+These examples dedicate a GPU to each process. Colocating processes requires
+explicit per-stage memory budgets under the normal placement rules.
+
+This initial variant does not add multi-host transport, TP, streaming, or
+load-aware replica selection. Decode KV exhaustion currently fails the
+affected request through the shared PD runtime; admission/backpressure tuning
+is separate from this model integration.
+
 ### Sending Requests
 
 Use `response_format=verbose_json` when you need parsed speaker segments. `json` returns the raw transcript text only.
