@@ -749,13 +749,14 @@ def test_finals_of_different_widths_share_one_step_at_their_own_lengths() -> Non
     scheduler.handle_streaming_new_request("req-b", stream_payload("req-b"))
     scheduler.ingest_stream_item("req-b", item([i % 31 for i in range(200)]))
     assert serve(scheduler) == 3
-    drain(scheduler)
+    hop_messages = drain(scheduler)
     scheduler.handle_stream_done("req-a")
     scheduler.handle_stream_done("req-b")
     estimator_calls(flow).clear()
 
     assert serve(scheduler) == 1
-    assert [(m.request_id, m.type) for m in drain(scheduler)] == [
+    final_messages = drain(scheduler)
+    assert [(m.request_id, m.type) for m in final_messages] == [
         ("req-a", "stream"),
         ("req-a", "result"),
         ("req-b", "stream"),
@@ -763,6 +764,17 @@ def test_finals_of_different_widths_share_one_step_at_their_own_lengths() -> Non
     ]
     assert estimator_calls(flow)[0]["lengths"] == (110, 450, 110, 450)
     assert estimator_calls(flow)[0]["streaming"] is False
+    for request_id in ("req-a", "req-b"):
+        samples = np.concatenate(
+            [
+                waveform(m.data)
+                for m in hop_messages + final_messages
+                if m.request_id == request_id and m.type == "stream"
+            ]
+        )
+        np.testing.assert_array_equal(
+            samples, np.arange(samples.shape[0], dtype=np.float32)
+        )
 
 
 def test_stream_without_tokens_fails_in_its_own_step() -> None:

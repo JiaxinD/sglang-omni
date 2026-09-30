@@ -1486,3 +1486,31 @@ def test_hift_step_window_is_bit_identical_to_the_whole_history_call(
             ]
         )
     assert torch.equal(delta, reference)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hift_step_final_is_bit_identical_beside_finals_of_other_widths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    vocoder = stages.CosyVoice3Vocoder(HiftFlowStub(), make_causal_hift(10.0))
+    torch.manual_seed(1)
+    samples_per_frame = vocoder.hift_samples_per_mel_frame
+    rows = [
+        stages.HiftStepRow(
+            history=torch.randn(1, 80, total_frames, device="cuda") * 3,
+            emitted_samples=emitted_frames * samples_per_frame,
+            is_final=True,
+        )
+        for total_frames, emitted_frames in ((300, 200), (240, 148), (120, 0), (90, 0))
+    ]
+    with torch.inference_mode():
+        batched = vocoder.hift_step(rows)
+        alone = [vocoder.hift_step([row])[0] for row in rows]
+    for (delta, emitted_after), (reference, reference_after) in zip(
+        batched, alone, strict=True
+    ):
+        assert emitted_after == reference_after
+        assert torch.equal(delta, reference)

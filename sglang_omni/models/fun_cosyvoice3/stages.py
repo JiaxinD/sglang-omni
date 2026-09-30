@@ -1768,12 +1768,12 @@ class CosyVoice3Vocoder(BatchVocoderBase):
             )
         # Note (Jiaxin Deng): a final row padded to a wider row would end at
         # the padding, not at its own ISTFT edge, and the whole tail is emitted.
+        # note(ratish): hift_group aligns finals right for that. A final whose
+        # window starts at the history's start needs its left edge as well.
         groups: dict[int | None, list[int]] = {}
         for index, window in enumerate(windows):
-            if window.row.is_final:
-                final_width: int | None = (
-                    int(window.row.history.shape[2]) - window.start_frame
-                )
+            if window.row.is_final and window.start_frame == 0:
+                final_width: int | None = int(window.row.history.shape[2])
             else:
                 final_width = None
             groups.setdefault(final_width, []).append(index)
@@ -1794,6 +1794,7 @@ class CosyVoice3Vocoder(BatchVocoderBase):
             total - window.start_frame
             for total, window in zip(total_frames, windows, strict=True)
         ]
+        widest = max(widths)
         history = windows[0].row.history.new_zeros(
             len(windows), channels, max(total_frames)
         )
@@ -1814,22 +1815,32 @@ class CosyVoice3Vocoder(BatchVocoderBase):
         )
         # note(ratish): source chunks cover no more frames than this group's decode,
         # which needs more memory per frame (0.22 against 0.09 MiB, measured).
-        source_rows = max(1, len(windows) * max(widths) // max(total_frames))
+        source_rows = max(1, len(windows) * widest // max(total_frames))
         for first in range(0, len(windows), source_rows):
             excitation = hift.f0_upsamp(f0[first : first + source_rows, None])
             excitation, _, _ = hift.m_source(excitation.transpose(1, 2))
             source[first : first + source_rows] = excitation.transpose(1, 2)
-        window_frames = history.new_zeros(len(windows), channels, max(widths))
-        window_source = source.new_zeros(
-            len(windows), 1, max(widths) * samples_per_frame
-        )
-        for index, (window, total) in enumerate(
-            zip(windows, total_frames, strict=True)
+        # note(ratish): a final right aligned ends at the decode's edge as in its own
+        # call, and the padding before its context is past the decode's receptive field.
+        origin_frames = [
+            window.start_frame - (widest - width if window.row.is_final else 0)
+            for window, width in zip(windows, widths, strict=True)
+        ]
+        window_frames = history.new_zeros(len(windows), channels, widest)
+        window_source = source.new_zeros(len(windows), 1, widest * samples_per_frame)
+        for index, (window, total, origin) in enumerate(
+            zip(windows, total_frames, origin_frames, strict=True)
         ):
-            window_frames[index, :, : widths[index]] = history[
-                index, :, window.start_frame : total
-            ]
-            window_source[index, :, : widths[index] * samples_per_frame] = source[
+            window_frames[index, :, window.start_frame - origin : total - origin] = (
+                history[index, :, window.start_frame : total]
+            )
+            window_source[
+                index,
+                :,
+                (window.start_frame - origin)
+                * samples_per_frame : (total - origin)
+                * samples_per_frame,
+            ] = source[
                 index,
                 :,
                 window.start_frame * samples_per_frame : total * samples_per_frame,
@@ -1840,13 +1851,15 @@ class CosyVoice3Vocoder(BatchVocoderBase):
             (
                 speech[
                     index : index + 1,
-                    (window.emitted_frame - window.start_frame)
-                    * samples_per_frame : (window.end_frame - window.start_frame)
+                    (window.emitted_frame - origin)
+                    * samples_per_frame : (window.end_frame - origin)
                     * samples_per_frame,
                 ].contiguous(),
                 window.end_frame * samples_per_frame,
             )
-            for index, window in enumerate(windows)
+            for index, (window, origin) in enumerate(
+                zip(windows, origin_frames, strict=True)
+            )
         ]
 
     def make_flow_input(
