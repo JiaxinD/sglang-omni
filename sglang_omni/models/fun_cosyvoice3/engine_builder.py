@@ -119,9 +119,8 @@ class FunCosyVoice3EngineBuilder(TtsEngineBuilder):
             }
         else:
             pass
-        max_running_requests = 32
         return {
-            "max_running_requests": max_running_requests,
+            "max_running_requests": 32,
             "cuda_graph_max_bs": 32,
             "torch_compile_max_bs": 32,
             "dtype": dtype,
@@ -130,13 +129,20 @@ class FunCosyVoice3EngineBuilder(TtsEngineBuilder):
             "enable_torch_compile": False,
             "mem_fraction_static": 0.85,
             "max_prefill_tokens": 4096,
-            # Note (Jiaxin Deng): the fraction alone sized a 62 GB pool on an
-            # H100 that the running requests can never fill; the vocoder shares
-            # the GPU and was left about 10 GB of dynamic-shape headroom.
-            "max_total_tokens": max_running_requests * self.context_length,
             "sampling_backend": "pytorch",
             "trust_remote_code": True,
         }
+
+    def adjust_overrides(self, overrides: dict[str, Any]) -> None:
+        # Note (Jiaxin Deng): the fraction alone sized a 62 GB pool on an
+        # H100 that the running requests can never fill; the vocoder shares
+        # the GPU and was left about 10 GB of dynamic-shape headroom.
+        if overrides.get("max_total_tokens") is None:
+            overrides["max_total_tokens"] = (
+                overrides["max_running_requests"] * self.context_length
+            )
+        else:
+            pass
 
     def before_memory_pool(
         self,
