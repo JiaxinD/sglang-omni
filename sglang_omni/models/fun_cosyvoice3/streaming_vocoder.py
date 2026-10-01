@@ -54,6 +54,13 @@ SAMPLE_RATE = 24000
 NextDecode = Literal["causal_window", "leftover", "fallback", "wait"]
 
 
+def causal_hop_frames(item: FlowBatchInput) -> int:
+    """Mel frames a causal hop over item solves, prompt included."""
+    return (
+        int(item.prompt_token.shape[1]) + int(item.token.shape[1]) - PRE_LOOKAHEAD_LEN
+    ) * TOKEN_MEL_RATIO
+
+
 @dataclass
 class CosyVoice3StreamState:
     tokens: list[int] = field(default_factory=list)
@@ -212,13 +219,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
     def warmup_prefix_hops(self, item: FlowBatchInput) -> None:
         """A first hop and a follow-up hop through the prefix cache, so both
         an empty and a filled prefix are materialized before serving."""
-        prompt_tokens = int(item.prompt_token.shape[1])
-        first = int(item.token.shape[1])
-        first_frames = (prompt_tokens + first - PRE_LOOKAHEAD_LEN) * TOKEN_MEL_RATIO
-        second_frames = (
-            prompt_tokens + first * 2 - PRE_LOOKAHEAD_LEN
-        ) * TOKEN_MEL_RATIO
-        cache = self.vocoder.prefix_cache_rows(first_frames)
+        cache = self.vocoder.prefix_cache_rows(causal_hop_frames(item))
         if cache is None:
             return
         else:
@@ -231,7 +232,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 prompt_feat=item.prompt_feat,
                 embedding=item.embedding,
             )
-            if self.vocoder.grow_prefix_cache(cache, second_frames):
+            if self.vocoder.grow_prefix_cache(cache, causal_hop_frames(longer)):
                 self.vocoder.hop_batch_prefix([longer], [cache])
             else:
                 pass
@@ -527,11 +528,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
         for index, ((_, state), item) in enumerate(
             zip(participants, items, strict=True)
         ):
-            frames = (
-                int(item.prompt_token.shape[1])
-                + int(item.token.shape[1])
-                - PRE_LOOKAHEAD_LEN
-            ) * TOKEN_MEL_RATIO
+            frames = causal_hop_frames(item)
             cache = state.flow_cache
             if cache is None:
                 cache = self.vocoder.prefix_cache_rows(frames)

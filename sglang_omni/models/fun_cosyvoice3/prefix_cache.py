@@ -208,8 +208,6 @@ class PrefixRowAttention:
             (start + count) // chunk_size * chunk_size
             for start, count in zip(prefix, new, strict=True)
         ]
-        # each row's CONV_CONTEXT_FRAMES frames of [context; new frames] before
-        # its committed end
         self.tail_index = torch.tensor(
             [end - start for end, start in zip(self.committed, prefix, strict=True)],
             device=device,
