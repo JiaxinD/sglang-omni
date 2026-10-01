@@ -70,12 +70,12 @@ def make_estimator() -> PackedDiT:
     return estimator
 
 
-def closeness(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    return ((actual - expected).abs().max() / expected.std()).item()
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_prefix_hops_match_whole_history_hops() -> None:
+@pytest.mark.parametrize("totals", [(100, 200, 400), (70, 130, 260)])
+def test_prefix_hops_are_bit_identical_to_whole_history_hops(
+    totals: tuple[int, ...],
+) -> None:
+    """Every hop equals the whole-history hop, also hops that end inside a chunk."""
     estimator = make_estimator()
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -90,8 +90,6 @@ def test_prefix_hops_match_whole_history_hops() -> None:
     )
     torch.manual_seed(1)
     rows = 2
-    # each row: prompt 50 frames of mel condition, hops ending at 100 / 200 / 400
-    totals = [100, 200, 400]
     noise = torch.randn(rows, CHANNELS, 400, device=device, dtype=dtype)
     mu = torch.randn(rows, CHANNELS, 400, device=device, dtype=dtype)
     cond = torch.zeros_like(mu)
@@ -117,9 +115,10 @@ def test_prefix_hops_match_whole_history_hops() -> None:
             )
             for pair in caches:
                 assert grow_rows(pool, list(pair), [total, total])
-            new = [total - previous] * rows
+            start = caches[0][0].frames
+            new = [total - start] * rows
             take = lambda x: torch.cat(
-                [x[row, :, previous:total].transpose(0, 1) for row in range(rows)]
+                [x[row, :, start:total].transpose(0, 1) for row in range(rows)]
             ).unsqueeze(0)
             cached = solve_flow_euler_prefix(
                 estimator,
@@ -136,19 +135,15 @@ def test_prefix_hops_match_whole_history_hops() -> None:
             for row in range(rows):
                 expected = reference[0, row * total + previous : (row + 1) * total]
                 actual = cached[
-                    0, row * (total - previous) : (row + 1) * (total - previous)
+                    0,
+                    row * (total - start)
+                    + previous
+                    - start : (row + 1) * (total - start),
                 ]
-                assert closeness(actual, expected) < 0.05, (
-                    total,
-                    row,
-                    closeness(actual, expected),
-                )
-            assert all(
-                pair[0].frames == total and pair[1].frames == total for pair in caches
-            )
+                assert torch.equal(actual, expected), (total, row)
             previous = total
     used = 32 - len(pool.free_blocks)
-    assert used == rows * 2 * ((400 + BLOCK_FRAMES - 1) // BLOCK_FRAMES)
+    assert used == rows * 2 * ((totals[-1] + BLOCK_FRAMES - 1) // BLOCK_FRAMES)
     for pair in caches:
         release_rows(pool, list(pair))
     assert len(pool.free_blocks) == 32

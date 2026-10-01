@@ -4,9 +4,9 @@
 A causal hop re-solves the whole utterance so far. Under the chunk-causal mask
 a frame only attends to its own chunk and the chunks before it, the causal
 positional convs only look left and every hop restarts from the same noise, so
-the frames earlier hops already solved produce the same K and V at every Euler
-step and layer. This keeps those in a paged pool and runs a hop over the frames
-it adds, attending to the cached prefix.
+a frame whose chunk is complete produces the same K and V at every Euler step
+and layer on every later hop. This keeps those in a paged pool and runs a hop
+over the frames past them, attending to the cached prefix.
 """
 
 from __future__ import annotations
@@ -181,10 +181,18 @@ class PrefixRowAttention:
             assert pages[row].numel() >= end, "row holds fewer pages than frames"
             table[segment, :end] = pages[row][:end]
         self.page_table = table
-        # each row's last CONV_CONTEXT_FRAMES frames of [context; new frames]
-        self.tail_index = torch.tensor(new, device=device).unsqueeze(1) + torch.arange(
-            CONV_CONTEXT_FRAMES, device=device
-        )
+        # note(ratish): a frame's K and V are final once its whole chunk exists,
+        # so a row keeps whole chunks and recomputes the rest on its next hop.
+        self.committed = [
+            (start + count) // chunk_size * chunk_size
+            for start, count in zip(prefix, new, strict=True)
+        ]
+        # each row's CONV_CONTEXT_FRAMES frames of [context; new frames] before
+        # its committed end
+        self.tail_index = torch.tensor(
+            [end - start for end, start in zip(self.committed, prefix, strict=True)],
+            device=device,
+        ).unsqueeze(1) + torch.arange(CONV_CONTEXT_FRAMES, device=device)
         # every new frame's page, in packed order: where this hop writes K and V
         self.write_index = torch.cat(
             [
@@ -454,6 +462,6 @@ def solve_flow_euler_prefix(
         else:
             pass
     for index, row in enumerate(twins):
-        row.frames += counts[index]
+        row.frames = attention.committed[index]
         row.conv_context = next_context[:, index].clone()
     return x.float()
