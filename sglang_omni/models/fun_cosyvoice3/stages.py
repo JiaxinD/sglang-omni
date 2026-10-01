@@ -2484,7 +2484,7 @@ def create_vocoder_executor(
     token_hop_len: int = TOKEN_HOP_LEN,
     token_max_hop_len: int = TOKEN_MAX_HOP_LEN,
     disable_hop_growth: bool = False,
-    flow_prefix_cache_gb: float = 24.0,
+    flow_prefix_cache_gb: float,
     mlx_model_path: str | None = None,
     mlx_model_revision: str | None = None,
 ) -> Any:
@@ -2494,6 +2494,10 @@ def create_vocoder_executor(
 
     if flow_batch_admission_frames <= 0:
         raise ValueError("flow_batch_admission_frames must be greater than zero")
+    else:
+        pass
+    if flow_prefix_cache_gb < 0:
+        raise ValueError("flow_prefix_cache_gb must be >= 0")
     else:
         pass
 
@@ -2588,10 +2592,6 @@ def create_vocoder_executor(
     else:
         pass
 
-    if flow_prefix_cache_gb < 0:
-        raise ValueError("flow_prefix_cache_gb must be >= 0")
-    else:
-        pass
     if (
         flow_prefix_cache_gb > 0
         and device_obj.type == "cuda"

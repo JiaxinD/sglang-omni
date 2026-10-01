@@ -882,6 +882,7 @@ def test_flow_admission_defers_request_after_long_singleton(monkeypatch) -> None
     # about the default value.
     scheduler = stages.create_vocoder_executor(
         "model",
+        flow_prefix_cache_gb=0.0,
         device="cpu",
         flow_batch_admission_frames=2000,
         enable_dit_torch_compile=False,
@@ -914,7 +915,7 @@ def test_create_vocoder_executor_defaults_batch_for_real_lengths(monkeypatch) ->
         ),
     )
     scheduler = stages.create_vocoder_executor(
-        "model", device="cpu", enable_dit_torch_compile=False
+        "model", device="cpu", enable_dit_torch_compile=False, flow_prefix_cache_gb=0.0
     )
 
     assert scheduler.max_batch_cost == stages.DEFAULT_FLOW_BATCH_ADMISSION_FRAMES
@@ -955,6 +956,7 @@ def test_create_vocoder_executor_threads_batch_configuration(monkeypatch) -> Non
 
     scheduler = stages.create_vocoder_executor(
         "model",
+        flow_prefix_cache_gb=0.0,
         device="cpu",
         enable_dit_torch_compile=False,
         dtype="float16",
@@ -1003,6 +1005,7 @@ def test_create_vocoder_executor_threads_trt_flag(monkeypatch) -> None:
 
     stages.create_vocoder_executor(
         "model",
+        flow_prefix_cache_gb=0.0,
         device="cpu",
         max_batch_size=4,
         enable_dit_torch_compile=False,
@@ -1038,7 +1041,9 @@ def create_scheduler_recording_native_compile(
         compiled.append(flow)
 
     monkeypatch.setattr(stages, "compile_dit_backbone", fake_compile)
-    scheduler = stages.create_vocoder_executor("model", device="cpu", **kwargs)
+    scheduler = stages.create_vocoder_executor(
+        "model", device="cpu", flow_prefix_cache_gb=0.0, **kwargs
+    )
     return compiled, scheduler
 
 
@@ -1144,6 +1149,7 @@ def test_create_vocoder_executor_compiles_before_flow_graph_capture(
 
     _scheduler = stages.create_vocoder_executor(
         "model",
+        flow_prefix_cache_gb=0.0,
         device="cuda",
         enable_dit_torch_compile=enable_dit_torch_compile,
         enable_flow_cuda_graph=True,
@@ -1175,6 +1181,7 @@ def test_create_vocoder_executor_rejects_trt_and_compile() -> None:
     with pytest.raises(ValueError, match="enable only one"):
         stages.create_vocoder_executor(
             "model",
+            flow_prefix_cache_gb=0.0,
             enable_dit_torch_compile=True,
             enable_flow_estimator_trt=True,
         )
@@ -1311,6 +1318,7 @@ def test_create_vocoder_executor_rejects_non_positive_admission_budget(
     with pytest.raises(ValueError, match="flow_batch_admission_frames"):
         stages.create_vocoder_executor(
             "model",
+            flow_prefix_cache_gb=0.0,
             device="cpu",
             flow_batch_admission_frames=0,
             enable_dit_torch_compile=False,
