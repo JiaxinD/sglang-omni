@@ -16,6 +16,7 @@ from sglang_omni.models.fun_cosyvoice3.prefix_cache import (
     BLOCK_FRAMES,
     PrefixCacheRow,
     PrefixKVPool,
+    compile_forward_prefix,
     grow_rows,
     release_rows,
     solve_flow_euler_prefix,
@@ -145,6 +146,104 @@ def test_prefix_hops_are_bit_identical_to_whole_history_hops(
     used = 32 - len(pool.free_blocks)
     assert used == rows * 2 * ((totals[-1] + BLOCK_FRAMES - 1) // BLOCK_FRAMES)
     for pair in caches:
+        release_rows(pool, list(pair))
+    assert len(pool.free_blocks) == 32
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compiled_prefix_hops_follow_each_row_across_batches() -> None:
+    """Compiled hops over rows with their own prompts, prefixes and lengths,
+    one joining fresh beside a cached one and the order flipped on a later hop,
+    equal each row's own whole-history solve."""
+    estimator = make_estimator()
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    pool = PrefixKVPool(
+        layer_num=LAYERS,
+        euler_steps=10,
+        head_num=HEADS,
+        head_dim=HEAD_DIM,
+        capacity_frames=32 * BLOCK_FRAMES,
+        device=device,
+        dtype=dtype,
+    )
+    pool.forward = compile_forward_prefix()
+    torch.manual_seed(2)
+    streams = {}
+    for name, prompt_frames in (("a", 50), ("b", 80)):
+        mel_conditioning = torch.zeros(CHANNELS, 400, device=device, dtype=dtype)
+        mel_conditioning[:, :prompt_frames] = torch.randn(
+            CHANNELS, prompt_frames, device=device, dtype=dtype
+        )
+        streams[name] = {
+            "noise": torch.randn(CHANNELS, 400, device=device, dtype=dtype),
+            "mu": torch.randn(CHANNELS, 400, device=device, dtype=dtype),
+            "mel_conditioning": mel_conditioning,
+            "speaker_embeddings": torch.randn(CHANNELS, device=device, dtype=dtype),
+        }
+    caches = {name: (PrefixCacheRow(), PrefixCacheRow()) for name in streams}
+    emitted = {name: 0 for name in streams}
+    unit = torch.linspace(0, 1, 11, device=device, dtype=dtype)
+    time_span = 1 - torch.cos(unit * 0.5 * torch.pi)
+    hops = [[("a", 70)], [("b", 130), ("a", 160)], [("a", 260), ("b", 210)]]
+    with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        for hop in hops:
+            names = [name for name, _ in hop]
+            totals = [total for _, total in hop]
+            for name, total in hop:
+                assert grow_rows(pool, list(caches[name]), [total, total])
+            starts = [caches[name][0].committed_frames for name in names]
+
+            def take(key: str) -> torch.Tensor:
+                return torch.cat(
+                    [
+                        streams[name][key][:, start:total].transpose(0, 1)
+                        for name, start, total in zip(names, starts, totals)
+                    ]
+                ).unsqueeze(0)
+
+            cached = solve_flow_euler_prefix(
+                estimator,
+                pool,
+                take("noise"),
+                time_span,
+                take("mu"),
+                torch.stack([streams[name]["speaker_embeddings"] for name in names]),
+                take("mel_conditioning"),
+                [total - start for start, total in zip(starts, totals)],
+                [caches[name] for name in names],
+                cfg_rate=0.7,
+            )
+            offset = 0
+            for name, start, total in zip(names, starts, totals):
+                stream = streams[name]
+                packed = pack_rows([total], device)
+                reference = solve_flow_euler_packed(
+                    estimator,
+                    gather_rows(
+                        stream["noise"][None, :, :total].transpose(1, 2), packed
+                    ),
+                    time_span,
+                    gather_rows(stream["mu"][None, :, :total].transpose(1, 2), packed),
+                    stream["speaker_embeddings"][None],
+                    gather_rows(
+                        stream["mel_conditioning"][None, :, :total].transpose(1, 2),
+                        packed,
+                    ),
+                    packed,
+                    cfg_rate=0.7,
+                    streaming=True,
+                )
+                actual = cached[
+                    0, offset + emitted[name] - start : offset + total - start
+                ]
+                assert torch.equal(actual, reference[0, emitted[name] : total]), (
+                    name,
+                    total,
+                )
+                emitted[name] = total
+                offset += total - start
+    for pair in caches.values():
         release_rows(pool, list(pair))
     assert len(pool.free_blocks) == 32
 
