@@ -528,11 +528,11 @@ class FunCosyVoice3StreamingVocoderScheduler(
         for index, ((_, state), item) in enumerate(
             zip(participants, items, strict=True)
         ):
-            frames = causal_hop_frames(item)
+            total_frames = causal_hop_frames(item)
             cache = state.flow_cache
             if cache is None:
-                cache = self.vocoder.prefix_cache_rows(frames)
-            elif not self.vocoder.grow_prefix_cache(cache, frames):
+                cache = self.vocoder.prefix_cache_rows(total_frames)
+            elif not self.vocoder.grow_prefix_cache(cache, total_frames):
                 # Note (Jiaxin Deng): a row the pool cannot hold runs over its
                 # whole history this hop and may re-enter the pool on a later one.
                 self.vocoder.release_prefix_cache(cache)

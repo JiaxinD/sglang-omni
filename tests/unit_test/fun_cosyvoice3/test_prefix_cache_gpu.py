@@ -80,11 +80,11 @@ def test_prefix_hops_are_bit_identical_to_whole_history_hops(
     device = torch.device("cuda")
     dtype = torch.bfloat16
     pool = PrefixKVPool(
-        layers=LAYERS,
-        steps=10,
-        heads=HEADS,
+        layer_num=LAYERS,
+        euler_steps=10,
+        head_num=HEADS,
         head_dim=HEAD_DIM,
-        frames=32 * BLOCK_FRAMES,
+        capacity_frames=32 * BLOCK_FRAMES,
         device=device,
         dtype=dtype,
     )
@@ -115,7 +115,7 @@ def test_prefix_hops_are_bit_identical_to_whole_history_hops(
             )
             for pair in caches:
                 assert grow_rows(pool, list(pair), [total, total])
-            start = caches[0][0].frames
+            start = caches[0][0].committed_frames
             new = [total - start] * rows
             take = lambda x: torch.cat(
                 [x[row, :, start:total].transpose(0, 1) for row in range(rows)]
@@ -156,7 +156,8 @@ def test_grow_rows_takes_nothing_on_a_shortfall() -> None:
     assert not grow_rows(pool, rows, [BLOCK_FRAMES * 2, BLOCK_FRAMES * 2])
     assert pool.free_blocks == [0, 1, 2] and rows[0].blocks == []
     assert grow_rows(pool, rows, [BLOCK_FRAMES, BLOCK_FRAMES * 2])
-    assert rows[0].capacity == BLOCK_FRAMES and rows[1].capacity == BLOCK_FRAMES * 2
+    assert rows[0].allocated_frames == BLOCK_FRAMES
+    assert rows[1].allocated_frames == BLOCK_FRAMES * 2
     assert pool.free_blocks == []
     release_rows(pool, rows)
-    assert sorted(pool.free_blocks) == [0, 1, 2] and rows[0].frames == 0
+    assert sorted(pool.free_blocks) == [0, 1, 2] and rows[0].committed_frames == 0
