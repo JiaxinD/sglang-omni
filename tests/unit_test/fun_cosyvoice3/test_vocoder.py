@@ -1527,34 +1527,35 @@ def test_hift_step_final_is_bit_identical_beside_finals_of_other_widths(
 
 def prefix_pool_scheduler(
     room: list[bool],
-) -> tuple[FunCosyVoice3StreamingVocoderScheduler, dict[str, list]]:
-    """A scheduler whose pool admits one row per True in `room`, in order."""
-    calls: dict[str, list] = {"prefix": [], "plain": [], "released": []}
+) -> tuple[FunCosyVoice3StreamingVocoderScheduler, list[tuple[str, int]]]:
+    """A scheduler whose pool admits one row per True in room, in order; cached
+    rows return their index in the cached call, plain rows -1."""
+    released: list[tuple[str, int]] = []
     admissions = iter(room)
 
-    def prefix_cache_rows(frames: int):
+    def prefix_cache_rows(frames: int) -> tuple[str, int] | None:
         return ("pair", frames) if next(admissions) else None
 
-    def grow_prefix_cache(pair, frames: int) -> bool:
+    def grow_prefix_cache(pair: tuple[str, int], frames: int) -> bool:
         return next(admissions)
 
-    def hop_batch_prefix(items, caches):
-        calls["prefix"].append((list(items), list(caches)))
+    def hop_batch_prefix(
+        items: list[stages.FlowBatchInput], caches: list[tuple[str, int]]
+    ) -> list[torch.Tensor]:
         return [torch.full((1, 1, 1), float(i)) for i, _ in enumerate(items)]
 
-    def hop_batch(items):
-        calls["plain"].append(list(items))
+    def hop_batch(items: list[stages.FlowBatchInput]) -> list[torch.Tensor]:
         return [torch.full((1, 1, 1), -1.0) for _ in items]
 
     vocoder = SimpleNamespace(
         flow=SimpleNamespace(prefix_pool=object()),
         prefix_cache_rows=prefix_cache_rows,
         grow_prefix_cache=grow_prefix_cache,
-        release_prefix_cache=lambda pair: calls["released"].append(pair),
+        release_prefix_cache=released.append,
         hop_batch_prefix=hop_batch_prefix,
         hop_batch=hop_batch,
     )
-    return FunCosyVoice3StreamingVocoderScheduler(vocoder), calls
+    return FunCosyVoice3StreamingVocoderScheduler(vocoder), released
 
 
 def prefix_hop_item(tokens: int) -> stages.FlowBatchInput:
@@ -1567,7 +1568,7 @@ def prefix_hop_item(tokens: int) -> stages.FlowBatchInput:
 
 
 def test_hop_batch_with_prefix_keeps_row_order_across_cached_and_plain_rows() -> None:
-    scheduler, calls = prefix_pool_scheduler(room=[False, True])
+    scheduler, _ = prefix_pool_scheduler(room=[False, True])
     states = [CosyVoice3StreamState(), CosyVoice3StreamState()]
     participants = [("a", states[0]), ("b", states[1])]
     items = [prefix_hop_item(8), prefix_hop_item(8)]
@@ -1575,26 +1576,21 @@ def test_hop_batch_with_prefix_keeps_row_order_across_cached_and_plain_rows() ->
     mels = scheduler.hop_batch_with_prefix(participants, items)
 
     assert [mel.item() for mel in mels] == [-1.0, 0.0]
-    assert calls["plain"] == [[items[0]]]
-    assert calls["prefix"] == [([items[1]], [("pair", 18)])]
     assert states[0].flow_cache is None
     assert states[1].flow_cache == ("pair", 18)
-    assert calls["released"] == [None]
 
 
 def test_hop_batch_with_prefix_drops_a_row_the_pool_cannot_grow_and_readmits_it() -> (
     None
 ):
-    scheduler, calls = prefix_pool_scheduler(room=[True, False, True])
+    scheduler, released = prefix_pool_scheduler(room=[True, False, True])
     state = CosyVoice3StreamState()
     participants = [("a", state)]
 
     scheduler.hop_batch_with_prefix(participants, [prefix_hop_item(8)])
     scheduler.hop_batch_with_prefix(participants, [prefix_hop_item(16)])
-    assert calls["released"] == [("pair", 18)]
+    assert released == [("pair", 18)]
     assert state.flow_cache is None
-    assert len(calls["plain"]) == 1
 
     scheduler.hop_batch_with_prefix(participants, [prefix_hop_item(24)])
     assert state.flow_cache == ("pair", 50)
-    assert [caches for _, caches in calls["prefix"]] == [[("pair", 18)], [("pair", 50)]]

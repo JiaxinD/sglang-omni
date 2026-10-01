@@ -91,6 +91,8 @@ COSYVOICE_INSTALL_HINT = (
 CAUSAL_CONV_CACHE_PATCHED = False
 
 FLOW_CUDA_GRAPH_FRAME_BUCKET = 16
+# note(ratish): the Flow's Euler steps per solve, CosyVoice's n_timesteps.
+FLOW_EULER_STEPS = 10
 # Note (chenyang):
 # Mel-frame step size for buffered flow CUDA Graph keys. Capture shapes
 # must use a T that is a multiple of this step size. For example, 489
@@ -431,7 +433,9 @@ class FlowCudaGraphRunner:
             .expand(batch_size, -1, -1)
             .clone()
         )
-        time_span = torch.linspace(0, 1, 11, device=model_device, dtype=parameter_dtype)
+        time_span = torch.linspace(
+            0, 1, FLOW_EULER_STEPS + 1, device=model_device, dtype=parameter_dtype
+        )
         if decoder.t_scheduler == "cosine":
             time_span = 1 - torch.cos(time_span * 0.5 * torch.pi)
         else:
@@ -681,7 +685,11 @@ def prepare_flow_conditioning(
         .clone()
     )
     unit_span = torch.linspace(
-        0, 1, 11, device=token_condition.device, dtype=token_condition.dtype
+        0,
+        1,
+        FLOW_EULER_STEPS + 1,
+        device=token_condition.device,
+        dtype=token_condition.dtype,
     )
     if decoder.t_scheduler == "cosine":
         time_span = 1 - torch.cos(unit_span * 0.5 * torch.pi)
@@ -1385,7 +1393,7 @@ def build_prefix_pool(
     estimator = flow.decoder.estimator
     attention = estimator.transformer_blocks[0].attn
     layers = len(estimator.transformer_blocks)
-    steps = 10  # the Flow's linspace(0, 1, 11) time span
+    steps = FLOW_EULER_STEPS
     heads = int(attention.heads)
     head_dim = int(attention.inner_dim) // heads
     per_frame = PrefixKVPool.bytes_per_frame(
@@ -1406,10 +1414,8 @@ def build_prefix_pool(
         dtype=dtype,
     )
     logger.info(
-        "Fun-CosyVoice3 Flow prefix cache: %d frames (%.1f GB, %d bytes per frame)",
-        pool.free_frames,
-        pool.free_frames * per_frame / 2**30,
-        per_frame,
+        f"Fun-CosyVoice3 Flow prefix cache: {pool.free_frames} frames "
+        f"({pool.free_frames * per_frame / 2**30:.1f} GB, {per_frame} bytes per frame)"
     )
     return pool
 
@@ -2580,7 +2586,8 @@ def create_vocoder_executor(
     if (
         flow_prefix_cache_gb > 0
         and device_obj.type == "cuda"
-        and getattr(flow.packed_estimator, "is_ragged", False)
+        and flow.packed_estimator is not None
+        and flow.packed_estimator.is_ragged
         and autocast_dtype in (torch.float16, torch.bfloat16)
     ):
         flow.prefix_pool = build_prefix_pool(

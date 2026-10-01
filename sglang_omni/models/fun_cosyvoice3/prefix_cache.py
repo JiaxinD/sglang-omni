@@ -11,9 +11,9 @@ over the frames past them, attending to the cached prefix.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import pairwise
+from typing import Protocol
 
 import torch
 import torch._dynamo as dynamo
@@ -37,6 +37,25 @@ BLOCK_FRAMES = 64
 # Note (Jiaxin Deng): each positional conv has kernel 31, so it reads the 30
 # frames before its input frame.
 CONV_CONTEXT_FRAMES = 30
+
+
+class PrefixForward(Protocol):
+    def __call__(
+        self,
+        estimator: PackedDiT,
+        keys: list[torch.Tensor],
+        values: list[torch.Tensor],
+        x: torch.Tensor,
+        mu: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        t: torch.Tensor,
+        rows: PackedRows,
+        attention: PrefixRowAttention,
+        rope: tuple[torch.Tensor, torch.Tensor],
+        first_context: torch.Tensor,
+        second_context: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 
 class PrefixKVPool:
@@ -68,6 +87,8 @@ class PrefixKVPool:
         ]
         self.free_blocks: list[int] = list(range(blocks))
         self.device = device
+        # Note (Jiaxin Deng): the compile warmup installs the compiled contract.
+        self.forward: PrefixForward = forward_prefix
 
     @property
     def free_frames(self) -> int:
@@ -354,9 +375,7 @@ def forward_prefix(
     return dit.proj_out(h), first_tail, second_tail
 
 
-def compile_forward_prefix() -> (
-    Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-):
+def compile_forward_prefix() -> PrefixForward:
     """The exact dynamic Inductor contract of forward_prefix, the same recipe
     as the packed causal / full contracts."""
     return torch.compile(
@@ -429,7 +448,7 @@ def solve_flow_euler_prefix(
     spks_cfg = torch.cat((spks, torch.zeros_like(spks)), dim=0)
     spks_cfg = spks_cfg[twin_rows.row_ids].unsqueeze(0)
     flow_time = torch.zeros(1, device=device, dtype=dtype)
-    forward = estimator.compiled_prefix_forward or forward_prefix
+    forward = pool.forward
     if forward is not forward_prefix:
         attention.mark_dynamic(twin_rows, absolute)
     else:

@@ -183,7 +183,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
             pass
         prefix_pool = self.vocoder.flow.prefix_pool
         if prefix_pool is not None:
-            packed_estimator.compiled_prefix_forward = compile_forward_prefix()
+            prefix_pool.forward = compile_forward_prefix()
         else:
             pass
         hop_tokens = self.token_hop_len + PRE_LOOKAHEAD_LEN
@@ -212,14 +212,13 @@ class FunCosyVoice3StreamingVocoderScheduler(
     def warmup_prefix_hops(self, item: FlowBatchInput) -> None:
         """A first hop and a follow-up hop through the prefix cache, so both
         an empty and a filled prefix are materialized before serving."""
-        frames = (
-            lambda tokens: (
-                int(item.prompt_token.shape[1]) + tokens - PRE_LOOKAHEAD_LEN
-            )
-            * TOKEN_MEL_RATIO
-        )
+        prompt_tokens = int(item.prompt_token.shape[1])
         first = int(item.token.shape[1])
-        cache = self.vocoder.prefix_cache_rows(frames(first))
+        first_frames = (prompt_tokens + first - PRE_LOOKAHEAD_LEN) * TOKEN_MEL_RATIO
+        second_frames = (
+            prompt_tokens + first * 2 - PRE_LOOKAHEAD_LEN
+        ) * TOKEN_MEL_RATIO
+        cache = self.vocoder.prefix_cache_rows(first_frames)
         if cache is None:
             return
         else:
@@ -232,7 +231,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 prompt_feat=item.prompt_feat,
                 embedding=item.embedding,
             )
-            if self.vocoder.grow_prefix_cache(cache, frames(first * 2)):
+            if self.vocoder.grow_prefix_cache(cache, second_frames):
                 self.vocoder.hop_batch_prefix([longer], [cache])
             else:
                 pass
@@ -523,6 +522,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
         else:
             pass
         cached: list[int] = []
+        caches: list[tuple[PrefixCacheRow, PrefixCacheRow]] = []
         plain: list[int] = []
         for index, ((_, state), item) in enumerate(
             zip(participants, items, strict=True)
@@ -532,24 +532,26 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 + int(item.token.shape[1])
                 - PRE_LOOKAHEAD_LEN
             ) * TOKEN_MEL_RATIO
-            if state.flow_cache is None:
-                state.flow_cache = self.vocoder.prefix_cache_rows(frames)
-                fits = state.flow_cache is not None
-            else:
-                fits = self.vocoder.grow_prefix_cache(state.flow_cache, frames)
-            if fits:
-                cached.append(index)
-            else:
+            cache = state.flow_cache
+            if cache is None:
+                cache = self.vocoder.prefix_cache_rows(frames)
+            elif not self.vocoder.grow_prefix_cache(cache, frames):
                 # Note (Jiaxin Deng): a row the pool cannot hold runs over its
                 # whole history this hop and may re-enter the pool on a later one.
-                self.vocoder.release_prefix_cache(state.flow_cache)
-                state.flow_cache = None
+                self.vocoder.release_prefix_cache(cache)
+                cache = None
+            else:
+                pass
+            state.flow_cache = cache
+            if cache is None:
                 plain.append(index)
+            else:
+                cached.append(index)
+                caches.append(cache)
         mels: list[torch.Tensor | None] = [None] * len(items)
         if cached:
             outputs = self.vocoder.hop_batch_prefix(
-                [items[index] for index in cached],
-                [participants[index][1].flow_cache for index in cached],  # type: ignore[misc]
+                [items[index] for index in cached], caches
             )
             for index, mel in zip(cached, outputs, strict=True):
                 mels[index] = mel
