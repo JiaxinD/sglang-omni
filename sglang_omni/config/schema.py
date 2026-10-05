@@ -27,10 +27,16 @@ class RealtimeTranscriptionConfig:
     decode_interval_ms: int = 2000
     server_vad: bool = False
     max_segment_s: float | None = None
+    # First decode of a segment after this much audio; None waits one interval.
+    first_decode_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.decode_interval_ms <= 0:
             raise ValueError("realtime transcription decode interval must be positive")
+        else:
+            pass
+        if self.first_decode_ms is not None and self.first_decode_ms <= 0:
+            raise ValueError("realtime transcription first decode must be positive")
         else:
             pass
         if self.max_segment_s is not None and self.max_segment_s <= 0:

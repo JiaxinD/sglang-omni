@@ -799,3 +799,15 @@ def test_qwen3_asr_realtime_cadence_rejects_non_positive_intervals(
         Qwen3ASRPipelineConfig(
             model_path="dummy", realtime_decode_interval_ms=interval_ms
         )
+
+
+def test_qwen3_asr_realtime_first_decode_override() -> None:
+    manager = ConfigManager(Qwen3ASRPipelineConfig(model_path="dummy"))
+    merged = manager.merge_config(
+        {"realtime_decode_interval_ms": "1000", "realtime_first_decode_ms": "100"}
+    )
+
+    resolved = merged.resolved_realtime_transcription
+    assert resolved.first_decode_ms == 100
+    assert resolved.decode_interval_ms == 1000
+    assert Qwen3ASRPipelineConfig.realtime_transcription.first_decode_ms is None

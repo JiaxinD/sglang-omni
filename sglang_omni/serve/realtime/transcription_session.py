@@ -174,6 +174,12 @@ class RealtimeTranscriptionSession:
         self.refresh_interval_samples = (
             transcription_config.decode_interval_ms * PCM_SAMPLE_RATE // 1000
         )
+        first_decode_ms = transcription_config.first_decode_ms
+        self.first_refresh_samples = (
+            first_decode_ms * PCM_SAMPLE_RATE // 1000
+            if first_decode_ms is not None
+            else self.refresh_interval_samples
+        )
         max_buffer_seconds = (
             max_segment_s + 4 if max_segment_s is not None else _UNBOUNDED_BUFFER_S
         )
@@ -524,7 +530,7 @@ class RealtimeTranscriptionSession:
                 model_name=self.model_name,
                 language=self.settings.language,
             ),
-            next_refresh_sample=start_sample + self.refresh_interval_samples,
+            next_refresh_sample=start_sample + self.first_refresh_samples,
         )
         self.next_segment_id += 1
         self.active_segment = segment
