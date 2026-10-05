@@ -600,8 +600,18 @@ class MLXModelManager: ObservableObject {
         guard !deletingRepos.contains(modelRepo) else { throw CancellationError() }
         cancelIdleUnloadTask()
         if let model = loadedModel, loadedRepo == modelRepo {
-            VoxtLog.modelInfo("MLX Audio model reuse existing instance. repo=\(modelRepo)", verbose: true)
-            return model
+            if let runtime = model.omniRuntime, await !runtime.isServing {
+                // The server died or was killed: start a new one rather than fail
+                // every request until the idle unload drops this runtime.
+                if loadedModel?.omniRuntime === runtime {
+                    VoxtLog.modelWarning("Omni ASR server is no longer serving; starting a new one. repo=\(modelRepo)")
+                    loadedModel = nil
+                    loadedRepo = nil
+                }
+            } else {
+                VoxtLog.modelInfo("MLX Audio model reuse existing instance. repo=\(modelRepo)", verbose: true)
+                return model
+            }
         }
 
         let repo = modelRepo

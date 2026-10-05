@@ -46,9 +46,10 @@ downloaded weights. `run_omni_dev.sh run --swift-backend` runs the same build on
 the original Swift backend for comparison.
 
 Download the models from Voxt's model settings as usual. With the Omni backend
-enabled, selecting one of the three checkpoints starts a server for it on a free
-loopback port; switching models, idle unload, deletion and quitting stop it.
-After the models are cached, dictation needs no network.
+enabled, selecting Qwen3-ASR 0.6B 4-bit starts a server for it on a free
+loopback port; switching models, idle unload, deletion and quitting stop it,
+and a server that dies is replaced on the next use. After the models are
+cached, dictation needs no network.
 
 ## How it fits together
 
@@ -72,6 +73,23 @@ cd Voxt/backend && "$VOXT_OMNI_PYTHON" -m pytest tests
 cd ../.. && "$VOXT_OMNI_PYTHON" -m pytest tests/unit_test/moss_transcribe_diarize tests/unit_test/whisper_asr tests/unit_test/qwen3_asr
 ```
 
+Voxt's own tests include `OmniASRRuntimeLaunchTests` (no model needed) and two
+opt-in suites that need the installed Qwen model and `VOXT_RUN_MODEL_TESTS=1`:
+
+- `OmniPhase1LifecycleTests`: load/Final/unload rounds that must leave no
+  process behind, a server killed mid-Final, a cancelled cold start,
+  termination during a Final and a cancelled live session. Set
+  `VOXT_ASR_BACKEND=omni` with the backend variables, `VOXT_MODEL_STORAGE_ROOT`
+  and `VOXT_LIFECYCLE_CLIPS` (a directory with `short.wav` and `long.wav`).
+- `OmniPhase1BenchmarkTests`: the measurement used for acceptance, identical on
+  the upstream build and this one; see its header for the `VOXT_BENCH_*`
+  variables.
+
+Pass environment variables to an `xcodebuild test-without-building` run through
+the `.xctestrun` file. xcodebuild resolves symlinks in those values, which turns
+a venv's `bin/python` link into the base interpreter, so point
+`VOXT_OMNI_PYTHON` at a script that runs `exec <venv>/bin/python "$@"` there.
+
 ## Known limitations
 
 - Greedy decoding only on the Omni path. Whisper with a non-zero temperature
@@ -80,5 +98,8 @@ cd ../.. && "$VOXT_OMNI_PYTHON" -m pytest tests/unit_test/moss_transcribe_diariz
   provider API keys may not persist in it.
 - The server accepts requests from any local client on its loopback port and
   sends permissive CORS headers; it holds no user data beyond in-flight audio.
+- The live preview decodes once a second, like Voxt's Swift session, but has
+  neither its 0.2 s cadence right after an 8 s window boundary nor its
+  agreement-based promotion of provisional text.
 - Performance and quality acceptance against the original backend is pending;
   see the project's acceptance records before relying on any speed claim.
