@@ -183,8 +183,8 @@ extension MLXTranscriber {
         )
     }
 
-    /// The three migrated checkpoints decode on the local Omni server with the
-    /// chunking, budgets and stop rules their MLXAudio models used.
+    /// Qwen3-ASR decodes on the local Omni server with the chunking, budget and
+    /// stop rules its MLXAudio model used.
     nonisolated static func runOmniInferenceDetached(
         runtime: OmniASRRuntime,
         audioSamples: [Float],
@@ -193,59 +193,17 @@ extension MLXTranscriber {
     ) async throws -> MLXDetachedInferenceResult {
         try Task.checkCancellation()
         let parameters = inferenceConfiguration.generationParameters
-        switch runtime.kind {
-        case .qwen3ASR:
-            let result = try await runtime.transcribeQwenFinal(
-                samples: audioSamples,
-                sampleRate: targetSampleRate,
-                language: inferenceConfiguration.languageHint,
-                context: inferenceConfiguration.qwenContextBias,
-                maxTokens: parameters.maxTokens,
-                chunkDurationSeconds: parameters.chunkDuration,
-                minChunkDurationSeconds: parameters.minChunkDuration
-            )
-            // Qwen3-ASR chunk segments have chunk timing, which Voxt discards.
-            return MLXDetachedInferenceResult(rawText: result.text, senseVoiceMetadata: nil, structuredSegments: [])
-        case .mossTranscribeDiarize:
-            let result = try await runtime.transcribeMossFinal(
-                samples: audioSamples,
-                sampleRate: targetSampleRate,
-                prompt: inferenceConfiguration.mossPrompt,
-                maxTokensPerChunk: parameters.maxTokens,
-                chunkDurationSeconds: parameters.chunkDuration,
-                minChunkDurationSeconds: parameters.minChunkDuration
-            )
-            let segments = result.segments.map {
-                STTTranscriptSegment(
-                    text: $0.text,
-                    startTime: $0.startSeconds,
-                    endTime: $0.endSeconds,
-                    speakerID: $0.speakerID
-                )
-            }
-            return MLXDetachedInferenceResult(
-                rawText: MossASRTranscriptRendering.renderedText(
-                    result.text,
-                    outputMode: inferenceConfiguration.mossOutputMode
-                ),
-                senseVoiceMetadata: nil,
-                structuredSegments: mossStructuredSegments(from: segments)
-            )
-        case .whisper:
-            if parameters.temperature > 0 {
-                throw OmniTranscriptionError.streamError(
-                    "Whisper on the local Omni server decodes greedily; set the Whisper temperature to 0."
-                )
-            }
-            let text = try await runtime.transcribeWhisperFinal(
-                samples: audioSamples,
-                sampleRate: targetSampleRate,
-                languageHint: inferenceConfiguration.languageHint,
-                stageMaxTokens: parameters.maxTokens
-            )
-            // Whisper window segments have chunk timing, which Voxt discards.
-            return MLXDetachedInferenceResult(rawText: text, senseVoiceMetadata: nil, structuredSegments: [])
-        }
+        let result = try await runtime.transcribeQwenFinal(
+            samples: audioSamples,
+            sampleRate: targetSampleRate,
+            language: inferenceConfiguration.languageHint,
+            context: inferenceConfiguration.qwenContextBias,
+            maxTokens: parameters.maxTokens,
+            chunkDurationSeconds: parameters.chunkDuration,
+            minChunkDurationSeconds: parameters.minChunkDuration
+        )
+        // Qwen3-ASR chunk segments have chunk timing, which Voxt discards.
+        return MLXDetachedInferenceResult(rawText: result.text, senseVoiceMetadata: nil, structuredSegments: [])
     }
 
     private nonisolated static func longFormSpeechSegmentConfig(

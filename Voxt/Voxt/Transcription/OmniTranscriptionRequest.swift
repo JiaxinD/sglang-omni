@@ -1,10 +1,8 @@
 import Foundation
 
-/// Wire formats and per-model request planning for the local SGLang-Omni server.
+/// Wire formats and request planning for the local Omni server.
 nonisolated enum OmniASRModelKind: String, Sendable, CaseIterable {
     case qwen3ASR = "qwen3_asr"
-    case mossTranscribeDiarize = "moss_transcribe_diarize"
-    case whisper = "whisper"
 }
 
 nonisolated struct OmniTranscriptionRequest: Sendable, Equatable {
@@ -197,40 +195,17 @@ nonisolated struct OmniTranscriptionStreamParser {
     }
 }
 
-/// Splits one recording the way each original Swift model decoded it.
+/// Splits one recording the way the original Swift model decoded it.
 nonisolated enum OmniTranscriptionPlanning {
     /// How far past a chunk's nominal end the energy cut may look (MLXAudio's 5 s).
     static let energyCutSearchSeconds: Float = 5.0
-
-    struct Window: Equatable {
-        let sampleRange: Range<Int>
-        let offsetSeconds: Double
-    }
-
-    /// Whisper decodes fixed, non-overlapping 30 s windows independently.
-    static let whisperWindowSeconds = 30.0
-    /// Whisper's decoder holds 448 positions; one slot stays free after the prompt.
-    static let whisperDecoderPositions = 448
-
-    static func fixedWindows(sampleCount: Int, sampleRate: Int, windowSeconds: Double) -> [Window] {
-        let windowSamples = Int(windowSeconds * Double(sampleRate))
-        guard sampleCount > windowSamples else {
-            return [Window(sampleRange: 0..<sampleCount, offsetSeconds: 0)]
-        }
-        return stride(from: 0, to: sampleCount, by: windowSamples).map { start in
-            Window(
-                sampleRange: start..<min(start + windowSamples, sampleCount),
-                offsetSeconds: Double(start) / Double(sampleRate)
-            )
-        }
-    }
 
     struct PaddedChunk: Equatable {
         let samples: [Float]
         let offsetSeconds: Double
     }
 
-    /// The MLXAudio splitter Qwen3-ASR and MOSS used, on plain arrays: cut near
+    /// The MLXAudio splitter Qwen3-ASR used, on plain arrays: cut near
     /// the quietest 100 ms within ±5 s of each chunk end and zero-pad any chunk
     /// shorter than the minimum duration.
     static func energySplitChunks(
@@ -297,65 +272,6 @@ nonisolated enum OmniTranscriptionPlanning {
         }
         return chunks
     }
-
-    static func whisperMaxNewTokens(stageMaxTokens: Int, languageHint: String?) -> Int {
-        let promptTokenCount = languageHint == nil ? 3 : 4
-        return max(1, min(stageMaxTokens, whisperDecoderPositions - promptTokenCount - 1))
-    }
-
-    /// MOSS timestamps restart at each chunk. A pass's finished text shifts every
-    /// bracketed decimal onto the recording timeline, as MLXAudio did.
-    static func offsetMossTimestampsInFinishedText(_ text: String, by offsetSeconds: Double) -> String {
-        guard offsetSeconds != 0 else { return text }
-        let pattern = try! NSRegularExpression(pattern: #"\[(\d+(?:[\.,]\d+)?)\]"#)
-        let source = text as NSString
-        var output = ""
-        var cursor = 0
-        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
-            guard let value = Double(source.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")) else {
-                continue
-            }
-            output += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-            output += String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
-            cursor = match.range.location + match.range.length
-        }
-        return output + source.substring(from: cursor)
-    }
-
-    /// Streamed MOSS text shifts tags with MLXAudio's incremental rule: a
-    /// bracketed number of at most 24 characters, comma decimals allowed.
-    static func offsetMossTimestamps(_ text: String, by offsetSeconds: Double) -> String {
-        guard offsetSeconds != 0 else { return text }
-        func offsetTag(_ tag: String) -> String {
-            guard let value = Double(tag.dropFirst().dropLast().replacingOccurrences(of: ",", with: ".")) else {
-                return tag
-            }
-            return String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
-        }
-        var output = ""
-        var bufferedTag = ""
-        var isBufferingTag = false
-        for character in text {
-            if isBufferingTag {
-                bufferedTag.append(character)
-                if character == "]" {
-                    output += offsetTag(bufferedTag)
-                    bufferedTag = ""
-                    isBufferingTag = false
-                } else if bufferedTag.count > 24 {
-                    output += bufferedTag
-                    bufferedTag = ""
-                    isBufferingTag = false
-                }
-            } else if character == "[" {
-                bufferedTag = "["
-                isBufferingTag = true
-            } else {
-                output.append(character)
-            }
-        }
-        return output + bufferedTag
-    }
 }
 
 /// Joins transcript pieces the way the Omni server joins segments: a space only
@@ -384,46 +300,5 @@ nonisolated enum OmniTranscriptJoining {
             joined += stripped
         }
         return joined
-    }
-}
-
-nonisolated struct OmniTranscriptSegment: Sendable, Equatable {
-    let text: String
-    let startSeconds: Double
-    let endSeconds: Double
-    let speakerID: String?
-}
-
-/// MOSS's `[start][Sxx]text[end]` markup, parsed with the rule MLXAudio used.
-nonisolated enum OmniMossSegments {
-    static func parse(_ text: String, fallbackEndSeconds: Double) -> [OmniTranscriptSegment] {
-        let pattern = try! NSRegularExpression(
-            pattern: #"\[(\d+(?:[\.,]\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:[\.,]\d+)?)\]"#,
-            options: [.dotMatchesLineSeparators]
-        )
-        let source = text as NSString
-        func seconds(_ range: NSRange) -> Double? {
-            Double(source.substring(with: range).replacingOccurrences(of: ",", with: "."))
-        }
-        var segments: [OmniTranscriptSegment] = []
-        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
-            guard let start = seconds(match.range(at: 1)),
-                  let end = seconds(match.range(at: 4)),
-                  end >= start
-            else { continue }
-            let segmentText = source.substring(with: match.range(at: 3))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !segmentText.isEmpty else { continue }
-            segments.append(OmniTranscriptSegment(
-                text: segmentText,
-                startSeconds: start,
-                endSeconds: end,
-                speakerID: source.substring(with: match.range(at: 2))
-            ))
-        }
-        if segments.isEmpty {
-            return [OmniTranscriptSegment(text: text, startSeconds: 0, endSeconds: max(fallbackEndSeconds, 0), speakerID: nil)]
-        }
-        return segments
     }
 }

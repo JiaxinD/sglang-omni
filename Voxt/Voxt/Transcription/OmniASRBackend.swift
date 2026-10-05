@@ -17,15 +17,12 @@ nonisolated enum LoadedASRModel: @unchecked Sendable {
     }
 }
 
-/// Which checkpoints run on the local SGLang-Omni server, fixed per process.
+/// Which checkpoints run on the local Omni server, fixed per process.
 ///
-/// Only the three migrated checkpoints are eligible, and only when the
-/// development backend is configured; every other model keeps its Swift
-/// backend. The choice is read once so a running process never switches the
-/// backend of a checkpoint.
+/// Only Qwen3-ASR is eligible, and only when the development backend is
+/// configured; every other model keeps its Swift backend. The choice is read
+/// once so a running process never switches the backend of a checkpoint.
 nonisolated enum OmniASRBackend {
-    /// Only Qwen3-ASR is accepted on Omni so far; MOSS and Whisper keep their
-    /// Omni paths but stay on the in-process backend until they are accepted.
     static let modelKindsByRepo: [String: OmniASRModelKind] = [
         "mlx-community/Qwen3-ASR-0.6B-4bit": .qwen3ASR,
     ]
@@ -35,7 +32,6 @@ nonisolated enum OmniASRBackend {
     struct LaunchSettings: Sendable, Equatable {
         let pythonExecutable: URL
         let backendDirectory: URL
-        let ffmpegLibraryDirectory: URL?
 
         /// `VOXT_ASR_BACKEND=omni` with the backend's Python and source directory.
         init?(environment: [String: String]) {
@@ -45,9 +41,6 @@ nonisolated enum OmniASRBackend {
             else { return nil }
             pythonExecutable = URL(fileURLWithPath: python)
             backendDirectory = URL(fileURLWithPath: backend, isDirectory: true)
-            ffmpegLibraryDirectory = environment["VOXT_OMNI_FFMPEG_LIB"].map {
-                URL(fileURLWithPath: $0, isDirectory: true)
-            }
         }
     }
 
@@ -61,8 +54,7 @@ nonisolated enum OmniASRBackend {
         return OmniBackendConfiguration(
             pythonExecutable: launchSettings.pythonExecutable,
             backendDirectory: launchSettings.backendDirectory,
-            derivedRoot: derivedRoot,
-            ffmpegLibraryDirectory: launchSettings.ffmpegLibraryDirectory
+            derivedRoot: derivedRoot
         )
     }
 }

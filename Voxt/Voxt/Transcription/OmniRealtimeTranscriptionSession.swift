@@ -4,7 +4,7 @@ import os
 /// Live preview events from the local Omni realtime transcription socket.
 nonisolated enum OmniLiveEvent: Sendable, Equatable {
     case display(confirmedText: String, provisionalText: String)
-    case ended(text: String, segments: [OmniTranscriptSegment])
+    case ended(text: String)
     case failed(message: String)
 }
 
@@ -138,7 +138,7 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
                     }
                     if let display { continuation.yield(display) }
                 case "transcription.completed":
-                    continuation.yield(.ended(text: event["text"] as? String ?? "", segments: []))
+                    continuation.yield(.ended(text: event["text"] as? String ?? ""))
                     shared.withLock { $0.closed = true }
                     socket.cancel(with: .normalClosure, reason: nil)
                     urlSession.invalidateAndCancel()

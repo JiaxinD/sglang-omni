@@ -5,7 +5,6 @@ nonisolated struct OmniBackendConfiguration: Sendable, Equatable {
     var pythonExecutable: URL
     var backendDirectory: URL
     var derivedRoot: URL
-    var ffmpegLibraryDirectory: URL?
     var startupTimeoutSeconds: Double = 180
 }
 
@@ -62,7 +61,7 @@ nonisolated enum OmniASRRuntimeError: LocalizedError, Equatable {
     }
 }
 
-/// One owned SGLang-Omni server for one model: prepare once, share, retire once.
+/// One owned local Omni server for one model: prepare once, share, retire once.
 ///
 /// `ready → retiring → stopped` is a real barrier: `retire()` refuses new
 /// leases at once, lets work that already holds a lease finish (a multi-chunk
@@ -245,17 +244,13 @@ actor OmniASRRuntime {
     private func launch() async throws -> OmniServerEndpoint {
         let process = Process()
         process.executableURL = configuration.pythonExecutable
-        var arguments = [
+        process.arguments = [
             "-m", "voxt_omni_backend.supervisor",
             "--model-kind", kind.rawValue,
             "--model-directory", modelDirectory.path,
             "--derived-root", configuration.derivedRoot.path,
             "--startup-timeout-s", String(configuration.startupTimeoutSeconds),
         ]
-        if let ffmpegLibraryDirectory = configuration.ffmpegLibraryDirectory {
-            arguments += ["--ffmpeg-library-directory", ffmpegLibraryDirectory.path]
-        }
-        process.arguments = arguments
         process.currentDirectoryURL = configuration.backendDirectory
         process.environment = Self.supervisorEnvironment(
             inheriting: ProcessInfo.processInfo.environment,
@@ -334,7 +329,7 @@ actor OmniASRRuntime {
     }
 
     /// Voxt's environment without the dynamic loader settings a debugger or XCTest
-    /// injects; the supervisor sets its own library path for FFmpeg.
+    /// injects.
     nonisolated static func supervisorEnvironment(
         inheriting inherited: [String: String],
         backendDirectory: URL
@@ -464,85 +459,5 @@ extension OmniASRRuntime {
             text += result.text
         }
         return (text.trimmingCharacters(in: .whitespacesAndNewlines), resolvedLanguage)
-    }
-}
-
-extension OmniASRRuntime {
-    /// Whisper Final as MLXAudio decoded it: independent 30 s windows joined by a space.
-    func transcribeWhisperFinal(
-        samples: [Float],
-        sampleRate: Int,
-        languageHint: String?,
-        stageMaxTokens: Int
-    ) async throws -> String {
-        let endpoint = try beginUse()
-        defer { endUse() }
-        var texts: [String] = []
-        let windows = OmniTranscriptionPlanning.fixedWindows(
-            sampleCount: samples.count,
-            sampleRate: sampleRate,
-            windowSeconds: OmniTranscriptionPlanning.whisperWindowSeconds
-        )
-        for window in windows {
-            try Task.checkCancellation()
-            let result = try await transcribe(OmniTranscriptionRequest(
-                samples: Array(samples[window.sampleRange]),
-                sampleRate: sampleRate,
-                language: languageHint ?? "auto",
-                prompt: nil,
-                maxNewTokens: OmniTranscriptionPlanning.whisperMaxNewTokens(
-                    stageMaxTokens: stageMaxTokens,
-                    languageHint: languageHint
-                ),
-                stopAtEndOfText: false,
-                stopOnTokenLoop: false
-            ), holding: endpoint)
-            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { texts.append(text) }
-        }
-        return texts.joined(separator: " ")
-    }
-
-    /// MOSS Final as MLXAudio decoded it: ≤1200 s energy-cut chunks, each with the
-    /// full token budget, timestamps shifted onto the recording timeline.
-    func transcribeMossFinal(
-        samples: [Float],
-        sampleRate: Int,
-        prompt: String?,
-        maxTokensPerChunk: Int,
-        chunkDurationSeconds: Float = 1200,
-        minChunkDurationSeconds: Float = 1
-    ) async throws -> (text: String, segments: [OmniTranscriptSegment]) {
-        let chunks = OmniTranscriptionPlanning.energySplitChunks(
-            samples,
-            sampleRate: sampleRate,
-            chunkDurationSeconds: chunkDurationSeconds,
-            minChunkDurationSeconds: minChunkDurationSeconds
-        )
-        let endpoint = try beginUse()
-        defer { endUse() }
-        var texts: [String] = []
-        var segments: [OmniTranscriptSegment] = []
-        for chunk in chunks {
-            try Task.checkCancellation()
-            let result = try await transcribe(OmniTranscriptionRequest(
-                samples: chunk.samples,
-                sampleRate: sampleRate,
-                language: nil,
-                prompt: prompt,
-                maxNewTokens: maxTokensPerChunk,
-                stopAtEndOfText: true,
-                stopOnTokenLoop: true
-            ), holding: endpoint)
-            let text = OmniTranscriptionPlanning.offsetMossTimestampsInFinishedText(
-                result.text.trimmingCharacters(in: .whitespacesAndNewlines),
-                by: chunk.offsetSeconds
-            )
-            if !text.isEmpty { texts.append(text) }
-            let chunkSeconds = Double(chunk.samples.count) / Double(sampleRate)
-            segments += OmniMossSegments.parse(text, fallbackEndSeconds: chunkSeconds)
-                .filter { $0.speakerID != nil }
-        }
-        return (texts.joined(separator: "\n"), segments)
     }
 }

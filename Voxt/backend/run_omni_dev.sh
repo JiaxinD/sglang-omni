@@ -6,7 +6,6 @@
 #
 # Environment:
 #   VOXT_OMNI_PYTHON      Python with sglang-omni and the MLX extras installed (required to run).
-#   VOXT_OMNI_FFMPEG_LIB  FFmpeg 7 library directory (default: Homebrew ffmpeg@7).
 #   VOXT_DEV_HOME         Home directory the app sees (default: ~/.voxt-omni-dev).
 #   VOXT_SHARED_MODELS    Existing <root>/mlx-audio directory to share instead of downloading again.
 #   DEVELOPER_DIR         Xcode to use (default: /Applications/Xcode.app/Contents/Developer).
@@ -44,13 +43,12 @@ case "${1:-}" in
         VOXT_ASR_BACKEND=omni
         VOXT_OMNI_PYTHON="$VOXT_OMNI_PYTHON"
         VOXT_OMNI_BACKEND_DIR="$backend_dir"
-        VOXT_OMNI_FFMPEG_LIB="${VOXT_OMNI_FFMPEG_LIB:-$(brew --prefix ffmpeg@7)/lib}"
       )
     fi
     exec env CFFIXED_USER_HOME="$dev_home" ${backend_env[@]+"${backend_env[@]}"} "$app/Contents/MacOS/Voxt Omni Dev"
     ;;
   *)
-    sed -n '2,13p' "$0" >&2
+    sed -n '2,11p' "$0" >&2
     exit 2
     ;;
 esac

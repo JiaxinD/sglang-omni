@@ -1081,27 +1081,14 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         runtime: OmniASRRuntime,
         liveMode: MLXLiveMode
     ) async throws -> MLXMeetingNativeStreamingConfiguration {
-        switch (liveMode, runtime.kind) {
-        case (.nativeQwenLive, .qwen3ASR):
+        switch liveMode {
+        case .nativeQwenLive:
             let language = resolvedNativeQwenLiveLanguage()
             return MLXMeetingNativeStreamingConfiguration(
                 session: try await OmniNativeStreamingSession.qwen(runtime: runtime, language: language),
                 liveMode: liveMode,
                 qwenUsesAutomaticLanguageProtocol: language == nil,
                 mossVisibleOutputMode: nil
-            )
-        case (.nativeStreamingLive, .mossTranscribeDiarize):
-            let inferenceConfiguration = resolvedInferenceConfiguration(for: .intermediate)
-            return MLXMeetingNativeStreamingConfiguration(
-                session: try await OmniNativeStreamingSession.moss(
-                    runtime: runtime,
-                    prompt: inferenceConfiguration.mossPrompt,
-                    maxTokensPerPass: inferenceConfiguration.generationParameters.maxTokens
-                ),
-                liveMode: liveMode,
-                qwenUsesAutomaticLanguageProtocol: false,
-                // The final offline MOSS pass preserves structured speaker/timestamp output.
-                mossVisibleOutputMode: .plainText
             )
         default:
             throw NSError(
@@ -1178,8 +1165,8 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
         releaseModel: @escaping @MainActor () -> Void
     ) async throws -> Bool {
         let session: OmniNativeStreamingSession
-        switch (mode, runtime.kind) {
-        case (.nativeQwenLive, .qwen3ASR):
+        switch mode {
+        case .nativeQwenLive:
             let language = resolvedNativeQwenLiveLanguage()
             session = try await OmniNativeStreamingSession.qwen(runtime: runtime, language: language)
             guard revision == sessionRevision, isRecording, activeLiveMode == mode else {
@@ -1188,18 +1175,6 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
             }
             releaseNativeLiveSession(cancelSession: true)
             nativeQwenLiveUsesAutomaticLanguageProtocol = language == nil
-        case (.nativeStreamingLive, .mossTranscribeDiarize):
-            let inferenceConfiguration = resolvedInferenceConfiguration(for: .intermediate)
-            session = try await OmniNativeStreamingSession.moss(
-                runtime: runtime,
-                prompt: inferenceConfiguration.mossPrompt,
-                maxTokensPerPass: inferenceConfiguration.generationParameters.maxTokens
-            )
-            guard revision == sessionRevision, isRecording, activeLiveMode == mode else {
-                session.cancel()
-                return false
-            }
-            releaseNativeLiveSession(cancelSession: true)
         default:
             return false
         }
