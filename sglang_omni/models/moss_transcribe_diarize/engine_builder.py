@@ -15,6 +15,9 @@ from sglang_omni.models.moss_transcribe_diarize import CAPABILITIES, request_bui
 from sglang_omni.models.moss_transcribe_diarize.encoder_service import (
     BatchedAudioEncoderService,
 )
+from sglang_omni.models.moss_transcribe_diarize.hf_processor import (
+    load_moss_transcribe_diarize_processor,
+)
 from sglang_omni.models.moss_transcribe_diarize.request_builders import (
     MossTranscribeDiarizeRequestData,
 )
@@ -106,14 +109,11 @@ class MossTranscribeDiarizeEngineBuilder(
         self.context_length = 0
 
     def pre_infra_setup(self, checkpoint_dir: str) -> None:
-        from transformers import AutoProcessor
-
         from sglang_omni.models.moss_transcribe_diarize import stages
 
-        with stages.missing_additional_chat_templates_compat():
-            self.processor = AutoProcessor.from_pretrained(
-                checkpoint_dir, trust_remote_code=True
-            )
+        self.processor = load_moss_transcribe_diarize_processor(
+            checkpoint_dir, trust_remote_code=True
+        )
         self.tokenizer = self.processor.tokenizer
         self.max_new_tokens = (
             int(self.requested_max_new_tokens)

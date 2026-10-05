@@ -17,6 +17,9 @@ from sglang_omni.config import (
 from sglang_omni.models.moss_transcribe_diarize import (  # noqa: F401
     hf_config as _hf_config,
 )
+from sglang_omni.models.moss_transcribe_diarize import (  # noqa: F401
+    hf_processor as _hf_processor,
+)
 from sglang_omni.utils.cpu import bounded_intraop_threads
 
 _PKG = "sglang_omni.models.moss_transcribe_diarize"
