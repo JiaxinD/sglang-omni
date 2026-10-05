@@ -7,8 +7,11 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from sglang.srt.server_args import ServerArgs
 from transformers import GenerationConfig, WhisperProcessor, WhisperTokenizer
 
+from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.models.whisper_asr.encoder_service import (
     WhisperPreLMEncoderService,
     build_cache_namespace,
@@ -17,6 +20,7 @@ from sglang_omni.models.whisper_asr.request_builders import (
     MAX_PREV_CONTEXT_TOKENS,
     WhisperASRRequestData,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.engine_factory import (
     AsrEngineBuilder,
@@ -27,6 +31,7 @@ from sglang_omni.scheduling.generation_batch_policy import (
     CudaGraphBackend,
     build_default_prefill_cuda_graph_bs,
 )
+from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 if TYPE_CHECKING:
 
@@ -278,7 +283,13 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
         *,
         generation_cuda_graph_enabled: bool,
     ) -> None:
-        if not self.enable_encoder_cuda_graph or not generation_cuda_graph_enabled:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if (
+            use_mlx()
+            or not self.enable_encoder_cuda_graph
+            or not generation_cuda_graph_enabled
+        ):
             return
         else:
             pass
@@ -317,8 +328,12 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
     def setup_runtime_resources(
         self, model: WhisperForConditionalGeneration | None, server_args: object
     ) -> None:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         del server_args
-        if not self.enable_pre_lm_encoder:
+        if use_mlx() or not self.enable_pre_lm_encoder:
+            # The native MLX prefill encodes audio itself; the pre-LM service
+            # needs the Torch model.
             return
         else:
             pass
@@ -352,6 +367,8 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
         )
 
     def adjust_overrides(self, overrides: dict[str, object]) -> None:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         if int(overrides.get("chunked_prefill_size") or 0) > 0:
             raise ValueError(
                 "Whisper ASR requires chunked_prefill_size=0 because its encoder "
@@ -360,6 +377,13 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
         else:
             pass
         overrides["chunked_prefill_size"] = 0
+        if use_mlx():
+            # Typed pipeline engine defaults merge after the backend profile
+            # and would otherwise re-enable Torch compilation.
+            overrides["enable_torch_compile"] = False
+            return
+        else:
+            pass
         # Note (Akazaakane): Timestamped Whisper requests install an internal
         # per-request processor; this flag permits SGLang to execute it.
         overrides["enable_custom_logit_processor"] = True
@@ -383,6 +407,28 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
         overrides["cuda_graph_bs_prefill"] = build_default_prefill_cuda_graph_bs(cap)
 
     def generation_defaults(self, *, dtype: str) -> GenerationDefaults:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx():
+            if not current_platform.is_mps():
+                raise RuntimeError("SGLANG_USE_MLX=1 requires the Apple Metal platform")
+            else:
+                pass
+            # Cross-attention state exists only inside the native MLX prefill,
+            # so token-only radix reuse is unsafe.
+            return {
+                "max_running_requests": self.max_running_requests,
+                "disable_cuda_graph": True,
+                "disable_overlap_schedule": True,
+                "disable_radix_cache": True,
+                "enable_torch_compile": False,
+                "mem_fraction_static": self.mem_fraction_static,
+                "max_prefill_tokens": 6144,
+                "chunked_prefill_size": 0,
+                "dtype": dtype,
+            }
+        else:
+            pass
         return {
             "max_running_requests": self.max_running_requests,
             "disable_cuda_graph": False,
@@ -396,10 +442,41 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
             "cuda_graph_backend_prefill": CudaGraphBackend.BREAKABLE,
         }
 
+    def validate_before_infrastructure(self, server_args: ServerArgs) -> None:
+        from sglang.srt.arg_groups.model_override_base import resolved_view
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx() and resolved_view(server_args).mlx_enable_sampling:
+            raise ValueError(
+                "Whisper ASR MLX currently requires mlx_enable_sampling=False"
+            )
+        else:
+            pass
+        super().validate_before_infrastructure(server_args)
+
+    def make_model_runner(
+        self,
+        model_worker: ModelWorker,
+        output_proc: SGLangOutputProcessor,
+    ) -> ModelRunner[WhisperASRRequestData]:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx():
+            from sglang_omni.model_runner.mlx_model_worker import (
+                MlxSchedulerModelRunner,
+            )
+
+            return MlxSchedulerModelRunner(model_worker, output_proc)
+        else:
+            pass
+        return super().make_model_runner(model_worker, output_proc)
+
     def make_adapters(self, model: object) -> tuple[
         Callable[[StagePayload], WhisperASRRequestData],
         Callable[[WhisperASRRequestData], StagePayload],
     ]:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         del model
         from sglang_omni.models.whisper_asr.request_builders import (
             make_whisper_scheduler_adapters,
@@ -413,6 +490,7 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
             max_new_tokens=self.max_new_tokens,
             decoder_context_len=self.decoder_context_len,
             audio_encoder_service=self.audio_encoder_service,
+            greedy_only=use_mlx(),
         )
 
     def extra_scheduler_kwargs(self) -> SchedulerExtras[WhisperASRRequestData]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -474,3 +475,56 @@ def test_whisper_asr_threads_explicit_cuda_graph_bs(monkeypatch) -> None:
     )
     assert len(graph_init_calls) == 1
     assert len(attest_calls) == 1
+
+
+def mlx_builder(monkeypatch: pytest.MonkeyPatch):
+    import sglang.srt.hardware_backend.mlx.runtime as mlx_runtime
+
+    from sglang_omni.models.whisper_asr import engine_builder
+
+    monkeypatch.setattr(mlx_runtime, "use_mlx", lambda: True)
+    monkeypatch.setattr(engine_builder.current_platform, "is_mps", lambda: True)
+    return encoder_graph_builder()
+
+
+def test_whisper_mlx_profile_disables_cuda_only_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder = mlx_builder(monkeypatch)
+    overrides: dict[str, object] = {"enable_torch_compile": True}
+
+    defaults = builder.generation_defaults(dtype="auto")
+    builder.adjust_overrides(overrides)
+
+    assert defaults["disable_cuda_graph"] is True
+    assert defaults["disable_radix_cache"] is True
+    assert defaults["enable_torch_compile"] is False
+    assert "cuda_graph_backend_prefill" not in defaults
+    assert overrides["enable_torch_compile"] is False
+    assert overrides["chunked_prefill_size"] == 0
+    assert "cuda_graph_bs_prefill" not in overrides
+
+
+def test_whisper_mlx_skips_torch_encoder_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder = mlx_builder(monkeypatch)
+
+    builder.setup_model_resources(
+        None, server_args=None, generation_cuda_graph_enabled=False
+    )
+    builder.setup_runtime_resources(None, server_args=None)
+
+    assert builder.audio_encoder_service is None
+
+
+def test_whisper_mlx_uses_the_mlx_scheduler_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.model_runner.mlx_model_worker import MlxSchedulerModelRunner
+
+    builder = mlx_builder(monkeypatch)
+
+    runner = builder.make_model_runner(Mock(gpu_id=0), Mock())
+
+    assert isinstance(runner, MlxSchedulerModelRunner)

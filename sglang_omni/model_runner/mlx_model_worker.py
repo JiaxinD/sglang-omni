@@ -275,6 +275,12 @@ def create_mlx_model_worker(
         )
 
         make_runner_class = make_moss_transcribe_diarize_mlx_runner_class
+    elif model_arch == "WhisperForConditionalGeneration":
+        from sglang_omni.models.whisper_asr.mlx.runner import (
+            make_whisper_mlx_runner_class,
+        )
+
+        make_runner_class = make_whisper_mlx_runner_class
     elif model_arch == "FunCosyVoice3SGLangModel":
         from sglang_omni.models.fun_cosyvoice3.mlx.runner import (
             make_fun_cosyvoice3_mlx_runner_class,
