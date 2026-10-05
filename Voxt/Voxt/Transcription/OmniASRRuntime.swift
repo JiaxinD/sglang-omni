@@ -60,6 +60,8 @@ actor OmniASRRuntime {
     private var retirement: Task<Void, Never>?
     private var supervisorEvents: AsyncThrowingStream<[String: Any], Error>.Iterator?
     private let session: URLSession
+    private var activeUses = 0
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(kind: OmniASRModelKind, modelDirectory: URL, configuration: OmniBackendConfiguration) {
         self.kind = kind
@@ -107,26 +109,49 @@ actor OmniASRRuntime {
         }
     }
 
-    /// Idempotent and awaitable: every caller returns after the server is gone.
+    /// Holds the server for work outside `transcribe`, such as a live session.
+    func beginUse() throws -> OmniServerEndpoint {
+        guard case .ready(let endpoint) = state else { throw OmniASRRuntimeError.retired }
+        activeUses += 1
+        return endpoint
+    }
+
+    func endUse() {
+        activeUses = max(0, activeUses - 1)
+        if activeUses == 0 {
+            drainWaiters.forEach { $0.resume() }
+            drainWaiters.removeAll()
+        }
+    }
+
+    /// Idempotent and awaitable: new work is refused at once, work already in
+    /// flight finishes, and every caller returns after the server is gone.
     func retire() async {
         if let retirement {
             await retirement.value
             return
         }
         state = .retiring
-        let task = Task { await self.stopSupervisor() }
+        let task = Task {
+            await self.drainActiveUses()
+            await self.stopSupervisor()
+        }
         retirement = task
         await task.value
         state = .stopped
+    }
+
+    private func drainActiveUses() async {
+        guard activeUses > 0 else { return }
+        await withCheckedContinuation { drainWaiters.append($0) }
     }
 
     func transcribe(
         _ request: OmniTranscriptionRequest,
         onDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> OmniTranscriptionResult {
-        guard case .ready(let endpoint) = state else {
-            throw OmniASRRuntimeError.retired
-        }
+        let endpoint = try beginUse()
+        defer { endUse() }
         let boundary = "voxt-\(UUID().uuidString)"
         var urlRequest = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/audio/transcriptions"))
         urlRequest.httpMethod = "POST"
