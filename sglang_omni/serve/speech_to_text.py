@@ -23,19 +23,9 @@ from sglang_omni.client import (
     GenerateRequest,
     SamplingParams,
 )
-from sglang_omni.client.types import (
-    AUDIO_LAYOUT_PARAM,
-    INCLUDE_GENERATION_METADATA_PARAM,
-    GenerationMetadata,
-)
-from sglang_omni.scheduling.greedy_stop_rules import (
-    STOP_AT_END_OF_TEXT_PARAM,
-    STOP_ON_TOKEN_LOOP_PARAM,
-)
 from sglang_omni.serve.generation_params import record_explicit_generation_params
 from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.serve.protocol import (
-    TranscriptionGenerationMetadata,
     TranscriptionResponse,
     TranscriptionTextDeltaEvent,
     TranscriptionTextDoneEvent,
@@ -59,14 +49,6 @@ DEFAULT_STREAMING_RESPONSE_FORMATS = frozenset({"json", "text"})
 SEGMENT_RESPONSE_FORMATS = frozenset({"srt", "vtt"})
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class GreedyStopRules:
-    """Opt-in stop rules that greedy audio-LLM transcription clients rely on."""
-
-    stop_at_end_of_text: bool = False
-    stop_on_token_loop: bool = False
-
-
 @dataclass(frozen=True, slots=True)
 class SpeechToTextForm:
     """Separate shared form parsing from endpoint-specific policy."""
@@ -80,9 +62,6 @@ class SpeechToTextForm:
     repetition_penalty: float | None
     max_new_tokens: int | None
     stream: bool
-    stop_rules: GreedyStopRules
-    include_generation_metadata: bool
-    audio_layout: str | None = None
 
 
 async def parse_speech_to_text_form(
@@ -95,10 +74,6 @@ async def parse_speech_to_text_form(
     repetition_penalty: float | None = Form(default=None, gt=0.0, le=2.0),
     max_new_tokens: int | None = Form(default=None, ge=1),
     stream: bool = Form(default=False),
-    stop_at_end_of_text: bool = Form(default=False),
-    stop_on_token_loop: bool = Form(default=False),
-    include_generation_metadata: bool = Form(default=False),
-    audio_layout: str | None = Form(default=None),
 ) -> SpeechToTextForm:
     return SpeechToTextForm(
         file=file,
@@ -110,12 +85,6 @@ async def parse_speech_to_text_form(
         repetition_penalty=repetition_penalty,
         max_new_tokens=max_new_tokens,
         stream=stream,
-        stop_rules=GreedyStopRules(
-            stop_at_end_of_text=stop_at_end_of_text,
-            stop_on_token_loop=stop_on_token_loop,
-        ),
-        include_generation_metadata=include_generation_metadata,
-        audio_layout=audio_layout,
     )
 
 
@@ -182,28 +151,9 @@ def build_speech_to_text_generate_request(
     task: str = "transcribe",
     detect_language: bool = False,
     segment_timestamps: bool = False,
-    stop_rules: GreedyStopRules | None = None,
-    include_generation_metadata: bool = False,
-    audio_layout: str | None = None,
 ) -> GenerateRequest:
     """Keep endpoint policy out of model-neutral request construction."""
     params: dict[str, str | bool] = {"task": task}
-    if audio_layout is not None:
-        params[AUDIO_LAYOUT_PARAM] = audio_layout
-    else:
-        pass
-    if include_generation_metadata:
-        params[INCLUDE_GENERATION_METADATA_PARAM] = True
-    else:
-        pass
-    if stop_rules is not None and stop_rules.stop_at_end_of_text:
-        params[STOP_AT_END_OF_TEXT_PARAM] = True
-    else:
-        pass
-    if stop_rules is not None and stop_rules.stop_on_token_loop:
-        params[STOP_ON_TOKEN_LOOP_PARAM] = True
-    else:
-        pass
     if detect_language:
         params["detect_language"] = True
     else:
@@ -585,21 +535,15 @@ async def speech_to_text_stream(
     adapter: TranscriptionAdapter,
     duration_s: float,
     operation_name: str = "transcription",
-    include_generation_metadata: bool = False,
 ) -> AsyncIterator[str]:
     """Keep terminal event ordering stable for OpenAI-compatible clients."""
     final_text: str | None = None
-    final_metadata: GenerationMetadata | None = None
 
     def _event_for(chunk: GenerateChunk) -> str | None:
-        nonlocal final_text, final_metadata
+        nonlocal final_text
         if chunk.finish_reason is not None:
             if isinstance(chunk.text, str) and chunk.text:
                 final_text = chunk.text
-            else:
-                pass
-            if chunk.generation_metadata is not None:
-                final_metadata = chunk.generation_metadata
             else:
                 pass
             return None
@@ -640,28 +584,7 @@ async def speech_to_text_stream(
     usage = (
         TranscriptionUsage(seconds=math.ceil(duration_s)) if duration_s > 0 else None
     )
-    if include_generation_metadata and final_metadata is None:
-        payload = {
-            "type": "error",
-            "error": {"message": "the model returned no generation metadata"},
-        }
-        yield f"data: {json.dumps(payload)}\n\n"
-        return
-    else:
-        pass
-    done_event = TranscriptionTextDoneEvent(
-        text=text,
-        usage=usage,
-        generation_metadata=(
-            TranscriptionGenerationMetadata(
-                generated_token_count=final_metadata.generated_token_count,
-                language=final_metadata.language,
-                finish_reason=final_metadata.finish_reason,
-            )
-            if include_generation_metadata
-            else None
-        ),
-    )
+    done_event = TranscriptionTextDoneEvent(text=text, usage=usage)
     yield f"data: {done_event.model_dump_json(exclude_none=True)}\n\n"
     yield f"data: {STREAM_DONE_SENTINEL}\n\n"
 
@@ -715,9 +638,6 @@ async def create_speech_to_text_streaming_response(
             adapter=adapter,
             duration_s=duration_s,
             operation_name=operation_name,
-            include_generation_metadata=bool(
-                gen_req.extra_params.get(INCLUDE_GENERATION_METADATA_PARAM)
-            ),
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Request-Id": request_id},

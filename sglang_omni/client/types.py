@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal, TypedDict
+from typing import TypedDict
 
 
 class TokenUsageDict(TypedDict):
@@ -143,22 +143,6 @@ class GenerateRequest:
         }
 
 
-INCLUDE_GENERATION_METADATA_PARAM = "include_generation_metadata"
-# Opt-in prompt audio layout; "voxt_swift" reproduces Voxt's Swift Qwen3-ASR port.
-AUDIO_LAYOUT_PARAM = "audio_layout"
-VOXT_SWIFT_AUDIO_LAYOUT = "voxt_swift"
-AUDIO_LAYOUTS = frozenset({VOXT_SWIFT_AUDIO_LAYOUT})
-
-
-@dataclass(frozen=True, kw_only=True)
-class GenerationMetadata:
-    """What a chunked client needs to continue across requests."""
-
-    generated_token_count: int
-    language: str | None
-    finish_reason: Literal["stop", "length"]
-
-
 @dataclass
 class GenerateChunk:
     """Streaming chunk from the client."""
@@ -179,7 +163,6 @@ class GenerateChunk:
     stage_name: str | None = None
     modality: str = "text"
     language: str | None = None
-    generation_metadata: GenerationMetadata | None = None
     audio_data: object = None
     sample_rate: int | None = None
 

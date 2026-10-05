@@ -174,12 +174,6 @@ class RealtimeTranscriptionSession:
         self.refresh_interval_samples = (
             transcription_config.decode_interval_ms * PCM_SAMPLE_RATE // 1000
         )
-        first_decode_ms = transcription_config.first_decode_ms
-        self.first_refresh_samples = (
-            first_decode_ms * PCM_SAMPLE_RATE // 1000
-            if first_decode_ms is not None
-            else self.refresh_interval_samples
-        )
         max_buffer_seconds = (
             max_segment_s + 4 if max_segment_s is not None else _UNBOUNDED_BUFFER_S
         )
@@ -530,7 +524,7 @@ class RealtimeTranscriptionSession:
                 model_name=self.model_name,
                 language=self.settings.language,
             ),
-            next_refresh_sample=start_sample + self.first_refresh_samples,
+            next_refresh_sample=start_sample + self.refresh_interval_samples,
         )
         self.next_segment_id += 1
         self.active_segment = segment
@@ -687,15 +681,9 @@ class RealtimeTranscriptionSession:
                 continue
             else:
                 pass
+            segment.next_refresh_sample = end_sample + self.refresh_interval_samples
             pcm = self.audio_buffer.slice(segment.start_sample)
-            silent = self.is_silent(pcm)
-            # With an early first decode, leading silence does not use up the
-            # first slot: the segment decodes as soon as audible audio arrives.
-            if not (silent and self.first_decode_waits_for_audio(segment)):
-                segment.next_refresh_sample = end_sample + self.refresh_interval_samples
-            else:
-                pass
-            if silent:
+            if self.is_silent(pcm):
                 continue
             else:
                 pass
@@ -704,12 +692,6 @@ class RealtimeTranscriptionSession:
                 self.audio_buffer.pcm_to_wav_bytes(pcm),
                 is_final=False,
             )
-
-    def first_decode_waits_for_audio(self, segment: ActiveTranscriptionSegment) -> bool:
-        return (
-            self.transcription_config.first_decode_ms is not None
-            and segment.decode_attempt == 0
-        )
 
     @staticmethod
     def is_silent(pcm: bytes) -> bool:

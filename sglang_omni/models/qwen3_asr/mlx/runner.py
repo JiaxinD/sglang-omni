@@ -4,21 +4,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 from sglang_omni.model_runner.audio_mlx import AudioMlxModelRunner
 
 logger = logging.getLogger(__name__)
-
-# Opt-in for single-user servers that idle between requests (Voxt): small
-# per-request KV caches that are freed on release instead of pooled.
-LEAN_KV_CACHE_ENV = "SGLANG_OMNI_MLX_LEAN_KV_CACHE"
-LEAN_KV_CACHE_TOKENS = 1024
-
-
-def lean_kv_cache() -> bool:
-    return os.environ.get(LEAN_KV_CACHE_ENV, "").strip() == "1"
 
 
 class Qwen3ASRMlxModelRunner(AudioMlxModelRunner):
@@ -56,33 +46,6 @@ class Qwen3ASRMlxModelRunner(AudioMlxModelRunner):
             "Loaded native MLX Qwen3-ASR model in %.2fs",
             time.perf_counter() - started,
         )
-
-
-    def _new_native_cache(self):  # noqa: leading-underscore  # upstream hook
-        if lean_kv_cache():
-            # Upstream preallocates 4096 tokens per request (~470 MB for this
-            # model); one ASR request rarely needs more than 1024 and the cache
-            # still doubles on overflow.
-            self._max_seq_len = min(
-                self._max_seq_len, LEAN_KV_CACHE_TOKENS
-            )  # noqa: leading-underscore  # upstream name
-        else:
-            pass
-        return super()._new_native_cache()
-
-    def _release_cache(self, cache) -> None:  # noqa: leading-underscore  # upstream hook
-        if lean_kv_cache():
-            # Freed instead of pooled, so an idle server holds no request cache.
-            return
-        else:
-            pass
-        super()._release_cache(cache)
-
-    def audio_layout_options(self, item) -> dict[str, object]:
-        from ..swift_layout import AUDIO_LAYOUT_PARAM
-
-        layout = (getattr(item, "model_specific_data", None) or {}).get(AUDIO_LAYOUT_PARAM)
-        return {"layout": layout} if layout else {}
 
 
 def make_qwen3_asr_mlx_runner_class():

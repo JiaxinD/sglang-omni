@@ -13,12 +13,10 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from sglang_omni.client import Client, ClientError, GenerateRequest
-from sglang_omni.client.types import AUDIO_LAYOUTS
 from sglang_omni.config import ResolvedAudioChunking
 from sglang_omni.serve import speech_to_text
 from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.serve.protocol import TranscriptionResponse, TranscriptionUsage
-from sglang_omni.serve.speech_to_text import GreedyStopRules
 from sglang_omni.serve.transcription_adapters import TranscriptionAdapter
 from sglang_omni.serve.transcription_chunking import (
     ChunkPlan,
@@ -52,10 +50,6 @@ __all__ = [
     "build_transcription_generate_request",
     "register_transcriptions",
 ]
-
-# Models whose stream terminal frame can carry generation metadata.
-GENERATION_METADATA_ARCHITECTURES = frozenset({"Qwen3ASRForConditionalGeneration"})
-AUDIO_LAYOUT_ARCHITECTURES = frozenset({"Qwen3ASRForConditionalGeneration"})
 
 
 class LongAudioAdmission:
@@ -136,34 +130,6 @@ def register_transcriptions(app: FastAPI) -> None:
         )
 
         chunking: ResolvedAudioChunking = app.state.audio_chunking
-        architectures = getattr(app.state, "architectures", None) or []
-        if form.include_generation_metadata and (
-            not form.stream
-            or not GENERATION_METADATA_ARCHITECTURES.intersection(architectures)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "include_generation_metadata requires stream=true and a model "
-                    "that reports it"
-                ),
-            )
-        else:
-            pass
-
-        if form.audio_layout is not None and (
-            form.audio_layout not in AUDIO_LAYOUTS
-            or not AUDIO_LAYOUT_ARCHITECTURES.intersection(architectures)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"audio_layout must be one of {sorted(AUDIO_LAYOUTS)} and "
-                    "needs a model that supports it"
-                ),
-            )
-        else:
-            pass
 
         if form.stream:
             speech_to_text.validate_speech_to_text_response_format(
@@ -206,9 +172,6 @@ def register_transcriptions(app: FastAPI) -> None:
                 repetition_penalty=form.repetition_penalty,
                 max_new_tokens=form.max_new_tokens,
                 stream=True,
-                stop_rules=form.stop_rules,
-                include_generation_metadata=form.include_generation_metadata,
-                audio_layout=form.audio_layout,
             )
             return await speech_to_text.create_speech_to_text_streaming_response(
                 request=request,
@@ -328,8 +291,6 @@ async def transcribe_planned_upload(
             repetition_penalty=form.repetition_penalty,
             max_new_tokens=form.max_new_tokens,
             segment_timestamps=segment_timestamps,
-            stop_rules=form.stop_rules,
-            audio_layout=form.audio_layout,
         )
         result = await speech_to_text.complete_speech_to_text_request(
             client,
@@ -368,8 +329,6 @@ async def transcribe_planned_upload(
                 temperature=form.temperature,
                 repetition_penalty=form.repetition_penalty,
                 max_new_tokens=form.max_new_tokens,
-                stop_rules=form.stop_rules,
-                audio_layout=form.audio_layout,
                 max_concurrent=chunking.max_concurrent_chunks,
                 condition_on_previous_text=chunking.condition_on_previous_text,
                 adapter=adapter,
@@ -466,8 +425,6 @@ def build_chunk_generate_request(
     repetition_penalty: float | None,
     max_new_tokens: int | None,
     stream: bool = False,
-    stop_rules: GreedyStopRules | None = None,
-    audio_layout: str | None = None,
 ) -> GenerateRequest:
     return build_transcription_generate_request(
         audio_bytes=chunk_bytes,
@@ -482,8 +439,6 @@ def build_chunk_generate_request(
         repetition_penalty=repetition_penalty,
         max_new_tokens=max_new_tokens,
         stream=stream,
-        stop_rules=stop_rules,
-        audio_layout=audio_layout,
     )
 
 
@@ -502,8 +457,6 @@ async def transcribe_audio_chunks(
     max_concurrent: int,
     condition_on_previous_text: bool,
     adapter: TranscriptionAdapter,
-    stop_rules: GreedyStopRules | None = None,
-    audio_layout: str | None = None,
 ) -> list[str]:
     """Transcribe the chunks of a plan, returning one text per chunk.
 
@@ -541,8 +494,6 @@ async def transcribe_audio_chunks(
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
                 max_new_tokens=max_new_tokens,
-                stop_rules=stop_rules,
-                audio_layout=audio_layout,
             )
             retry_suffix = "-retry" if retry else ""
             chunk_request_id = f"{request_id}-chunk-{span.index}{retry_suffix}"

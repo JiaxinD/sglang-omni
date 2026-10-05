@@ -27,12 +27,6 @@ from sglang_omni.models.moss_transcribe_diarize.encoder_service import (
 )
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY, StagePayload
-from sglang_omni.scheduling.greedy_stop_rules import (
-    END_OF_TEXT_TOKEN,
-    STOP_AT_END_OF_TEXT_PARAM,
-    STOP_ON_TOKEN_LOOP_PARAM,
-    TokenLoopStoppingReq,
-)
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.token_text_streaming import (
@@ -414,7 +408,6 @@ def make_moss_transcribe_diarize_scheduler_adapters(
     context_length: int,
     duration_scaled_default: bool = True,
     audio_encoder_service: BatchedAudioEncoderService | None = None,
-    greedy_only: bool = False,
 ) -> tuple[
     Callable[[StagePayload], MossTranscribeDiarizeRequestData],
     Callable[[MossTranscribeDiarizeRequestData], StagePayload],
@@ -568,13 +561,6 @@ def make_moss_transcribe_diarize_scheduler_adapters(
             raise ValueError("repetition_penalty must be in (0, 2]")
         else:
             pass
-        if greedy_only and (temperature != 0.0 or repetition_penalty != 1.0):
-            raise ValueError(
-                "MOSS-Transcribe-Diarize Apple backend supports greedy decoding only; "
-                f"got temperature={temperature} repetition_penalty={repetition_penalty}"
-            )
-        else:
-            pass
         # note (db-ol): the model default was sized for short clips and
         # silently cuts transcripts past about 20 minutes. Scale the default
         # budget with duration unless the operator configured a fixed one.
@@ -621,21 +607,11 @@ def make_moss_transcribe_diarize_scheduler_adapters(
             top_p=top_p,
             top_k=top_k,
             repetition_penalty=repetition_penalty,
-            stop_token_ids=[
-                eos_token_id,
-                *(
-                    [int(tokenizer.convert_tokens_to_ids(END_OF_TEXT_TOKEN))]
-                    if params.get(STOP_AT_END_OF_TEXT_PARAM)
-                    else []
-                ),
-            ],
+            stop_token_ids=[eos_token_id],
         )
         sampling_params.normalize(tokenizer=None)
 
-        request_class = (
-            TokenLoopStoppingReq if params.get(STOP_ON_TOKEN_LOOP_PARAM) else Req
-        )
-        req = request_class(
+        req = Req(
             rid=payload.request_id,
             origin_input_text="",
             origin_input_ids=padded_input_ids,

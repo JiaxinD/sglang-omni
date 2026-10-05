@@ -39,8 +39,6 @@ _MAX_ENGINE_CLIP_MESSAGE = (
 MAX_PREV_CONTEXT_TOKENS = 224
 # note (jiannan-17): Standard Whisper decoder context is 448 positions.
 _DEFAULT_DECODER_CONTEXT_LEN = 448
-# The decoder prompt carries no language token, so the model chooses one.
-AUTO_LANGUAGE = "auto"
 _LANGUAGE_ALIASES = {
     "en": "english",
     "eng": "english",
@@ -119,17 +117,6 @@ def build_prefix_tokens(
     task: str,
     predict_timestamps: bool = False,
 ) -> list[int]:
-    if language == AUTO_LANGUAGE:
-        # The tokenizer keeps its previous language when given None, so the
-        # language-free prefix is assembled from the special tokens directly.
-        prefix_tokens = ["<|startoftranscript|>", f"<|{task}|>"]
-        if not predict_timestamps:
-            prefix_tokens.append("<|notimestamps|>")
-        else:
-            pass
-        return [int(tokenizer.convert_tokens_to_ids(token)) for token in prefix_tokens]
-    else:
-        pass
     tokenizer.set_prefix_tokens(
         language=language,
         task=task,
@@ -186,7 +173,6 @@ def make_whisper_scheduler_adapters(
     max_new_tokens: int,
     decoder_context_len: int | None = None,
     audio_encoder_service: WhisperPreLMEncoderService | None = None,
-    greedy_only: bool = False,
 ) -> tuple[
     Callable[[StagePayload], WhisperASRRequestData],
     Callable[[WhisperASRRequestData], StagePayload],
@@ -241,17 +227,6 @@ def make_whisper_scheduler_adapters(
         task = str(params.get("task") or "transcribe")
         detect_language = bool(params.get("detect_language"))
         segment_timestamps = bool(params.get("segment_timestamps"))
-        temperature = float(params.get("temperature") or 0.0)
-        if greedy_only and (
-            temperature != 0.0 or detect_language or segment_timestamps
-        ):
-            raise ValueError(
-                "Whisper ASR Apple backend supports greedy text-only transcription; "
-                f"got temperature={temperature} detect_language={detect_language} "
-                f"segment_timestamps={segment_timestamps}"
-            )
-        else:
-            pass
         if detect_language:
             prompt_token_ids = [sot_token_id]
             request_max_new_tokens = 1
@@ -324,6 +299,7 @@ def make_whisper_scheduler_adapters(
         else:
             pass
 
+        temperature = float(params.get("temperature") or 0.0)
         sampling_params = SamplingParams(
             max_new_tokens=request_max_new_tokens,
             temperature=temperature,

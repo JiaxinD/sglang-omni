@@ -43,12 +43,7 @@ class FakeTokenizer:
         return 51866
 
     def convert_tokens_to_ids(self, token: str) -> int:
-        return {
-            "<|startoftranscript|>": 50258,
-            "<|translate|>": 50358,
-            "<|transcribe|>": 50359,
-            "<|notimestamps|>": 50363,
-        }[token]
+        return {"<|startoftranscript|>": 50258}[token]
 
     def set_prefix_tokens(
         self, *, language: str, task: str, predict_timestamps: bool
@@ -73,9 +68,7 @@ class FakeTokenizer:
         return [SOT_PREV] + [1000 + i for i in range(len(text))]
 
 
-def make_request_builder(
-    tokenizer: FakeTokenizer | None = None, *, greedy_only: bool = False
-):
+def make_request_builder(tokenizer: FakeTokenizer | None = None):
     fake_processor = SimpleNamespace(
         feature_extractor=lambda audio, *, sampling_rate, return_tensors: (
             SimpleNamespace(input_features=torch.zeros((1, 128, 3000)))
@@ -87,7 +80,6 @@ def make_request_builder(
         generation_config=generation_config(),
         encoder_token_count=ENCODER_TOKEN_COUNT,
         max_new_tokens=32,
-        greedy_only=greedy_only,
     )
     return request_builder
 
@@ -476,53 +468,3 @@ def test_request_builder_pre_lm_cache_hit_skips_mel(monkeypatch) -> None:
     assert torch.equal(
         item.precomputed_embeddings, torch.full((ENCODER_TOKEN_COUNT, 2), 7.0)
     )
-
-
-@pytest.mark.parametrize(
-    ("segment_timestamps", "expected_prefix"),
-    [(False, [50258, 50359, 50363]), (True, [50258, 50359])],
-)
-def test_auto_language_omits_the_language_token(
-    monkeypatch, segment_timestamps: bool, expected_prefix: list[int]
-) -> None:
-    data = build(
-        monkeypatch,
-        {"language": "auto", "segment_timestamps": segment_timestamps},
-    )
-
-    assert data.prompt_token_ids == expected_prefix
-    assert data.language == "auto"
-
-
-@pytest.mark.parametrize(
-    ("params", "message"),
-    [
-        ({"temperature": 0.4}, "temperature"),
-        ({"detect_language": True}, "detect_language"),
-        ({"segment_timestamps": True}, "segment_timestamps"),
-    ],
-)
-def test_greedy_only_request_builder_rejects_unsupported_decoding(
-    monkeypatch, params: dict[str, object], message: str
-) -> None:
-    monkeypatch.setattr(
-        transcription,
-        "load_audio",
-        lambda source, **kwargs: np.zeros(1600, dtype=np.float32),
-    )
-
-    with pytest.raises(ValueError, match=message):
-        make_request_builder(greedy_only=True)(make_payload(params))
-
-
-def test_greedy_only_request_builder_accepts_plain_transcription(monkeypatch) -> None:
-    monkeypatch.setattr(
-        transcription,
-        "load_audio",
-        lambda source, **kwargs: np.zeros(1600, dtype=np.float32),
-    )
-
-    data = make_request_builder(greedy_only=True)(make_payload({"language": "auto"}))
-
-    assert data.temperature == 0.0
-    assert data.prompt_token_ids == [50258, 50359, 50363]

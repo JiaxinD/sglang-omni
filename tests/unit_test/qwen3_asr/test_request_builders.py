@@ -59,7 +59,8 @@ class FakeTokenizer:
         return 102
 
     def convert_tokens_to_ids(self, token: str) -> int:
-        return {"<|audio_pad|>": 42, "<|endoftext|>": 99}[token]
+        assert token == "<|audio_pad|>"
+        return 42
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         assert not add_special_tokens
@@ -96,7 +97,6 @@ class FakeTokenizer:
             21: "\u00a0middle",
             22: "  ",
             99: "<|endoftext|>",
-            2: "",
         }
         text = "".join(pieces[token_id] for token_id in token_ids)
         if skip_special_tokens:
@@ -998,123 +998,3 @@ def test_qwen3_asr_request_builder_encodes_after_offsets_are_final(
     assert observed["audio_fingerprint"] == data.req.extra_key
     assert item.feature is None
     assert item.precomputed_embeddings.shape[0] == num_audio_tokens
-
-
-def test_qwen3_asr_request_builder_applies_opt_in_greedy_stop_rules(
-    monkeypatch,
-) -> None:
-    from sglang.srt.managers.schedule_batch import Req
-
-    from sglang_omni.scheduling.greedy_stop_rules import TokenLoopStoppingReq
-
-    monkeypatch.setattr(
-        transcription,
-        "load_audio",
-        lambda source, **kwargs: np.zeros(1600, dtype=np.float32),
-    )
-    request_builder, _ = make_qwen3_asr_scheduler_adapters(
-        tokenizer=FakeTokenizer(),
-        max_new_tokens=32,
-        feature_extractor=lambda *args, **kwargs: SimpleNamespace(
-            input_features=torch.zeros((1, 128, 100)),
-            attention_mask=torch.ones((1, 100), dtype=torch.long),
-        ),
-    )
-
-    def build(params: dict[str, object]) -> Qwen3ASRRequestData:
-        return unwrap_built(
-            request_builder(
-                StagePayload(
-                    request_id="req-stop-rules",
-                    request=OmniRequest(inputs={"audio_bytes": b"wav"}, params=params),
-                    data={},
-                )
-            )
-        )
-
-    opted_in = build({"stop_at_end_of_text": True, "stop_on_token_loop": True})
-    default = build({})
-
-    assert set(opted_in.req.sampling_params.stop_token_ids) == {2, 99}
-    assert isinstance(opted_in.req, TokenLoopStoppingReq)
-    assert set(default.req.sampling_params.stop_token_ids) == {2}
-    assert type(default.req) is Req
-
-
-@pytest.mark.parametrize(
-    ("output_ids", "expected"),
-    [
-        (
-            [10, 100, 101, 20, 21, 22, 2],
-            {
-                "generated_token_count": 6,
-                "language": "English",
-                "finish_reason": "stop",
-            },
-        ),
-        (
-            [10, 100, 101, 20, 21, 22],
-            {
-                "generated_token_count": 6,
-                "language": "English",
-                "finish_reason": "length",
-            },
-        ),
-    ],
-)
-def test_qwen3_asr_result_adapter_reports_opt_in_generation_metadata(
-    output_ids: list[int], expected: dict[str, object]
-) -> None:
-    _, result_adapter = make_qwen3_asr_scheduler_adapters(
-        tokenizer=FakeTokenizer(),
-        max_new_tokens=32,
-        feature_extractor=object(),
-    )
-
-    def adapt(params: dict[str, object]) -> dict[str, object]:
-        payload = StagePayload(
-            request_id="req-metadata",
-            request=OmniRequest(inputs={}, params=params),
-            data={},
-        )
-        return result_adapter(
-            Qwen3ASRRequestData(output_ids=list(output_ids), stage_payload=payload)
-        ).data
-
-    assert adapt({"include_generation_metadata": True})["generation_metadata"] == (
-        expected
-    )
-    assert "generation_metadata" not in adapt({})
-
-
-def test_qwen3_asr_generation_metadata_reports_a_loop_stop_as_stop() -> None:
-    from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN
-
-    _, result_adapter = make_qwen3_asr_scheduler_adapters(
-        tokenizer=FakeTokenizer(),
-        max_new_tokens=32,
-        feature_extractor=object(),
-    )
-    payload = StagePayload(
-        request_id="req-loop",
-        request=OmniRequest(inputs={}, params={"include_generation_metadata": True}),
-        data={},
-    )
-    req = SimpleNamespace(
-        finished_reason=FINISH_MATCHED_TOKEN(matched=21),
-        sampling_params=SimpleNamespace(stop_token_ids=[2]),
-    )
-
-    metadata = result_adapter(
-        Qwen3ASRRequestData(
-            output_ids=[10, 100, 101, 20, 21, 20, 21],
-            stage_payload=payload,
-            req=req,
-        )
-    ).data["generation_metadata"]
-
-    assert metadata == {
-        "generated_token_count": 7,
-        "language": "English",
-        "finish_reason": "stop",
-    }

@@ -26,7 +26,6 @@ from typing import Callable
 
 import torch
 from sglang.srt.managers.schedule_batch import (
-    FINISH_LENGTH,
     Modality,
     MultimodalDataItem,
     MultimodalInputs,
@@ -35,16 +34,9 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.sampling.sampling_params import SamplingParams
 from transformers import PreTrainedTokenizerBase, WhisperFeatureExtractor
 
-from sglang_omni.client.types import INCLUDE_GENERATION_METADATA_PARAM
 from sglang_omni.models.qwen3_asr.encoder_service import Qwen3ASRPreLMEncoderService
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.greedy_stop_rules import (
-    END_OF_TEXT_TOKEN,
-    STOP_AT_END_OF_TEXT_PARAM,
-    STOP_ON_TOKEN_LOOP_PARAM,
-    TokenLoopStoppingReq,
-)
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.token_text_streaming import (
@@ -59,13 +51,6 @@ from .audio_lengths import (
     qwen3_asr_num_audio_tokens,
 )
 from .languages import resolve_language
-from .swift_layout import (
-    AUDIO_LAYOUT_PARAM,
-    VOXT_SWIFT_LAYOUT,
-    swift_log_mel,
-    swift_output_length,
-    validate_audio_layout,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +265,6 @@ def make_qwen3_asr_scheduler_adapters(
         forced_language = (
             None if requested_language is None else resolve_language(requested_language)
         )
-        audio_layout = validate_audio_layout(params.get(AUDIO_LAYOUT_PARAM))
         # Note(Audrey): the checkpoint reads biasing text from the system turn.
         raw_context = params.get("prompt")
         bias_context = str(raw_context).strip() if raw_context else None
@@ -323,17 +307,11 @@ def make_qwen3_asr_scheduler_adapters(
                 pass
             estimated_mel_frames = len(audio) // hop_length
             estimated_audio_tokens = qwen3_asr_num_audio_tokens(estimated_mel_frames)
-            if audio_layout == VOXT_SWIFT_LAYOUT:
-                estimated_mel_frames += 1
-                estimated_audio_tokens = swift_output_length(estimated_mel_frames)
-            else:
-                pass
         else:
             pass
 
         cached_embedding = None
-        # Cached embeddings are reference-layout encoder output.
-        if audio_encoder_service is not None and audio_layout is None:
+        if audio_encoder_service is not None:
             assert estimated_audio_tokens is not None
             cached_embedding = audio_encoder_service.lookup_cached_embedding(
                 fingerprint, estimated_audio_tokens
@@ -368,13 +346,7 @@ def make_qwen3_asr_scheduler_adapters(
         else:
             pass
 
-        if cached_embedding is None and audio_layout == VOXT_SWIFT_LAYOUT:
-            features = swift_log_mel(audio, feature_extractor)
-            feature_attention_mask = torch.ones(
-                (1, features.shape[-1]), dtype=torch.long
-            )
-            num_audio_tokens = swift_output_length(features.shape[-1])
-        elif cached_embedding is None:
+        if cached_embedding is None:
             # note (Jeffro Qu): unlike Whisper's default 30s window, here we pad the mel to the clip's true length.
             # WhisperFeatureExtractor defaults to padding="max_length", padding every clip to nb_max_frames=3000 (~30s),
             # so a short clip pays the full 30s of mel FFT on silence.
@@ -434,7 +406,6 @@ def make_qwen3_asr_scheduler_adapters(
             hash=prepared.fingerprint_int,
             feature=features,
             model_specific_data={
-                **({AUDIO_LAYOUT_PARAM: audio_layout} if audio_layout else {}),
                 "feature_attention_mask": feature_attention_mask,
                 # note (luojiaxuan): the pre-LM encoder service reads these to
                 # split batched encoder output and key its embedding cache.
@@ -480,14 +451,7 @@ def make_qwen3_asr_scheduler_adapters(
             max_new_tokens=request_max_new_tokens,
             temperature=temperature,
             top_p=1.0,
-            stop_token_ids=[
-                eos_token_id,
-                *(
-                    [int(tokenizer.convert_tokens_to_ids(END_OF_TEXT_TOKEN))]
-                    if params.get(STOP_AT_END_OF_TEXT_PARAM)
-                    else []
-                ),
-            ],
+            stop_token_ids=[eos_token_id],
         )
         sampling_params.normalize(tokenizer=None)
 
@@ -496,10 +460,7 @@ def make_qwen3_asr_scheduler_adapters(
         else:
             pass
 
-        request_class = (
-            TokenLoopStoppingReq if params.get(STOP_ON_TOKEN_LOOP_PARAM) else Req
-        )
-        req = request_class(
+        req = Req(
             rid=payload.request_id,
             origin_input_text="",
             origin_input_ids=input_ids,
@@ -593,38 +554,17 @@ def make_qwen3_asr_scheduler_adapters(
             time.perf_counter() - data.engine_start_s if data.engine_start_s else 0.0
         )
         resolved_language = data.language or detected_language
-        result_data: dict[str, object] = {
-            "text": transcript,
-            "language": resolved_language,
-            "duration_s": data.audio_duration_s,
-            "asr_latency_s": engine_time_s,
-            "usage": {"engine_time_s": engine_time_s},
-            "modality": "text",
-        }
-        request_params = payload.request.params or {}
-        if request_params.get(INCLUDE_GENERATION_METADATA_PARAM):
-            stop_token_ids = (
-                set(data.req.sampling_params.stop_token_ids)
-                if data.req is not None
-                else {eos_token_id}
-            )
-            ended_on_stop_token = bool(output_ids) and output_ids[-1] in stop_token_ids
-            hit_length_limit = (
-                isinstance(data.req.finished_reason, FINISH_LENGTH)
-                if data.req is not None
-                else not ended_on_stop_token
-            )
-            result_data["generation_metadata"] = {
-                "generated_token_count": len(output_ids) - int(ended_on_stop_token),
-                "language": resolved_language,
-                "finish_reason": "length" if hit_length_limit else "stop",
-            }
-        else:
-            pass
         return StagePayload(
             request_id=payload.request_id,
             request=payload.request,
-            data=result_data,
+            data={
+                "text": transcript,
+                "language": resolved_language,
+                "duration_s": data.audio_duration_s,
+                "asr_latency_s": engine_time_s,
+                "usage": {"engine_time_s": engine_time_s},
+                "modality": "text",
+            },
         )
 
     return request_builder, result_adapter

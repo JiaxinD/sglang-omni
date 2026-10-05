@@ -107,23 +107,16 @@ class AudioMlxModelRunner:
         input_ids = mx.array([normalized_ids], dtype=mx.int32)
         input_features = mx.array(self.to_numpy(item.feature))
         feature_attention_mask = mx.array(self.to_numpy(item.feature_attention_mask))
-        layout_options = self.audio_layout_options(item)
         audio_features = self.model.get_audio_features(
-            input_features, feature_attention_mask, **layout_options
+            input_features, feature_attention_mask
         )
         input_embeddings = self.model.build_inputs_embeds(
             input_ids,
             audio_features,
             audio_start=audio_start,
             num_audio_tokens=num_audio_tokens,
-            **layout_options,
         )
         return input_ids, input_embeddings
-
-    def audio_layout_options(self, item) -> dict[str, object]:
-        """Model-specific keyword options for encoding and merging this item."""
-        del item
-        return {}
 
     def prefill_start(
         self,

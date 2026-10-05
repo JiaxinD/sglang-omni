@@ -42,7 +42,6 @@ class FakeTokenizer:
             "<|audio_start|>": 151669,
             "<|audio_pad|>": 151671,
             "<|audio_end|>": 151670,
-            "<|endoftext|>": 151643,
         }
 
     def convert_tokens_to_ids(self, token: str) -> int:
@@ -776,64 +775,3 @@ def test_request_builder_uses_string_prompt_when_audio_is_supplied_separately() 
 
     assert processor.messages is not None
     assert processor.messages[0]["content"][1]["text"] == "custom diarization prompt"
-
-
-@pytest.mark.parametrize(
-    ("field", "value"), [("temperature", 0.7), ("repetition_penalty", 1.3)]
-)
-def test_greedy_only_request_builder_rejects_sampling_controls(
-    field: str, value: float
-) -> None:
-    processor = FakeProcessor()
-    request_builder, _ = make_moss_transcribe_diarize_scheduler_adapters(
-        processor=processor,
-        tokenizer=processor.tokenizer,
-        max_new_tokens=32,
-        context_length=TEST_CONTEXT_LENGTH,
-        greedy_only=True,
-    )
-
-    with pytest.raises(ValueError, match=f"greedy decoding only.*{field}"):
-        request_builder(
-            payload(
-                params={field: value},
-                metadata={
-                    "model": "moss-transcribe-diarize",
-                    EXPLICIT_GENERATION_PARAMS_KEY: [field],
-                },
-            )
-        )
-
-
-def test_greedy_only_request_builder_accepts_the_greedy_defaults() -> None:
-    processor = FakeProcessor()
-    request_builder, _ = make_moss_transcribe_diarize_scheduler_adapters(
-        processor=processor,
-        tokenizer=processor.tokenizer,
-        max_new_tokens=32,
-        context_length=TEST_CONTEXT_LENGTH,
-        greedy_only=True,
-    )
-
-    data = request_builder(payload())
-
-    assert data.temperature == 0.0
-    assert data.repetition_penalty == 1.0
-
-
-def test_request_builder_applies_opt_in_greedy_stop_rules() -> None:
-    from sglang.srt.managers.schedule_batch import Req
-
-    from sglang_omni.scheduling.greedy_stop_rules import TokenLoopStoppingReq
-
-    request_builder = make_request_builder()
-
-    opted_in = request_builder(
-        payload(params={"stop_at_end_of_text": True, "stop_on_token_loop": True})
-    )
-    default = request_builder(payload())
-
-    assert set(opted_in.req.sampling_params.stop_token_ids) == {151643, 151645}
-    assert isinstance(opted_in.req, TokenLoopStoppingReq)
-    assert set(default.req.sampling_params.stop_token_ids) == {151645}
-    assert type(default.req) is Req
