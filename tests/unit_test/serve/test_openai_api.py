@@ -3994,3 +3994,92 @@ def test_transcription_omits_greedy_stop_rules_by_default() -> None:
     params = Client.build_omni_request(transcription_client.requests[0]).params
     assert "stop_at_end_of_text" not in params
     assert "stop_on_token_loop" not in params
+
+
+class MetadataTranscriptionClient(SuccessfulTranscriptionClient):
+    async def generate(self, request: GenerateRequest, request_id: str | None = None):
+        from sglang_omni.client.types import GenerationMetadata
+
+        del request_id
+        self.requests.append(request)
+        yield GenerateChunk(request_id="transcription-1", text="hello")
+        yield GenerateChunk(
+            request_id="transcription-1",
+            text="hello",
+            finish_reason="stop",
+            generation_metadata=GenerationMetadata(
+                generated_token_count=4, language="English", finish_reason="stop"
+            ),
+        )
+
+
+def test_transcription_stream_reports_opt_in_generation_metadata() -> None:
+    transcription_client = MetadataTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client,
+        max_native_clip_s=3.0,
+        architectures=["Qwen3ASRForConditionalGeneration"],
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": "true", "include_generation_metadata": "true"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    done = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if "transcript.text.done" in line
+    ]
+    assert done[0]["generation_metadata"] == {
+        "generated_token_count": 4,
+        "language": "English",
+        "finish_reason": "stop",
+    }
+    params = Client.build_omni_request(transcription_client.requests[0]).params
+    assert params["include_generation_metadata"] is True
+
+
+@pytest.mark.parametrize(
+    ("stream", "architectures"),
+    [
+        ("false", ["Qwen3ASRForConditionalGeneration"]),
+        ("true", ["WhisperForConditionalGeneration"]),
+    ],
+)
+def test_transcription_rejects_generation_metadata_where_unsupported(
+    stream: str, architectures: list[str]
+) -> None:
+    transcription_client = MetadataTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client, max_native_clip_s=3.0, architectures=architectures
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": stream, "include_generation_metadata": "true"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    assert response.status_code == 400
+    assert "include_generation_metadata" in response.json()["detail"]
+    assert transcription_client.requests == []
+
+
+def test_transcription_stream_without_metadata_fails_when_it_was_requested() -> None:
+    transcription_client = SuccessfulTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client,
+        max_native_clip_s=3.0,
+        architectures=["Qwen3ASRForConditionalGeneration"],
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": "true", "include_generation_metadata": "true"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    assert "transcript.text.done" not in response.text
+    assert '"type": "error"' in response.text

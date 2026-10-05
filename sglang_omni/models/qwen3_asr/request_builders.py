@@ -34,6 +34,7 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.sampling.sampling_params import SamplingParams
 from transformers import PreTrainedTokenizerBase, WhisperFeatureExtractor
 
+from sglang_omni.client.types import INCLUDE_GENERATION_METADATA_PARAM
 from sglang_omni.models.qwen3_asr.encoder_service import Qwen3ASRPreLMEncoderService
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import StagePayload
@@ -570,17 +571,33 @@ def make_qwen3_asr_scheduler_adapters(
             time.perf_counter() - data.engine_start_s if data.engine_start_s else 0.0
         )
         resolved_language = data.language or detected_language
+        result_data: dict[str, object] = {
+            "text": transcript,
+            "language": resolved_language,
+            "duration_s": data.audio_duration_s,
+            "asr_latency_s": engine_time_s,
+            "usage": {"engine_time_s": engine_time_s},
+            "modality": "text",
+        }
+        request_params = payload.request.params or {}
+        if request_params.get(INCLUDE_GENERATION_METADATA_PARAM):
+            stop_token_ids = (
+                set(data.req.sampling_params.stop_token_ids)
+                if data.req is not None
+                else {eos_token_id}
+            )
+            stopped = bool(output_ids) and output_ids[-1] in stop_token_ids
+            result_data["generation_metadata"] = {
+                "generated_token_count": len(output_ids) - int(stopped),
+                "language": resolved_language,
+                "finish_reason": "stop" if stopped else "length",
+            }
+        else:
+            pass
         return StagePayload(
             request_id=payload.request_id,
             request=payload.request,
-            data={
-                "text": transcript,
-                "language": resolved_language,
-                "duration_s": data.audio_duration_s,
-                "asr_latency_s": engine_time_s,
-                "usage": {"engine_time_s": engine_time_s},
-                "modality": "text",
-            },
+            data=result_data,
         )
 
     return request_builder, result_adapter

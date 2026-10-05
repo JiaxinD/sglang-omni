@@ -603,12 +603,21 @@ class TranscriptionTextDeltaEvent(BaseModel):
     delta: str
 
 
+class TranscriptionGenerationMetadata(BaseModel):
+    """Opt-in decoding facts a client needs to continue across requests."""
+
+    generated_token_count: int
+    language: str | None
+    finish_reason: Literal["stop", "length"]
+
+
 class TranscriptionTextDoneEvent(BaseModel):
     """OpenAI-compatible streaming transcription terminal event (SSE)."""
 
     type: str = "transcript.text.done"
     text: str
     usage: TranscriptionUsage | None = None
+    generation_metadata: TranscriptionGenerationMetadata | None = None
 
 
 class ModelPermission(BaseModel):

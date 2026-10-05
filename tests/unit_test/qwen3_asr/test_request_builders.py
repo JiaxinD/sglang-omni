@@ -96,6 +96,7 @@ class FakeTokenizer:
             21: "\u00a0middle",
             22: "  ",
             99: "<|endoftext|>",
+            2: "",
         }
         text = "".join(pieces[token_id] for token_id in token_ids)
         if skip_special_tokens:
@@ -1038,3 +1039,49 @@ def test_qwen3_asr_request_builder_applies_opt_in_greedy_stop_rules(
     assert isinstance(opted_in.req, TokenLoopStoppingReq)
     assert set(default.req.sampling_params.stop_token_ids) == {2}
     assert type(default.req) is Req
+
+
+@pytest.mark.parametrize(
+    ("output_ids", "expected"),
+    [
+        (
+            [10, 100, 101, 20, 21, 22, 2],
+            {
+                "generated_token_count": 6,
+                "language": "English",
+                "finish_reason": "stop",
+            },
+        ),
+        (
+            [10, 100, 101, 20, 21, 22],
+            {
+                "generated_token_count": 6,
+                "language": "English",
+                "finish_reason": "length",
+            },
+        ),
+    ],
+)
+def test_qwen3_asr_result_adapter_reports_opt_in_generation_metadata(
+    output_ids: list[int], expected: dict[str, object]
+) -> None:
+    _, result_adapter = make_qwen3_asr_scheduler_adapters(
+        tokenizer=FakeTokenizer(),
+        max_new_tokens=32,
+        feature_extractor=object(),
+    )
+
+    def adapt(params: dict[str, object]) -> dict[str, object]:
+        payload = StagePayload(
+            request_id="req-metadata",
+            request=OmniRequest(inputs={}, params=params),
+            data={},
+        )
+        return result_adapter(
+            Qwen3ASRRequestData(output_ids=list(output_ids), stage_payload=payload)
+        ).data
+
+    assert adapt({"include_generation_metadata": True})["generation_metadata"] == (
+        expected
+    )
+    assert "generation_metadata" not in adapt({})

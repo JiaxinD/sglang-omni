@@ -29,6 +29,7 @@ from sglang_omni.client.types import (
     CompletionStreamChunk,
     GenerateChunk,
     GenerateRequest,
+    GenerationMetadata,
     SpeechResult,
     UsageInfo,
 )
@@ -700,6 +701,15 @@ class Client:
             language = result.get("language")
             if isinstance(language, str):
                 chunk.language = language
+            else:
+                pass
+            metadata = result.get("generation_metadata")
+            if isinstance(metadata, dict):
+                chunk.generation_metadata = GenerationMetadata(
+                    generated_token_count=int(metadata["generated_token_count"]),
+                    language=metadata["language"],
+                    finish_reason=metadata["finish_reason"],
+                )
             else:
                 pass
             Client.set_audio_data(chunk, result)

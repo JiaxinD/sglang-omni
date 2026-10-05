@@ -52,6 +52,9 @@ __all__ = [
     "register_transcriptions",
 ]
 
+# Models whose stream terminal frame can carry generation metadata.
+GENERATION_METADATA_ARCHITECTURES = frozenset({"Qwen3ASRForConditionalGeneration"})
+
 
 class LongAudioAdmission:
     """Process-wide cap on long uploads that hold a decoded waveform."""
@@ -131,6 +134,20 @@ def register_transcriptions(app: FastAPI) -> None:
         )
 
         chunking: ResolvedAudioChunking = app.state.audio_chunking
+        architectures = getattr(app.state, "architectures", None) or []
+        if form.include_generation_metadata and (
+            not form.stream
+            or not GENERATION_METADATA_ARCHITECTURES.intersection(architectures)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "include_generation_metadata requires stream=true and a model "
+                    "that reports it"
+                ),
+            )
+        else:
+            pass
 
         if form.stream:
             speech_to_text.validate_speech_to_text_response_format(
@@ -174,6 +191,7 @@ def register_transcriptions(app: FastAPI) -> None:
                 max_new_tokens=form.max_new_tokens,
                 stream=True,
                 stop_rules=form.stop_rules,
+                include_generation_metadata=form.include_generation_metadata,
             )
             return await speech_to_text.create_speech_to_text_streaming_response(
                 request=request,
