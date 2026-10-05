@@ -20,7 +20,6 @@ import sys
 import threading
 from types import FrameType
 
-
 SUPERVISOR_PID_ENV = "VOXT_OMNI_SUPERVISOR_PID"
 # Mirrors the supervisor's stop signals.
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
