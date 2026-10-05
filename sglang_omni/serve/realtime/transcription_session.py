@@ -687,9 +687,15 @@ class RealtimeTranscriptionSession:
                 continue
             else:
                 pass
-            segment.next_refresh_sample = end_sample + self.refresh_interval_samples
             pcm = self.audio_buffer.slice(segment.start_sample)
-            if self.is_silent(pcm):
+            silent = self.is_silent(pcm)
+            # With an early first decode, leading silence does not use up the
+            # first slot: the segment decodes as soon as audible audio arrives.
+            if not (silent and self.first_decode_waits_for_audio(segment)):
+                segment.next_refresh_sample = end_sample + self.refresh_interval_samples
+            else:
+                pass
+            if silent:
                 continue
             else:
                 pass
@@ -698,6 +704,12 @@ class RealtimeTranscriptionSession:
                 self.audio_buffer.pcm_to_wav_bytes(pcm),
                 is_final=False,
             )
+
+    def first_decode_waits_for_audio(self, segment: ActiveTranscriptionSegment) -> bool:
+        return (
+            self.transcription_config.first_decode_ms is not None
+            and segment.decode_attempt == 0
+        )
 
     @staticmethod
     def is_silent(pcm: bytes) -> bool:

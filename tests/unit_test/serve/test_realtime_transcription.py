@@ -757,3 +757,21 @@ async def test_first_decode_waits_a_full_interval_by_default(
 def test_first_decode_must_be_positive() -> None:
     with pytest.raises(ValueError, match="first decode"):
         RealtimeTranscriptionConfig(strategy_cls=FakeStrategy, first_decode_ms=0)
+
+
+@pytest.mark.asyncio
+async def test_first_decode_waits_for_audible_audio_without_losing_its_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, client = await first_decode_session(monkeypatch, first_decode_ms=100)
+
+    await session.dispatch(audio_event(make_pcm(0.1, amplitude=0)))
+    await settle()
+    assert client.calls == []
+
+    # Speech right after leading silence is decoded at once, not a whole
+    # decode interval after the skipped silent decode.
+    await session.dispatch(audio_event(make_pcm(0.1)))
+    await settle()
+    assert len(client.calls) == 1
+    await session.teardown()
