@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stands in for sgl-omni serve: one HTTP process with a long-lived child."""
+"""Stands in for the Qwen3-ASR server: one HTTP process with a long-lived child."""
 
 from __future__ import annotations
 
@@ -39,7 +39,6 @@ Path(arguments.pid_file).write_text(json.dumps([os.getpid(), stage_child.pid]))
 Path(arguments.pid_file + ".env").write_text(
     json.dumps(
         {
-            "SGLANG_OMNI_STRICT_PORT": os.environ.get("SGLANG_OMNI_STRICT_PORT"),
             "blocked_signals": sorted(
                 int(blocked) for blocked in signal.pthread_sigmask(signal.SIG_BLOCK, [])
             ),

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Owns one local SGLang-Omni server for Voxt: launch, verify, report, reap.
+"""Owns one local Qwen3-ASR MLX server for Voxt: launch, verify, report, reap.
 
 Events go to stdout as JSON lines. Voxt holds this process's stdin open; a
 shutdown command, end-of-file (Voxt exited or crashed) or a termination signal
@@ -31,18 +31,18 @@ from types import FrameType
 from typing import Literal
 
 import psutil
-from voxt_omni_backend.model_views import build_whisper_hf_view
 
 LOOPBACK_HOST = "127.0.0.1"
-ModelKind = Literal["qwen3_asr", "moss_transcribe_diarize", "whisper"]
-MODEL_KINDS: tuple[ModelKind, ...] = ("qwen3_asr", "moss_transcribe_diarize", "whisper")
+ModelKind = Literal["qwen3_asr"]
+MODEL_KINDS: tuple[ModelKind, ...] = ("qwen3_asr",)
+# sglang-omni's standalone MLX server: one process, the model loaded in it.
+QWEN_SERVER_MODULE = "sglang_omni_mlx.qwen3_asr.server"
 # Voxt's Swift Qwen live session decodes on its first 100 ms feed, then once a
 # second (StreamingConfig default).
 QWEN_REALTIME_OPTIONS = (
-    "--enable-realtime",
-    "--realtime_decode_interval_ms",
+    "--decode-interval-ms",
     "1000",
-    "--realtime_first_decode_ms",
+    "--first-decode-ms",
     "100",
 )
 HEALTH_POLL_INTERVAL_S = 0.1
@@ -276,53 +276,27 @@ def ready_failure(
 
 def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
     model_kind: ModelKind = arguments.model_kind
-    model_directory = Path(arguments.model_directory)
     model_name = f"voxt-{model_kind}-{uuid.uuid4().hex[:12]}"
     port = free_loopback_port()
-    if model_kind == "whisper":
-        model_path = build_whisper_hf_view(
-            model_directory,
-            Path(arguments.derived_root) / "omni-whisper-view" / model_directory.name,
-        )
-    else:
-        model_path = model_directory
     if arguments.server_command:
         base_command = list(json.loads(arguments.server_command))
     else:
         base_command = [
-            str(Path(sys.executable).with_name("sgl-omni")),
-            "serve",
-            "--asr.engine.max_running_requests",
-            "1",
-            *(QWEN_REALTIME_OPTIONS if model_kind == "qwen3_asr" else []),
+            sys.executable,
+            "-m",
+            QWEN_SERVER_MODULE,
+            *QWEN_REALTIME_OPTIONS,
         ]
     environment = dict(os.environ)
     environment.update(
         {
-            "SGLANG_USE_MLX": "1",
-            "HF_HUB_OFFLINE": "1",
-            # Fail fast instead of serving on a port nobody is watching.
-            "SGLANG_OMNI_STRICT_PORT": "1",
             # The lifeline watches this pid, not whatever its parent is by the
             # time it runs (launchd, if the supervisor was already killed).
             "VOXT_OMNI_SUPERVISOR_PID": str(os.getpid()),
-            # Like Voxt's Swift backend, release MLX memory after inference:
-            # no recycled-buffer cache and no pooled per-request KV cache.
-            "SGLANG_MLX_CACHE_LIMIT_GB": "0",
-            "SGLANG_OMNI_MLX_LEAN_KV_CACHE": "1",
             "NO_PROXY": f"{LOOPBACK_HOST},localhost",
             "no_proxy": f"{LOOPBACK_HOST},localhost",
         }
     )
-    if arguments.ffmpeg_library_directory:
-        inherited = environment.get("DYLD_LIBRARY_PATH")
-        environment["DYLD_LIBRARY_PATH"] = (
-            f"{arguments.ffmpeg_library_directory}:{inherited}"
-            if inherited
-            else arguments.ffmpeg_library_directory
-        )
-    else:
-        pass
     return ServerLaunch(
         command=[
             sys.executable,
@@ -331,7 +305,7 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
             "--",
             *base_command,
             "--model-path",
-            str(model_path),
+            arguments.model_directory,
             "--model-name",
             model_name,
             "--host",
@@ -427,12 +401,11 @@ def main() -> int:
     parser.add_argument("--model-kind", choices=MODEL_KINDS, required=True)
     parser.add_argument("--model-directory", required=True)
     parser.add_argument("--derived-root", required=True)
-    parser.add_argument("--ffmpeg-library-directory", default=None)
     parser.add_argument("--startup-timeout-s", type=float, default=180.0)
     parser.add_argument(
         "--server-command",
         default=None,
-        help="JSON argv replacing sgl-omni serve, for tests",
+        help="JSON argv replacing the server module, for tests",
     )
     arguments = parser.parse_args()
     logging.basicConfig(

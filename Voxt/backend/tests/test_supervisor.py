@@ -97,8 +97,6 @@ def test_ready_event_carries_a_verified_loopback_endpoint(tmp_path: Path) -> Non
     assert isinstance(ready["port"], int)
     assert str(ready["model_name"]).startswith("voxt-qwen3_asr-")
     assert ready["server_pid"] == owned[0]
-    report = json.loads(Path(f"{pid_file}.env").read_text())
-    assert report["SGLANG_OMNI_STRICT_PORT"] == "1"
     supervisor.stdin.close()
     supervisor.wait(timeout=15)
     assert wait_until_gone(owned) == []
@@ -261,29 +259,49 @@ def launch_command(tmp_path: Path, model_kind: str) -> list[str]:
         model_kind=model_kind,
         model_directory=str(tmp_path),
         derived_root=str(tmp_path / "derived"),
-        ffmpeg_library_directory=None,
         startup_timeout_s=20.0,
         server_command=None,
     )
     return server_launch(arguments).command
 
 
+def test_qwen_runs_on_the_standalone_mlx_server(tmp_path: Path) -> None:
+    command = launch_command(tmp_path, "qwen3_asr")
+    server = command[command.index("--") + 1 :]
+    assert server[:3] == [sys.executable, "-m", "sglang_omni_mlx.qwen3_asr.server"]
+    assert server[server.index("--model-path") + 1] == str(tmp_path)
+
+
 def test_qwen_live_preview_decodes_every_second_like_the_swift_session(
     tmp_path: Path,
 ) -> None:
     command = launch_command(tmp_path, "qwen3_asr")
-    flag = command.index("--realtime_decode_interval_ms")
-    assert command[flag + 1] == "1000"
+    assert command[command.index("--decode-interval-ms") + 1] == "1000"
     # The Swift session decodes on the first 100 ms feed.
-    first = command.index("--realtime_first_decode_ms")
-    assert command[first + 1] == "100"
-    assert "--enable-realtime" in command
+    assert command[command.index("--first-decode-ms") + 1] == "100"
 
 
-def test_models_without_live_sockets_get_no_realtime_options(tmp_path: Path) -> None:
-    command = launch_command(tmp_path, "moss_transcribe_diarize")
-    assert "--realtime_decode_interval_ms" not in command
-    assert "--enable-realtime" not in command
+def test_only_qwen_has_a_server(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "voxt_omni_backend.supervisor",
+            "--model-kind",
+            "whisper",
+            "--model-directory",
+            str(tmp_path),
+            "--derived-root",
+            str(tmp_path / "derived"),
+        ],
+        cwd=BACKEND_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
 
 
 def test_the_server_starts_with_termination_signals_deliverable(tmp_path: Path) -> None:
@@ -310,26 +328,6 @@ def test_shutdown_lets_the_server_exit_gracefully(tmp_path: Path) -> None:
     supervisor.wait(timeout=10)
 
 
-def test_servers_release_mlx_memory_between_requests(tmp_path: Path) -> None:
-    import argparse
-
-    from voxt_omni_backend.supervisor import server_launch
-
-    arguments = argparse.Namespace(
-        model_kind="qwen3_asr",
-        model_directory=str(tmp_path),
-        derived_root=str(tmp_path / "derived"),
-        ffmpeg_library_directory=None,
-        startup_timeout_s=20.0,
-        server_command=None,
-    )
-    environment = server_launch(arguments).environment
-    # Voxt's Swift backend frees MLX buffers after inference; the server must
-    # not keep freed buffers or a pooled per-request KV cache while idle.
-    assert environment["SGLANG_MLX_CACHE_LIMIT_GB"] == "0"
-    assert environment["SGLANG_OMNI_MLX_LEAN_KV_CACHE"] == "1"
-
-
 def test_signal_handlers_queue_stops_without_taking_a_lock() -> None:
     import queue
 
@@ -346,8 +344,15 @@ def test_a_lifeline_whose_supervisor_is_already_gone_kills_its_group() -> None:
     gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
     lifeline = subprocess.Popen(
-        [sys.executable, "-m", "voxt_omni_backend.lifeline", "--",
-         sys.executable, "-c", "import time; time.sleep(30)"],
+        [
+            sys.executable,
+            "-m",
+            "voxt_omni_backend.lifeline",
+            "--",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+        ],
         cwd=BACKEND_ROOT,
         env={**os.environ, "VOXT_OMNI_SUPERVISOR_PID": str(gone.pid)},
         start_new_session=True,
@@ -356,7 +361,9 @@ def test_a_lifeline_whose_supervisor_is_already_gone_kills_its_group() -> None:
         lifeline.wait(timeout=10)
     except subprocess.TimeoutExpired:
         os.killpg(lifeline.pid, signal.SIGKILL)
-        raise AssertionError("the lifeline kept running for a supervisor that had exited")
+        raise AssertionError(
+            "the lifeline kept running for a supervisor that had exited"
+        )
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
@@ -379,7 +386,6 @@ def test_the_supervisor_tells_the_lifeline_who_to_watch(tmp_path: Path) -> None:
         model_kind="qwen3_asr",
         model_directory=str(tmp_path),
         derived_root=str(tmp_path / "derived"),
-        ffmpeg_library_directory=None,
         startup_timeout_s=20.0,
         server_command=None,
     )

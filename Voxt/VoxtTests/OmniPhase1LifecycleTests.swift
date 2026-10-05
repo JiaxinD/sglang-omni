@@ -122,8 +122,10 @@ final class OmniPhase1LifecycleTests: XCTestCase {
             )
         }
         try await Task.sleep(for: .milliseconds(400))
-        let servers = ProcessTree.descendants().filter { ProcessTree.commandLine(of: $0).contains("sgl-omni") }
-        XCTAssertFalse(servers.isEmpty, "no sgl-omni server process found")
+        let servers = ProcessTree.descendants().filter {
+            ProcessTree.commandLine(of: $0).contains("sglang_omni_mlx.qwen3_asr.server")
+        }
+        XCTAssertFalse(servers.isEmpty, "no Qwen3-ASR server process found")
         servers.forEach { kill($0, SIGKILL) }
 
         let failedAt = ContinuousClock.now

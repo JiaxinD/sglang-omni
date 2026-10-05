@@ -1,35 +1,30 @@
-# Voxt on the local SGLang-Omni server
+# Voxt on a local sglang-omni MLX server
 
-This directory runs Voxt's local speech models on a local SGLang-Omni server
-with native MLX on Apple Silicon. Voxt routes only Qwen3-ASR 0.6B 4-bit to it
-today; every other model keeps Voxt's original Swift backend.
+This directory runs Voxt's local Qwen3-ASR 0.6B 4-bit on sglang-omni's
+standalone MLX server (`sglang_omni_mlx.qwen3_asr.server`), a single process
+on Apple Silicon that shares no code with sglang-omni's CUDA serving stack.
+Every other model keeps Voxt's original Swift backend.
 
-| Checkpoint | Omni backend | Voxt routing | Voxt behavior kept |
-| --- | --- | --- | --- |
-| `mlx-community/Qwen3-ASR-0.6B-4bit` | Qwen3-ASR MLX runner (existing) | On | Final with context bias and language hint, 1200 s energy-cut chunks sharing one token budget, first detected language carried forward; live preview over the realtime transcription socket |
-| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | MOSS MLX runner (new), bf16 checkpoint as installed | Off: server-tested, not yet accepted in the app | Timestamped diarization or plain text by prompt, chunk timestamps on the recording timeline, speaker segments; live preview with the original 4 s window schedule |
-| `mlx-community/whisper-large-v3-turbo` | Whisper MLX encoder-decoder runner (new) | Off: server-tested, not yet accepted in the app | Independent 30 s windows, no language token without a hint, generation-config suppression with timestamps masked; batch preview unchanged |
+| Checkpoint | Server | Voxt behavior kept |
+| --- | --- | --- |
+| `mlx-community/Qwen3-ASR-0.6B-4bit` | `sglang_omni_mlx.qwen3_asr.server` | Final with context bias and language hint, Swift's audio layout and stop rules, 1200 s energy-cut chunks sharing one token budget, first detected language carried forward; live preview over the realtime socket, first decode after 100 ms of audio, then once a second |
 
-To route MOSS or Whisper as well, add its repository to
-`OmniASRBackend.modelKindsByRepo` in `Voxt/Transcription/OmniASRBackend.swift`.
-
-Not migrated, and still on the Swift backend: the other Qwen3-ASR and Whisper
-variants, Cohere, Parakeet, Nemotron, SenseVoice, speaker analysis, VAD and the
-local LLMs.
+Not migrated, and still on the Swift backend: MOSS-Transcribe-Diarize, the
+Whisper and other Qwen3-ASR variants, Cohere, Parakeet, Nemotron, SenseVoice,
+speaker analysis, VAD and the local LLMs.
 
 ## Set up
 
-Requirements: an Apple Silicon Mac, Xcode, [uv](https://docs.astral.sh/uv/),
-Homebrew `ffmpeg@7` and a Rust toolchain (`brew install rust`; SGLang builds a
-Rust extension).
+Requirements: an Apple Silicon Mac, Xcode and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 Voxt/backend/setup_env.sh ~/voxt-omni-env
 ```
 
-The script prints the `VOXT_OMNI_PYTHON` to use. It installs SGLang v0.5.21
-from its pinned commit and this checkout's sglang-omni, then pins every package
-to `requirements-mac.lock`.
+The script prints the `VOXT_OMNI_PYTHON` to use. It installs the packages
+pinned in `requirements-mac.lock` (MLX, `tokenizers` and a small Starlette
+server; no PyTorch or SGLang) and this checkout's sglang-omni without its
+dependencies.
 
 ## Build and run
 
@@ -53,24 +48,29 @@ cached, dictation needs no network.
 
 ## How it fits together
 
-- `voxt_omni_backend/supervisor.py` owns one `sgl-omni serve` process per
-  loaded model. It reports `ready` only after the server answers with the
+- `voxt_omni_backend/supervisor.py` owns one server process per loaded
+  model. It reports `ready` only after the server answers with the
   unique model name it was started with, and stops the server and every process
   it started when Voxt sends `shutdown`, when Voxt's control pipe closes (Voxt
   quit or crashed) or on a termination signal. It never signals other processes.
-- `voxt_omni_backend/model_views.py` gives the server an HF-format view of
-  Voxt's Whisper directory (config and feature-extractor files, plus links to the
-  installed weights and tokenizer files).
 - `Voxt/Transcription/Omni*.swift` is the client: `OmniASRRuntime` (launch,
-  requests, an awaitable retire that drains in-flight work), the per-model
-  request planning, the live sessions and their adapter to Voxt's streaming
-  session interface.
+  requests, an awaitable retire that drains in-flight work), the request
+  planning, the live session and its adapter to Voxt's streaming session
+  interface.
+- `sglang_omni_mlx/qwen3_asr/` (repository root) is the server: the WAV and
+  log-mel front end, the MLX model, greedy decoding with Voxt's stop rules, the
+  realtime session and the HTTP app.
 
 ## Tests
 
+The server tests need `pytest`, `pytest-asyncio`, `httpx` and `transformers`
+(for reference features) on top of the backend environment; set
+`QWEN3_ASR_MLX_MODEL_PATH` to the installed checkpoint to include the tests
+that load it.
+
 ```bash
 cd Voxt/backend && "$VOXT_OMNI_PYTHON" -m pytest tests
-cd ../.. && "$VOXT_OMNI_PYTHON" -m pytest tests/unit_test/moss_transcribe_diarize tests/unit_test/whisper_asr tests/unit_test/qwen3_asr
+cd ../.. && python -m pytest tests/unit_test/mlx_qwen3_asr
 ```
 
 Voxt's own tests include `OmniASRRuntimeLaunchTests` (no model needed) and two
@@ -92,14 +92,11 @@ a venv's `bin/python` link into the base interpreter, so point
 
 ## Known limitations
 
-- Greedy decoding only on the Omni path. Whisper with a non-zero temperature
-  setting fails with a clear error instead of sampling.
+- Greedy decoding only.
 - The dev build is ad hoc signed without keychain access groups, so remote
   provider API keys may not persist in it.
-- The server accepts requests from any local client on its loopback port and
-  sends permissive CORS headers; it holds no user data beyond in-flight audio.
+- The server accepts requests from any local client on its loopback port; it
+  holds no user data beyond in-flight audio.
 - The live preview decodes once a second, like Voxt's Swift session, but has
   neither its 0.2 s cadence right after an 8 s window boundary nor its
   agreement-based promotion of provisional text.
-- Performance and quality acceptance against the original backend is pending;
-  see the project's acceptance records before relying on any speed claim.
