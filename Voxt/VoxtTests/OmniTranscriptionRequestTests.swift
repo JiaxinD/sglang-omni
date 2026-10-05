@@ -46,3 +46,28 @@ final class OmniTranscriptionRequestTests: XCTestCase {
         XCTAssertNil(fieldValue("audio_layout", in: body))
     }
 }
+
+final class OmniRealtimeSessionUpdateTests: XCTestCase {
+    private func session(_ message: String) throws -> [String: Any] {
+        let object = try JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any]
+        XCTAssertEqual(object?["type"] as? String, "session.update")
+        return try XCTUnwrap(object?["session"] as? [String: Any])
+    }
+
+    /// Voxt's Swift live session streams continuously without voice detection,
+    /// so the server must not wait for a VAD onset before its first decode.
+    func testLiveSessionsTurnServerVoiceDetectionOff() throws {
+        let session = try session(OmniRealtimeTranscriptionSession.sessionUpdate(language: nil))
+
+        XCTAssertTrue(session.keys.contains("turn_detection"))
+        XCTAssertTrue(session["turn_detection"] is NSNull)
+        XCTAssertEqual(session["input_audio_format"] as? String, "pcm16")
+        XCTAssertNil(session["language"])
+    }
+
+    func testLiveSessionsPassTheLanguageHint() throws {
+        let session = try session(OmniRealtimeTranscriptionSession.sessionUpdate(language: "English"))
+
+        XCTAssertEqual(session["language"] as? String, "English")
+    }
+}

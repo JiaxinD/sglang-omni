@@ -89,9 +89,7 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
         self.outbound = outbound
         socket.resume()
 
-        var sessionConfig: [String: Any] = ["input_audio_format": "pcm16"]
-        if let language { sessionConfig["language"] = language }
-        let update = Self.json(["type": "session.update", "session": sessionConfig])
+        let update = Self.sessionUpdate(language: language)
         let socket = socket
         let shared = shared
         sender = Task.detached {
@@ -195,6 +193,17 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
         outbound.finish()
         socket.cancel(with: .normalClosure, reason: nil)
         if !alreadyClosed { continuation.finish() }
+    }
+
+    /// The session settings Voxt's Swift live session implies: continuous
+    /// decoding with no voice-activity onset to wait for.
+    static func sessionUpdate(language: String?) -> String {
+        var sessionConfig: [String: Any] = [
+            "input_audio_format": "pcm16",
+            "turn_detection": NSNull(),
+        ]
+        if let language { sessionConfig["language"] = language }
+        return json(["type": "session.update", "session": sessionConfig])
     }
 
     private static func json(_ object: [String: Any]) -> String {
