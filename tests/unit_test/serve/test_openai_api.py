@@ -3950,3 +3950,47 @@ def test_speech_empty_generation_error_allows_next_request(stream: bool) -> None
     response = client.post("/v1/audio/speech", json=body)
     assert response.status_code == 200
     assert response.content
+
+
+@pytest.mark.parametrize(
+    ("upload_s", "stream"), [(0.5, "false"), (0.5, "true"), (2.5, "false")]
+)
+def test_transcription_forwards_opt_in_greedy_stop_rules(
+    upload_s: float, stream: str
+) -> None:
+    transcription_client = SuccessfulTranscriptionClient()
+    client = chunking_test_client(transcription_client, max_native_clip_s=3.0)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={
+            "model": "asr",
+            "stream": stream,
+            "stop_at_end_of_text": "true",
+            "stop_on_token_loop": "true",
+        },
+        files={"file": ("clip.wav", wav_upload(upload_s), "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert transcription_client.requests
+    for request in transcription_client.requests:
+        params = Client.build_omni_request(request).params
+        assert params["stop_at_end_of_text"] is True
+        assert params["stop_on_token_loop"] is True
+
+
+def test_transcription_omits_greedy_stop_rules_by_default() -> None:
+    transcription_client = SuccessfulTranscriptionClient()
+    client = chunking_test_client(transcription_client, max_native_clip_s=3.0)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    params = Client.build_omni_request(transcription_client.requests[0]).params
+    assert "stop_at_end_of_text" not in params
+    assert "stop_on_token_loop" not in params

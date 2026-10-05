@@ -23,6 +23,10 @@ from sglang_omni.client import (
     GenerateRequest,
     SamplingParams,
 )
+from sglang_omni.scheduling.greedy_stop_rules import (
+    STOP_AT_END_OF_TEXT_PARAM,
+    STOP_ON_TOKEN_LOOP_PARAM,
+)
 from sglang_omni.serve.generation_params import record_explicit_generation_params
 from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.serve.protocol import (
@@ -49,6 +53,14 @@ DEFAULT_STREAMING_RESPONSE_FORMATS = frozenset({"json", "text"})
 SEGMENT_RESPONSE_FORMATS = frozenset({"srt", "vtt"})
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GreedyStopRules:
+    """Opt-in stop rules that greedy audio-LLM transcription clients rely on."""
+
+    stop_at_end_of_text: bool = False
+    stop_on_token_loop: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class SpeechToTextForm:
     """Separate shared form parsing from endpoint-specific policy."""
@@ -62,6 +74,7 @@ class SpeechToTextForm:
     repetition_penalty: float | None
     max_new_tokens: int | None
     stream: bool
+    stop_rules: GreedyStopRules
 
 
 async def parse_speech_to_text_form(
@@ -74,6 +87,8 @@ async def parse_speech_to_text_form(
     repetition_penalty: float | None = Form(default=None, gt=0.0, le=2.0),
     max_new_tokens: int | None = Form(default=None, ge=1),
     stream: bool = Form(default=False),
+    stop_at_end_of_text: bool = Form(default=False),
+    stop_on_token_loop: bool = Form(default=False),
 ) -> SpeechToTextForm:
     return SpeechToTextForm(
         file=file,
@@ -85,6 +100,10 @@ async def parse_speech_to_text_form(
         repetition_penalty=repetition_penalty,
         max_new_tokens=max_new_tokens,
         stream=stream,
+        stop_rules=GreedyStopRules(
+            stop_at_end_of_text=stop_at_end_of_text,
+            stop_on_token_loop=stop_on_token_loop,
+        ),
     )
 
 
@@ -151,9 +170,18 @@ def build_speech_to_text_generate_request(
     task: str = "transcribe",
     detect_language: bool = False,
     segment_timestamps: bool = False,
+    stop_rules: GreedyStopRules | None = None,
 ) -> GenerateRequest:
     """Keep endpoint policy out of model-neutral request construction."""
     params: dict[str, str | bool] = {"task": task}
+    if stop_rules is not None and stop_rules.stop_at_end_of_text:
+        params[STOP_AT_END_OF_TEXT_PARAM] = True
+    else:
+        pass
+    if stop_rules is not None and stop_rules.stop_on_token_loop:
+        params[STOP_ON_TOKEN_LOOP_PARAM] = True
+    else:
+        pass
     if detect_language:
         params["detect_language"] = True
     else:

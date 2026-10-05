@@ -42,6 +42,7 @@ class FakeTokenizer:
             "<|audio_start|>": 151669,
             "<|audio_pad|>": 151671,
             "<|audio_end|>": 151670,
+            "<|endoftext|>": 151643,
         }
 
     def convert_tokens_to_ids(self, token: str) -> int:
@@ -818,3 +819,21 @@ def test_greedy_only_request_builder_accepts_the_greedy_defaults() -> None:
 
     assert data.temperature == 0.0
     assert data.repetition_penalty == 1.0
+
+
+def test_request_builder_applies_opt_in_greedy_stop_rules() -> None:
+    from sglang.srt.managers.schedule_batch import Req
+
+    from sglang_omni.scheduling.greedy_stop_rules import TokenLoopStoppingReq
+
+    request_builder = make_request_builder()
+
+    opted_in = request_builder(
+        payload(params={"stop_at_end_of_text": True, "stop_on_token_loop": True})
+    )
+    default = request_builder(payload())
+
+    assert set(opted_in.req.sampling_params.stop_token_ids) == {151643, 151645}
+    assert isinstance(opted_in.req, TokenLoopStoppingReq)
+    assert set(default.req.sampling_params.stop_token_ids) == {151645}
+    assert type(default.req) is Req

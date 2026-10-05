@@ -59,8 +59,7 @@ class FakeTokenizer:
         return 102
 
     def convert_tokens_to_ids(self, token: str) -> int:
-        assert token == "<|audio_pad|>"
-        return 42
+        return {"<|audio_pad|>": 42, "<|endoftext|>": 99}[token]
 
     def encode(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
         assert not add_special_tokens
@@ -998,3 +997,44 @@ def test_qwen3_asr_request_builder_encodes_after_offsets_are_final(
     assert observed["audio_fingerprint"] == data.req.extra_key
     assert item.feature is None
     assert item.precomputed_embeddings.shape[0] == num_audio_tokens
+
+
+def test_qwen3_asr_request_builder_applies_opt_in_greedy_stop_rules(
+    monkeypatch,
+) -> None:
+    from sglang.srt.managers.schedule_batch import Req
+
+    from sglang_omni.scheduling.greedy_stop_rules import TokenLoopStoppingReq
+
+    monkeypatch.setattr(
+        transcription,
+        "load_audio",
+        lambda source, **kwargs: np.zeros(1600, dtype=np.float32),
+    )
+    request_builder, _ = make_qwen3_asr_scheduler_adapters(
+        tokenizer=FakeTokenizer(),
+        max_new_tokens=32,
+        feature_extractor=lambda *args, **kwargs: SimpleNamespace(
+            input_features=torch.zeros((1, 128, 100)),
+            attention_mask=torch.ones((1, 100), dtype=torch.long),
+        ),
+    )
+
+    def build(params: dict[str, object]) -> Qwen3ASRRequestData:
+        return unwrap_built(
+            request_builder(
+                StagePayload(
+                    request_id="req-stop-rules",
+                    request=OmniRequest(inputs={"audio_bytes": b"wav"}, params=params),
+                    data={},
+                )
+            )
+        )
+
+    opted_in = build({"stop_at_end_of_text": True, "stop_on_token_loop": True})
+    default = build({})
+
+    assert set(opted_in.req.sampling_params.stop_token_ids) == {2, 99}
+    assert isinstance(opted_in.req, TokenLoopStoppingReq)
+    assert set(default.req.sampling_params.stop_token_ids) == {2}
+    assert type(default.req) is Req

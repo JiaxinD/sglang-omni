@@ -37,6 +37,12 @@ from transformers import PreTrainedTokenizerBase, WhisperFeatureExtractor
 from sglang_omni.models.qwen3_asr.encoder_service import Qwen3ASRPreLMEncoderService
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.greedy_stop_rules import (
+    END_OF_TEXT_TOKEN,
+    STOP_AT_END_OF_TEXT_PARAM,
+    STOP_ON_TOKEN_LOOP_PARAM,
+    TokenLoopStoppingReq,
+)
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.token_text_streaming import (
@@ -451,7 +457,14 @@ def make_qwen3_asr_scheduler_adapters(
             max_new_tokens=request_max_new_tokens,
             temperature=temperature,
             top_p=1.0,
-            stop_token_ids=[eos_token_id],
+            stop_token_ids=[
+                eos_token_id,
+                *(
+                    [int(tokenizer.convert_tokens_to_ids(END_OF_TEXT_TOKEN))]
+                    if params.get(STOP_AT_END_OF_TEXT_PARAM)
+                    else []
+                ),
+            ],
         )
         sampling_params.normalize(tokenizer=None)
 
@@ -460,7 +473,10 @@ def make_qwen3_asr_scheduler_adapters(
         else:
             pass
 
-        req = Req(
+        request_class = (
+            TokenLoopStoppingReq if params.get(STOP_ON_TOKEN_LOOP_PARAM) else Req
+        )
+        req = request_class(
             rid=payload.request_id,
             origin_input_text="",
             origin_input_ids=input_ids,

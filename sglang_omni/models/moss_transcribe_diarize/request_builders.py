@@ -27,6 +27,12 @@ from sglang_omni.models.moss_transcribe_diarize.encoder_service import (
 )
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY, StagePayload
+from sglang_omni.scheduling.greedy_stop_rules import (
+    END_OF_TEXT_TOKEN,
+    STOP_AT_END_OF_TEXT_PARAM,
+    STOP_ON_TOKEN_LOOP_PARAM,
+    TokenLoopStoppingReq,
+)
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.token_text_streaming import (
@@ -615,11 +621,21 @@ def make_moss_transcribe_diarize_scheduler_adapters(
             top_p=top_p,
             top_k=top_k,
             repetition_penalty=repetition_penalty,
-            stop_token_ids=[eos_token_id],
+            stop_token_ids=[
+                eos_token_id,
+                *(
+                    [int(tokenizer.convert_tokens_to_ids(END_OF_TEXT_TOKEN))]
+                    if params.get(STOP_AT_END_OF_TEXT_PARAM)
+                    else []
+                ),
+            ],
         )
         sampling_params.normalize(tokenizer=None)
 
-        req = Req(
+        request_class = (
+            TokenLoopStoppingReq if params.get(STOP_ON_TOKEN_LOOP_PARAM) else Req
+        )
+        req = request_class(
             rid=payload.request_id,
             origin_input_text="",
             origin_input_ids=padded_input_ids,

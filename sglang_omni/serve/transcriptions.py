@@ -17,6 +17,7 @@ from sglang_omni.config import ResolvedAudioChunking
 from sglang_omni.serve import speech_to_text
 from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.serve.protocol import TranscriptionResponse, TranscriptionUsage
+from sglang_omni.serve.speech_to_text import GreedyStopRules
 from sglang_omni.serve.transcription_adapters import TranscriptionAdapter
 from sglang_omni.serve.transcription_chunking import (
     ChunkPlan,
@@ -172,6 +173,7 @@ def register_transcriptions(app: FastAPI) -> None:
                 repetition_penalty=form.repetition_penalty,
                 max_new_tokens=form.max_new_tokens,
                 stream=True,
+                stop_rules=form.stop_rules,
             )
             return await speech_to_text.create_speech_to_text_streaming_response(
                 request=request,
@@ -291,6 +293,7 @@ async def transcribe_planned_upload(
             repetition_penalty=form.repetition_penalty,
             max_new_tokens=form.max_new_tokens,
             segment_timestamps=segment_timestamps,
+            stop_rules=form.stop_rules,
         )
         result = await speech_to_text.complete_speech_to_text_request(
             client,
@@ -329,6 +332,7 @@ async def transcribe_planned_upload(
                 temperature=form.temperature,
                 repetition_penalty=form.repetition_penalty,
                 max_new_tokens=form.max_new_tokens,
+                stop_rules=form.stop_rules,
                 max_concurrent=chunking.max_concurrent_chunks,
                 condition_on_previous_text=chunking.condition_on_previous_text,
                 adapter=adapter,
@@ -425,6 +429,7 @@ def build_chunk_generate_request(
     repetition_penalty: float | None,
     max_new_tokens: int | None,
     stream: bool = False,
+    stop_rules: GreedyStopRules | None = None,
 ) -> GenerateRequest:
     return build_transcription_generate_request(
         audio_bytes=chunk_bytes,
@@ -439,6 +444,7 @@ def build_chunk_generate_request(
         repetition_penalty=repetition_penalty,
         max_new_tokens=max_new_tokens,
         stream=stream,
+        stop_rules=stop_rules,
     )
 
 
@@ -457,6 +463,7 @@ async def transcribe_audio_chunks(
     max_concurrent: int,
     condition_on_previous_text: bool,
     adapter: TranscriptionAdapter,
+    stop_rules: GreedyStopRules | None = None,
 ) -> list[str]:
     """Transcribe the chunks of a plan, returning one text per chunk.
 
@@ -494,6 +501,7 @@ async def transcribe_audio_chunks(
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
                 max_new_tokens=max_new_tokens,
+                stop_rules=stop_rules,
             )
             retry_suffix = "-retry" if retry else ""
             chunk_request_id = f"{request_id}-chunk-{span.index}{retry_suffix}"
