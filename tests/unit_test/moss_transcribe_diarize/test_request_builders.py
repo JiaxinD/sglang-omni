@@ -775,3 +775,46 @@ def test_request_builder_uses_string_prompt_when_audio_is_supplied_separately() 
 
     assert processor.messages is not None
     assert processor.messages[0]["content"][1]["text"] == "custom diarization prompt"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("temperature", 0.7), ("repetition_penalty", 1.3)]
+)
+def test_greedy_only_request_builder_rejects_sampling_controls(
+    field: str, value: float
+) -> None:
+    processor = FakeProcessor()
+    request_builder, _ = make_moss_transcribe_diarize_scheduler_adapters(
+        processor=processor,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=32,
+        context_length=TEST_CONTEXT_LENGTH,
+        greedy_only=True,
+    )
+
+    with pytest.raises(ValueError, match=f"greedy decoding only.*{field}"):
+        request_builder(
+            payload(
+                params={field: value},
+                metadata={
+                    "model": "moss-transcribe-diarize",
+                    EXPLICIT_GENERATION_PARAMS_KEY: [field],
+                },
+            )
+        )
+
+
+def test_greedy_only_request_builder_accepts_the_greedy_defaults() -> None:
+    processor = FakeProcessor()
+    request_builder, _ = make_moss_transcribe_diarize_scheduler_adapters(
+        processor=processor,
+        tokenizer=processor.tokenizer,
+        max_new_tokens=32,
+        context_length=TEST_CONTEXT_LENGTH,
+        greedy_only=True,
+    )
+
+    data = request_builder(payload())
+
+    assert data.temperature == 0.0
+    assert data.repetition_penalty == 1.0

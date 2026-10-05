@@ -9,6 +9,8 @@ from sglang.srt.managers.mm_utils import init_mm_embedding_cache
 from sglang.srt.server_args import ServerArgs
 from transformers import PreTrainedTokenizerBase, ProcessorMixin
 
+from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.models.moss_transcribe_diarize import CAPABILITIES, request_builders
 from sglang_omni.models.moss_transcribe_diarize.encoder_service import (
     BatchedAudioEncoderService,
@@ -16,6 +18,7 @@ from sglang_omni.models.moss_transcribe_diarize.encoder_service import (
 from sglang_omni.models.moss_transcribe_diarize.request_builders import (
     MossTranscribeDiarizeRequestData,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.engine_factory import (
     AsrEngineBuilder,
@@ -26,6 +29,7 @@ from sglang_omni.scheduling.generation_batch_policy import (
     CudaGraphBackend,
     build_default_prefill_cuda_graph_bs,
 )
+from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 if TYPE_CHECKING:
 
@@ -123,6 +127,28 @@ class MossTranscribeDiarizeEngineBuilder(
         )
 
     def generation_defaults(self, *, dtype: str) -> GenerationDefaults:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx():
+            if not current_platform.is_mps():
+                raise RuntimeError("SGLANG_USE_MLX=1 requires the Apple Metal platform")
+            else:
+                pass
+            # Audio embeddings exist only inside the native MLX prefill, so
+            # token-only radix reuse and split prefill are unsafe.
+            return {
+                "max_running_requests": self.max_running_requests,
+                "disable_cuda_graph": True,
+                "disable_overlap_schedule": True,
+                "disable_radix_cache": True,
+                "enable_torch_compile": False,
+                "max_prefill_tokens": self.context_length,
+                "chunked_prefill_size": -1,
+                "mem_fraction_static": self.mem_fraction_static,
+                "dtype": dtype,
+            }
+        else:
+            pass
         # note (Xinyu): cached-prefix extends commonly contain one or two new
         # tokens, so keep exact graph buckets below the shared ladder's 4-token
         # floor instead of failing the prefill padding-factor replay guard.
@@ -150,8 +176,16 @@ class MossTranscribeDiarizeEngineBuilder(
         # note (Dayuxiaoshui): context_length is an explicit server-args
         # parameter, so consume the operator override before the shared builder
         # expands overrides.
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         if "context_length" in overrides:
             self.context_length = int(overrides.pop("context_length"))
+        else:
+            pass
+        if use_mlx():
+            # Typed pipeline engine defaults merge after the backend profile
+            # and would otherwise re-enable Torch compilation.
+            overrides["enable_torch_compile"] = False
         else:
             pass
 
@@ -167,7 +201,15 @@ class MossTranscribeDiarizeEngineBuilder(
         *,
         generation_cuda_graph_enabled: bool,
     ) -> None:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         del server_args
+        if use_mlx():
+            # The native MLX prefill owns audio encoding; the Torch encoder
+            # graphs and cache never exist on that backend.
+            return
+        else:
+            pass
         input_feature_len = int(self.processor.feature_extractor.nb_max_frames)
         if self.encoder_torch_compile:
             model.compile_encoder(self.encoder_chunk_buckets, input_feature_len)
@@ -183,16 +225,53 @@ class MossTranscribeDiarizeEngineBuilder(
         model: MossTranscribeDiarizeForConditionalGeneration,
         server_args: ServerArgs,
     ) -> None:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         del server_args
+        if use_mlx():
+            return
+        else:
+            pass
         self.audio_encoder_service = BatchedAudioEncoderService(
             model,
             max_batch_size=self.encoder_max_batch_size,
         )
 
+    def validate_before_infrastructure(self, server_args: ServerArgs) -> None:
+        from sglang.srt.arg_groups.model_override_base import resolved_view
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx() and resolved_view(server_args).mlx_enable_sampling:
+            raise ValueError(
+                "MOSS-Transcribe-Diarize MLX currently requires mlx_enable_sampling=False"
+            )
+        else:
+            pass
+        super().validate_before_infrastructure(server_args)
+
+    def make_model_runner(
+        self,
+        model_worker: ModelWorker,
+        output_proc: SGLangOutputProcessor,
+    ) -> ModelRunner[MossTranscribeDiarizeRequestData]:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
+        if use_mlx():
+            from sglang_omni.model_runner.mlx_model_worker import (
+                MlxSchedulerModelRunner,
+            )
+
+            return MlxSchedulerModelRunner(model_worker, output_proc)
+        else:
+            pass
+        return super().make_model_runner(model_worker, output_proc)
+
     def make_adapters(self, model: object) -> tuple[
         Callable[[StagePayload], MossTranscribeDiarizeRequestData],
         Callable[[MossTranscribeDiarizeRequestData], StagePayload],
     ]:
+        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
+
         del model
         return request_builders.make_moss_transcribe_diarize_scheduler_adapters(
             processor=self.processor,
@@ -201,6 +280,7 @@ class MossTranscribeDiarizeEngineBuilder(
             context_length=self.context_length,
             duration_scaled_default=self.requested_max_new_tokens is None,
             audio_encoder_service=self.audio_encoder_service,
+            greedy_only=use_mlx(),
         )
 
     def extra_scheduler_kwargs(

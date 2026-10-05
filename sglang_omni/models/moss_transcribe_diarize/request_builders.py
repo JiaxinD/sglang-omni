@@ -408,6 +408,7 @@ def make_moss_transcribe_diarize_scheduler_adapters(
     context_length: int,
     duration_scaled_default: bool = True,
     audio_encoder_service: BatchedAudioEncoderService | None = None,
+    greedy_only: bool = False,
 ) -> tuple[
     Callable[[StagePayload], MossTranscribeDiarizeRequestData],
     Callable[[MossTranscribeDiarizeRequestData], StagePayload],
@@ -559,6 +560,13 @@ def make_moss_transcribe_diarize_scheduler_adapters(
         # on the request path instead of inside the scheduler.
         if not 0.0 < repetition_penalty <= 2.0:
             raise ValueError("repetition_penalty must be in (0, 2]")
+        else:
+            pass
+        if greedy_only and (temperature != 0.0 or repetition_penalty != 1.0):
+            raise ValueError(
+                "MOSS-Transcribe-Diarize Apple backend supports greedy decoding only; "
+                f"got temperature={temperature} repetition_penalty={repetition_penalty}"
+            )
         else:
             pass
         # note (db-ol): the model default was sized for short clips and
