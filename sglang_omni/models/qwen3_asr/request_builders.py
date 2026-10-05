@@ -26,6 +26,7 @@ from typing import Callable
 
 import torch
 from sglang.srt.managers.schedule_batch import (
+    FINISH_LENGTH,
     Modality,
     MultimodalDataItem,
     MultimodalInputs,
@@ -586,11 +587,16 @@ def make_qwen3_asr_scheduler_adapters(
                 if data.req is not None
                 else {eos_token_id}
             )
-            stopped = bool(output_ids) and output_ids[-1] in stop_token_ids
+            ended_on_stop_token = bool(output_ids) and output_ids[-1] in stop_token_ids
+            hit_length_limit = (
+                isinstance(data.req.finished_reason, FINISH_LENGTH)
+                if data.req is not None
+                else not ended_on_stop_token
+            )
             result_data["generation_metadata"] = {
-                "generated_token_count": len(output_ids) - int(stopped),
+                "generated_token_count": len(output_ids) - int(ended_on_stop_token),
                 "language": resolved_language,
-                "finish_reason": "stop" if stopped else "length",
+                "finish_reason": "length" if hit_length_limit else "stop",
             }
         else:
             pass

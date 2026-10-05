@@ -19,10 +19,16 @@ class WhisperEncoderConfig:
     encoder_attention_heads: int
     encoder_ffn_dim: int
     max_source_positions: int
+    # Whether log-mel input is cast to the weight dtype before the first
+    # convolution; otherwise mixed precision promotes activations to float32.
+    casts_input_to_weight_dtype: bool
 
     @classmethod
-    def from_hf_config(cls, config: dict[str, object]) -> "WhisperEncoderConfig":
+    def from_hf_config(
+        cls, config: dict[str, object], *, casts_input_to_weight_dtype: bool
+    ) -> "WhisperEncoderConfig":
         return cls(
+            casts_input_to_weight_dtype=casts_input_to_weight_dtype,
             num_mel_bins=int(config["num_mel_bins"]),
             d_model=int(config["d_model"]),
             encoder_layers=int(config["encoder_layers"]),
@@ -107,8 +113,11 @@ class WhisperEncoder(nn.Module):
             )
         else:
             pass
-        weight_dtype = self.conv1.weight.dtype
-        hidden_states = input_features.transpose(0, 2, 1).astype(weight_dtype)
+        hidden_states = input_features.transpose(0, 2, 1)
+        if self.config.casts_input_to_weight_dtype:
+            hidden_states = hidden_states.astype(self.conv1.weight.dtype)
+        else:
+            pass
         hidden_states = nn.gelu(self.conv1(hidden_states))
         hidden_states = nn.gelu(self.conv2(hidden_states))
         hidden_states = hidden_states + self.embed_positions.weight

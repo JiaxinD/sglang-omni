@@ -128,7 +128,11 @@ def single_token_id(tokenizer: PreTrainedTokenizerBase, text: str) -> int:
 
 
 def load_moss_transcribe_diarize_processor(
-    checkpoint_dir: str, *, trust_remote_code: bool, revision: str | None = None
+    checkpoint_dir: str,
+    *,
+    trust_remote_code: bool,
+    revision: str | None = None,
+    processor_options: dict[str, object] | None = None,
 ) -> ProcessorMixin | MossTranscribeDiarizeLocalProcessor:
     """Use the checkpoint's processor code when present, the local one otherwise."""
     checkpoint_path = Path(checkpoint_dir)
@@ -144,7 +148,10 @@ def load_moss_transcribe_diarize_processor(
     if has_remote_code:
         with stages.missing_additional_chat_templates_compat():
             return AutoProcessor.from_pretrained(
-                checkpoint_dir, trust_remote_code=trust_remote_code, revision=revision
+                checkpoint_dir,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                **(processor_options or {}),
             )
     else:
         return MossTranscribeDiarizeLocalProcessor.from_directory(checkpoint_path)
@@ -162,12 +169,11 @@ class MossTranscribeDiarizeProcessorLoader:
         revision: str | None = None,
         **sglang_processor_options: object,
     ) -> ProcessorMixin | MossTranscribeDiarizeLocalProcessor:
-        # note: SGLang forwards tokenizer options this checkpoint does not use.
-        del sglang_processor_options
         return load_moss_transcribe_diarize_processor(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            processor_options=sglang_processor_options,
         )
 
 

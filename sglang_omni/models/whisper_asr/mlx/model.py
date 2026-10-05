@@ -61,6 +61,9 @@ def decoder_dimensions_from_hf_config(config: WhisperConfig) -> WhisperDimension
             encoder_attention_heads=config.encoder_attention_heads,
             encoder_ffn_dim=config.encoder_ffn_dim,
             max_source_positions=config.max_source_positions,
+            # The reference feeds float32 log-mel to float16 weights, so its
+            # activations run in float32; keep that precision.
+            casts_input_to_weight_dtype=False,
         ),
         vocab_size=config.vocab_size,
         decoder_layers=config.decoder_layers,
@@ -285,7 +288,7 @@ class WhisperMlxModel(nn.Module):
             encoder = self.dimensions.encoder
             sanitized["encoder.embed_positions.weight"] = whisper_sinusoids(
                 encoder.max_source_positions, encoder.d_model
-            ).astype(sanitized["encoder.conv1.weight"].dtype)
+            )
         else:
             pass
         return sanitized

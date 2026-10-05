@@ -1085,3 +1085,36 @@ def test_qwen3_asr_result_adapter_reports_opt_in_generation_metadata(
         expected
     )
     assert "generation_metadata" not in adapt({})
+
+
+def test_qwen3_asr_generation_metadata_reports_a_loop_stop_as_stop() -> None:
+    from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN
+
+    _, result_adapter = make_qwen3_asr_scheduler_adapters(
+        tokenizer=FakeTokenizer(),
+        max_new_tokens=32,
+        feature_extractor=object(),
+    )
+    payload = StagePayload(
+        request_id="req-loop",
+        request=OmniRequest(inputs={}, params={"include_generation_metadata": True}),
+        data={},
+    )
+    req = SimpleNamespace(
+        finished_reason=FINISH_MATCHED_TOKEN(matched=21),
+        sampling_params=SimpleNamespace(stop_token_ids=[2]),
+    )
+
+    metadata = result_adapter(
+        Qwen3ASRRequestData(
+            output_ids=[10, 100, 101, 20, 21, 20, 21],
+            stage_payload=payload,
+            req=req,
+        )
+    ).data["generation_metadata"]
+
+    assert metadata == {
+        "generated_token_count": 7,
+        "language": "English",
+        "finish_reason": "stop",
+    }

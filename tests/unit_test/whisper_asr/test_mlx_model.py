@@ -251,3 +251,19 @@ def test_suppression_built_on_one_thread_evaluates_on_another() -> None:
     thread.join()
 
     assert failures == []
+
+
+def test_float16_weights_keep_float32_activations_like_the_reference() -> None:
+    _reference, model = build_pair(naming="mlx-community")
+    model.set_dtype(mx.float16)
+    features = mx.array(mel_features(3))
+
+    encoded = model.encoder(features)
+    logits = model.decode(
+        mx.array([[2, 5]], dtype=mx.int32),
+        cache=model.make_cache(),
+        cross_states=model.cross_attention_states(encoded),
+    )
+
+    assert encoded.dtype == mx.float32
+    assert logits.dtype == mx.float32

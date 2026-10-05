@@ -140,12 +140,16 @@ def test_sglang_worker_processor_lookup_uses_the_same_loader(
         MossTranscribeDiarizeProcessorLoader,
     )
 
-    calls: list[tuple[str, bool, str | None]] = []
+    calls: list[tuple[str, bool, str | None, dict[str, object]]] = []
 
     def record(
-        checkpoint_dir: str, *, trust_remote_code: bool, revision: str | None
+        checkpoint_dir: str,
+        *,
+        trust_remote_code: bool,
+        revision: str | None,
+        processor_options: dict[str, object],
     ) -> str:
-        calls.append((checkpoint_dir, trust_remote_code, revision))
+        calls.append((checkpoint_dir, trust_remote_code, revision, processor_options))
         return "processor"
 
     monkeypatch.setattr(
@@ -156,9 +160,9 @@ def test_sglang_worker_processor_lookup_uses_the_same_loader(
 
     loader = _CUSTOMIZED_MM_PROCESSOR["moss_transcribe_diarize"]
     processor = loader.from_pretrained(
-        "/models/moss", trust_remote_code=False, revision="abc123"
+        "/models/moss", trust_remote_code=False, revision="abc123", use_fast=True
     )
 
     assert loader is MossTranscribeDiarizeProcessorLoader
     assert processor == "processor"
-    assert calls == [("/models/moss", False, "abc123")]
+    assert calls == [("/models/moss", False, "abc123", {"use_fast": True})]

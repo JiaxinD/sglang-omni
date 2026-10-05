@@ -273,3 +273,17 @@ def test_runner_rejects_audio_without_feature_lengths() -> None:
 
     with pytest.raises(ValueError, match="audio_feature_lengths"):
         runner.audio_prefill_inputs(req, [1, 1_000_001, 2])
+
+
+def test_encoder_input_follows_the_weight_dtype() -> None:
+    _reference, model = build_pair()
+    model.set_dtype(mx.bfloat16)
+    rng = np.random.default_rng(4)
+
+    features = model.get_audio_features(
+        mx.array(rng.standard_normal((1, MEL_BINS, CHUNK_FRAMES)).astype(np.float32)),
+        audio_feature_lengths=[4],
+        audio_chunk_mapping=[0],
+    )
+
+    assert features.dtype == mx.bfloat16

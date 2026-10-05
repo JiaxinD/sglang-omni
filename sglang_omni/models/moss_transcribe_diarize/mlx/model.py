@@ -58,7 +58,10 @@ class MossTranscribeDiarizeModel(nn.Module):
         self.config = config
         text_args = qwen3.ModelArgs.from_dict(config.text_config)
         self.whisper_encoder = WhisperEncoder(
-            WhisperEncoderConfig.from_hf_config(config.audio_config)
+            # The reference casts MOSS features to the encoder weight dtype.
+            WhisperEncoderConfig.from_hf_config(
+                config.audio_config, casts_input_to_weight_dtype=True
+            )
         )
         self.vq_adaptor = VQAdaptor(
             config.adaptor_input_dim, text_args.hidden_size, text_args.rms_norm_eps
