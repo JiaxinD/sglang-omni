@@ -696,6 +696,11 @@ class PipelineConfig(BaseModel):
             pass
 
     @property
+    def resolved_realtime_transcription(self) -> RealtimeTranscriptionConfig | None:
+        """The live-ASR declaration after per-instance overrides."""
+        return type(self).realtime_transcription
+
+    @property
     def resolved_audio_chunking(self) -> ResolvedAudioChunking:
         """The merged long-audio contract: model ClassVars + operator policy."""
         cls = type(self)

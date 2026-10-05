@@ -766,3 +766,36 @@ def test_qwen3_asr_nested_prefill_override_supersedes_the_derived_ladder(
     assert recorded.attest_calls[-1][1] is True
     assert list(recorded.build_kwargs["cuda_graph_bs_prefill"]) == [128, 256]
     assert recorded.build_kwargs["cuda_graph_max_bs_prefill"] == 256
+
+
+def test_qwen3_asr_realtime_cadence_defaults_to_the_class_declaration() -> None:
+    config = Qwen3ASRPipelineConfig(model_path="dummy")
+
+    assert config.realtime_decode_interval_ms is None
+    assert (
+        config.resolved_realtime_transcription
+        == Qwen3ASRPipelineConfig.realtime_transcription
+    )
+
+
+def test_qwen3_asr_realtime_cadence_override_keeps_the_strategy() -> None:
+    manager = ConfigManager(Qwen3ASRPipelineConfig(model_path="dummy"))
+    merged = manager.merge_config({"realtime_decode_interval_ms": "1000"})
+
+    resolved = merged.resolved_realtime_transcription
+    declared = Qwen3ASRPipelineConfig.realtime_transcription
+    assert resolved.decode_interval_ms == 1000
+    assert resolved.strategy_cls is declared.strategy_cls
+    assert resolved.server_vad == declared.server_vad
+    assert resolved.max_segment_s == declared.max_segment_s
+    assert declared.decode_interval_ms == 2000
+
+
+@pytest.mark.parametrize("interval_ms", [0, -1])
+def test_qwen3_asr_realtime_cadence_rejects_non_positive_intervals(
+    interval_ms: int,
+) -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        Qwen3ASRPipelineConfig(
+            model_path="dummy", realtime_decode_interval_ms=interval_ms
+        )

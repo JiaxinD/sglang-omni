@@ -67,6 +67,7 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
     }
 
     model_path: str
+    realtime_decode_interval_ms: int | None = Field(default=None, gt=0)
     entry_stage: str = "asr"
     stages: list[StageConfig] = [
         Qwen3ASRStageConfig(
@@ -100,6 +101,15 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
             terminal=True,
         )
     ]
+
+    @property
+    def resolved_realtime_transcription(self) -> RealtimeTranscriptionConfig:
+        declared = type(self).realtime_transcription
+        if self.realtime_decode_interval_ms is None:
+            return declared
+        else:
+            pass
+        return replace(declared, decode_interval_ms=self.realtime_decode_interval_ms)
 
     @property
     def resolved_audio_chunking(self) -> ResolvedAudioChunking:
