@@ -39,14 +39,16 @@ nonisolated enum OmniTranscriptionError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .httpStatus(let status, let detail):
-            return "Local Omni server returned HTTP \(status): \(detail)"
+        // Server bodies and events can echo the request or the transcript,
+        // which must never reach a log: only the status is described.
+        case .httpStatus(let status, _):
+            return "Local Omni server returned HTTP \(status)."
         case .streamError(let message):
             return "Local Omni transcription failed: \(message)"
         case .streamEndedWithoutDone:
             return "Local Omni transcription ended before its final result."
-        case .malformedEvent(let line):
-            return "Local Omni transcription sent an unreadable event: \(line.prefix(120))"
+        case .malformedEvent:
+            return "Local Omni transcription sent an unreadable event."
         }
     }
 }
@@ -197,6 +199,9 @@ nonisolated struct OmniTranscriptionStreamParser {
 
 /// Splits one recording the way each original Swift model decoded it.
 nonisolated enum OmniTranscriptionPlanning {
+    /// How far past a chunk's nominal end the energy cut may look (MLXAudio's 5 s).
+    static let energyCutSearchSeconds: Float = 5.0
+
     struct Window: Equatable {
         let sampleRange: Range<Int>
         let offsetSeconds: Double
@@ -233,7 +238,7 @@ nonisolated enum OmniTranscriptionPlanning {
         sampleRate: Int,
         chunkDurationSeconds: Float,
         minChunkDurationSeconds: Float,
-        searchExpandSeconds: Float = 5.0,
+        searchExpandSeconds: Float = energyCutSearchSeconds,
         minWindowMilliseconds: Float = 100.0,
         allowsCutPastChunkEnd: Bool = true
     ) -> [PaddedChunk] {

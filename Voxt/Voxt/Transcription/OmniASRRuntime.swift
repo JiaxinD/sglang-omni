@@ -182,6 +182,7 @@ actor OmniASRRuntime {
         await task.value
         state = .stopped
         servingEndpoint = nil
+        session.invalidateAndCancel()
     }
 
     private func drainActiveUses() async {
@@ -282,6 +283,9 @@ actor OmniASRRuntime {
         process.terminationHandler = { [weak self] _ in
             Task { await self?.supervisorExited() }
         }
+        // A retire that ran before this launch got the actor must win; nothing
+        // suspends between this check and the spawn.
+        guard case .starting = state else { throw OmniASRRuntimeError.retired }
         do {
             try process.run()
         } catch {
@@ -392,6 +396,12 @@ extension OmniASRRuntime {
     /// One Qwen3-ASR Final chunk, built the way Voxt's Swift model built it:
     /// its stop rules, and its prompt audio layout (one more mel frame and its
     /// own audio token count), so transcripts match the original backend.
+    /// Like the original, an energy cut may land up to 5 s past the chunk end,
+    /// unless that could exceed the server's 1200 s per-request limit.
+    nonisolated static func qwenCutMayPassChunkEnd(chunkDurationSeconds: Float) -> Bool {
+        chunkDurationSeconds + OmniTranscriptionPlanning.energyCutSearchSeconds <= qwenMaximumRequestSeconds
+    }
+
     nonisolated static func qwenFinalRequest(
         samples: [Float],
         sampleRate: Int,
@@ -421,14 +431,13 @@ extension OmniASRRuntime {
         chunkDurationSeconds: Float = 1200,
         minChunkDurationSeconds: Float = 1
     ) async throws -> (text: String, language: String?) {
-        // The server accepts at most 1200 s per Qwen3-ASR request, so a cut
-        // never moves past the chunk end; the original could cut up to 5 s later.
+        let chunkDuration = min(chunkDurationSeconds, Self.qwenMaximumRequestSeconds)
         let chunks = OmniTranscriptionPlanning.energySplitChunks(
             samples,
             sampleRate: sampleRate,
-            chunkDurationSeconds: min(chunkDurationSeconds, Self.qwenMaximumRequestSeconds),
+            chunkDurationSeconds: chunkDuration,
             minChunkDurationSeconds: minChunkDurationSeconds,
-            allowsCutPastChunkEnd: false
+            allowsCutPastChunkEnd: Self.qwenCutMayPassChunkEnd(chunkDurationSeconds: chunkDuration)
         )
         let endpoint = try beginUse()
         defer { endUse() }

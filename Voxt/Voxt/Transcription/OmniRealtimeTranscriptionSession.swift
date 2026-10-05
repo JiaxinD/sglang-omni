@@ -104,6 +104,7 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
             }
         }
         let continuation = continuation
+        let urlSession = session
         receiver = Task.detached {
             while true {
                 let message: URLSessionWebSocketTask.Message
@@ -140,11 +141,21 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
                     continuation.yield(.ended(text: event["text"] as? String ?? "", segments: []))
                     shared.withLock { $0.closed = true }
                     socket.cancel(with: .normalClosure, reason: nil)
+                    urlSession.invalidateAndCancel()
                     continuation.finish()
                     return
                 case "error":
+                    // Not terminal on the server, but the session cannot recover:
+                    // end it so its runtime lease is released. Only the error code
+                    // is kept; messages can echo request content such as audio.
                     let error = event["error"] as? [String: Any]
-                    continuation.yield(.failed(message: error?["message"] as? String ?? text))
+                    let code = error?["code"] as? String ?? error?["type"] as? String ?? "error"
+                    continuation.yield(.failed(message: "Live transcription failed (\(code))."))
+                    shared.withLock { $0.closed = true }
+                    socket.cancel(with: .normalClosure, reason: nil)
+                    urlSession.invalidateAndCancel()
+                    continuation.finish()
+                    return
                 default:
                     continue
                 }
@@ -192,6 +203,7 @@ nonisolated final class OmniRealtimeTranscriptionSession: @unchecked Sendable {
         }
         outbound.finish()
         socket.cancel(with: .normalClosure, reason: nil)
+        session.invalidateAndCancel()
         if !alreadyClosed { continuation.finish() }
     }
 

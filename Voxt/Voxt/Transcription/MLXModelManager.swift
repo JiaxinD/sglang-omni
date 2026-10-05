@@ -636,6 +636,11 @@ class MLXModelManager: ObservableObject {
             VoxtLog.modelInfo("MLX Audio model load completed. repo=\(repo), elapsedMs=\(elapsedMs)")
             return model
         } catch {
+            if !modelLoadCoordinator.hasPendingLoad, !modelLoadCoordinator.hasOutstandingLoad {
+                // No load will adopt a server started by a load that finished for
+                // nobody (its waiters left, or the repo changed); stop it now.
+                omniLedger.releaseUnadopted()
+            }
             guard revision == storageRevision else { throw CancellationError() }
             let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
             if error is CancellationError || Task.isCancelled {
@@ -734,7 +739,7 @@ class MLXModelManager: ObservableObject {
         guard !tasks.isEmpty else { return [] }
         // Servers these loads are starting are stopped now, so a following
         // load never waits behind, or overlaps, a model nobody will use.
-        omniLedger.pendingRuntimes().forEach(omniLedger.release)
+        omniLedger.releaseUnadopted()
         VoxtLog.modelInfo("MLX Audio pending model load invalidated. reason=\(reason)", verbose: true)
         return tasks
     }

@@ -105,6 +105,11 @@ final class OmniRuntimeLedger {
         }
     }
 
+    /// Runtimes a finished load created that no load will adopt.
+    func releaseUnadopted() {
+        pendingRuntimes().forEach(release)
+    }
+
     func waitForRetirements() async {
         while let pending = retirements.values.first {
             await pending.value
