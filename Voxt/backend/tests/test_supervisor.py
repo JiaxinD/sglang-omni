@@ -328,3 +328,60 @@ def test_servers_release_mlx_memory_between_requests(tmp_path: Path) -> None:
     # not keep freed buffers or a pooled per-request KV cache while idle.
     assert environment["SGLANG_MLX_CACHE_LIMIT_GB"] == "0"
     assert environment["SGLANG_OMNI_MLX_LEAN_KV_CACHE"] == "1"
+
+
+def test_signal_handlers_queue_stops_without_taking_a_lock() -> None:
+    import queue
+
+    from voxt_omni_backend.supervisor import ControlChannel
+
+    # queue.Queue.put from a signal handler deadlocks if the main thread holds
+    # its mutex inside get(); SimpleQueue is reentrant.
+    assert isinstance(ControlChannel().messages, queue.SimpleQueue)
+
+
+def test_a_lifeline_whose_supervisor_is_already_gone_kills_its_group() -> None:
+    import os
+
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    lifeline = subprocess.Popen(
+        [sys.executable, "-m", "voxt_omni_backend.lifeline", "--",
+         sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=BACKEND_ROOT,
+        env={**os.environ, "VOXT_OMNI_SUPERVISOR_PID": str(gone.pid)},
+        start_new_session=True,
+    )
+    try:
+        lifeline.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(lifeline.pid, signal.SIGKILL)
+        raise AssertionError("the lifeline kept running for a supervisor that had exited")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(lifeline.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.killpg(lifeline.pid, signal.SIGKILL)
+        raise AssertionError("the server outlived its lifeline")
+
+
+def test_the_supervisor_tells_the_lifeline_who_to_watch(tmp_path: Path) -> None:
+    import argparse
+    import os
+
+    from voxt_omni_backend.supervisor import server_launch
+
+    arguments = argparse.Namespace(
+        model_kind="qwen3_asr",
+        model_directory=str(tmp_path),
+        derived_root=str(tmp_path / "derived"),
+        ffmpeg_library_directory=None,
+        startup_timeout_s=20.0,
+        server_command=None,
+    )
+    environment = server_launch(arguments).environment
+    assert environment["VOXT_OMNI_SUPERVISOR_PID"] == str(os.getpid())

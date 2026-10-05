@@ -203,7 +203,9 @@ class ControlChannel:
     """Shutdown requests from Voxt's pipe and from termination signals."""
 
     def __init__(self) -> None:
-        self.messages: queue.Queue[ControlMessage] = queue.Queue()
+        # SimpleQueue: put() is reentrant, so the signal handler cannot deadlock
+        # on a mutex the main thread holds inside get().
+        self.messages: queue.SimpleQueue[ControlMessage] = queue.SimpleQueue()
 
     def start(self) -> None:
         threading.Thread(target=self.read_pipe, daemon=True).start()
@@ -301,6 +303,9 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
             "HF_HUB_OFFLINE": "1",
             # Fail fast instead of serving on a port nobody is watching.
             "SGLANG_OMNI_STRICT_PORT": "1",
+            # The lifeline watches this pid, not whatever its parent is by the
+            # time it runs (launchd, if the supervisor was already killed).
+            "VOXT_OMNI_SUPERVISOR_PID": str(os.getpid()),
             # Like Voxt's Swift backend, release MLX memory after inference:
             # no recycled-buffer cache and no pooled per-request KV cache.
             "SGLANG_MLX_CACHE_LIMIT_GB": "0",

@@ -21,6 +21,7 @@ import threading
 from types import FrameType
 
 
+SUPERVISOR_PID_ENV = "VOXT_OMNI_SUPERVISOR_PID"
 # Mirrors the supervisor's stop signals.
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
@@ -51,8 +52,9 @@ def main() -> int:
         return 2
     else:
         pass
+    supervisor_pid = int(os.environ.get(SUPERVISOR_PID_ENV, os.getppid()))
     threading.Thread(
-        target=kill_group_when_parent_exits, args=(os.getppid(),), daemon=True
+        target=kill_group_when_parent_exits, args=(supervisor_pid,), daemon=True
     ).start()
     server: subprocess.Popen[bytes] | None = None
     early: list[int] = []
