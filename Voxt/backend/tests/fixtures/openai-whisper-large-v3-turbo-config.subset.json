@@ -1,0 +1,23 @@
+{
+ "activation_function": "gelu",
+ "architectures": [
+  "WhisperForConditionalGeneration"
+ ],
+ "bos_token_id": 50257,
+ "d_model": 1280,
+ "decoder_attention_heads": 20,
+ "decoder_ffn_dim": 5120,
+ "decoder_layers": 4,
+ "decoder_start_token_id": 50258,
+ "encoder_attention_heads": 20,
+ "encoder_ffn_dim": 5120,
+ "encoder_layers": 32,
+ "eos_token_id": 50257,
+ "max_source_positions": 1500,
+ "max_target_positions": 448,
+ "model_type": "whisper",
+ "num_mel_bins": 128,
+ "pad_token_id": 50257,
+ "scale_embedding": false,
+ "vocab_size": 51866
+}
