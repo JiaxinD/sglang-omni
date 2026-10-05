@@ -389,6 +389,29 @@ nonisolated extension URLSession {
 extension OmniASRRuntime {
     /// Qwen3-ASR Final as MLXAudio decoded it: ≤1200 s energy-cut chunks share one
     /// token budget, and the first chunk's detected language is forced on the rest.
+    /// One Qwen3-ASR Final chunk, built the way Voxt's Swift model built it:
+    /// its stop rules, and its prompt audio layout (one more mel frame and its
+    /// own audio token count), so transcripts match the original backend.
+    nonisolated static func qwenFinalRequest(
+        samples: [Float],
+        sampleRate: Int,
+        language: String?,
+        context: String?,
+        maxNewTokens: Int
+    ) -> OmniTranscriptionRequest {
+        OmniTranscriptionRequest(
+            samples: samples,
+            sampleRate: sampleRate,
+            language: language,
+            prompt: context,
+            maxNewTokens: maxNewTokens,
+            stopAtEndOfText: true,
+            stopOnTokenLoop: true,
+            includeGenerationMetadata: true,
+            audioLayout: "voxt_swift"
+        )
+    }
+
     func transcribeQwenFinal(
         samples: [Float],
         sampleRate: Int,
@@ -415,15 +438,12 @@ extension OmniASRRuntime {
         for chunk in chunks {
             if remainingTokens <= 0 { break }
             try Task.checkCancellation()
-            let result = try await transcribe(OmniTranscriptionRequest(
+            let result = try await transcribe(Self.qwenFinalRequest(
                 samples: chunk.samples,
                 sampleRate: sampleRate,
                 language: resolvedLanguage,
-                prompt: context,
-                maxNewTokens: remainingTokens,
-                stopAtEndOfText: true,
-                stopOnTokenLoop: true,
-                includeGenerationMetadata: true
+                context: context,
+                maxNewTokens: remainingTokens
             ), holding: endpoint)
             guard let metadata = result.generationMetadata else {
                 throw OmniTranscriptionError.streamError("generation metadata missing")

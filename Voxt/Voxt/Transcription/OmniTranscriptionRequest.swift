@@ -16,6 +16,8 @@ nonisolated struct OmniTranscriptionRequest: Sendable, Equatable {
     var stopAtEndOfText: Bool
     var stopOnTokenLoop: Bool
     var includeGenerationMetadata = false
+    /// Prompt audio layout the server builds; nil keeps the reference layout.
+    var audioLayout: String? = nil
 }
 
 nonisolated struct OmniGenerationMetadata: Sendable, Equatable {
@@ -118,6 +120,9 @@ nonisolated enum OmniMultipartBody {
         }
         if request.includeGenerationMetadata {
             fields.append(("include_generation_metadata", "true"))
+        }
+        if let audioLayout = request.audioLayout {
+            fields.append(("audio_layout", audioLayout))
         }
         var body = Data()
         for (name, value) in fields {
