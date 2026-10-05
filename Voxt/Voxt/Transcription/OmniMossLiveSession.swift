@@ -29,16 +29,21 @@ nonisolated final class OmniMossLiveSession: @unchecked Sendable {
         var provisionalText = ""
         var isActive = true
         var decodeTask: Task<Void, Never>?
+        var stopTask: Task<Void, Never>?
+        var windowSegments: [OmniTranscriptSegment] = []
     }
 
     let events: AsyncStream<OmniLiveEvent>
     private let continuation: AsyncStream<OmniLiveEvent>.Continuation
     private let runtime: OmniASRRuntime
+    private let endpoint: OmniServerEndpoint
     private let configuration: Configuration
     private let state = OSAllocatedUnfairLock(initialState: State())
 
-    init(runtime: OmniASRRuntime, configuration: Configuration) {
+    /// `endpoint` is a lease the caller holds for the session's lifetime.
+    init(runtime: OmniASRRuntime, endpoint: OmniServerEndpoint, configuration: Configuration) {
         self.runtime = runtime
+        self.endpoint = endpoint
         self.configuration = configuration
         (events, continuation) = AsyncStream.makeStream(of: OmniLiveEvent.self)
     }
@@ -112,27 +117,32 @@ nonisolated final class OmniMossLiveSession: @unchecked Sendable {
             return (state.pendingSamples, state.pendingStartSample)
         }
         guard let (pending, pendingStart) = snapshot else { return }
-        Task.detached { [self] in
+        let stopTask = Task.detached { [self] in
             while state.withLock({ $0.isDecoding }) {
                 try? await Task.sleep(for: .milliseconds(10))
             }
+            guard !Task.isCancelled else { return }
             if !pending.isEmpty {
                 await decode(pending, kind: .finalWindow, offsetSeconds: Double(pendingStart) / Double(configuration.sampleRate))
             }
-            let text = state.withLock { $0.completedText.isEmpty ? $0.provisionalText : $0.completedText }
-            continuation.yield(.ended(text: text))
+            guard !Task.isCancelled else { return }
+            let (text, segments) = state.withLock {
+                ($0.completedText.isEmpty ? $0.provisionalText : $0.completedText, $0.windowSegments)
+            }
+            continuation.yield(.ended(text: text, segments: segments))
             continuation.finish()
         }
+        state.withLock { $0.stopTask = stopTask }
     }
 
     /// Abandons in-flight work; the server aborts the request when its connection closes.
     func cancel() {
-        let inFlight = state.withLock { state -> Task<Void, Never>? in
+        let tasks = state.withLock { state -> [Task<Void, Never>] in
             state.isActive = false
             state.pendingSamples = []
-            return state.decodeTask
+            return [state.decodeTask, state.stopTask].compactMap { $0 }
         }
-        inFlight?.cancel()
+        tasks.forEach { $0.cancel() }
         continuation.finish()
     }
 
@@ -170,7 +180,7 @@ nonisolated final class OmniMossLiveSession: @unchecked Sendable {
             continuation.yield(Self.display(completed: completed, provisional: provisional))
         }
         do {
-            let result = try await runtime.transcribe(request, onDelta: onDelta)
+            let result = try await runtime.transcribe(request, holding: endpoint, onDelta: onDelta)
             guard !Task.isCancelled else { return }
             let text = OmniTranscriptionPlanning.offsetMossTimestampsInFinishedText(
                 result.text.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -184,10 +194,14 @@ nonisolated final class OmniMossLiveSession: @unchecked Sendable {
                 }
                 continuation.yield(Self.display(completed: completed, provisional: text))
             case .finalWindow:
+                // Each window's segments are parsed alone, so markup never spans windows.
+                let windowSegments = OmniMossSegments.parse(text, fallbackEndSeconds: seconds)
+                    .filter { $0.speakerID != nil }
                 let completed = state.withLock { state -> String in
                     if !text.isEmpty {
                         state.completedText = state.completedText.isEmpty ? text : state.completedText + "\n" + text
                     }
+                    state.windowSegments += windowSegments
                     state.provisionalText = ""
                     return state.completedText
                 }

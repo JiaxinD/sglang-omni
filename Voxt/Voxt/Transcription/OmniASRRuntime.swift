@@ -37,8 +37,10 @@ nonisolated enum OmniASRRuntimeError: LocalizedError, Equatable {
 
 /// One owned SGLang-Omni server for one model: prepare once, share, retire once.
 ///
-/// `ready → retiring → stopped` is a real barrier: `retire()` returns only after
-/// the supervisor has stopped the server and every process it started.
+/// `ready → retiring → stopped` is a real barrier: `retire()` refuses new
+/// leases at once, lets work that already holds a lease finish (a multi-chunk
+/// Final or a live session keeps issuing requests), and returns only after the
+/// supervisor has stopped the server and every process it started.
 actor OmniASRRuntime {
     enum State: Equatable {
         case idle
@@ -49,6 +51,12 @@ actor OmniASRRuntime {
         case failed(String)
     }
 
+    /// The longest audio the server accepts in one Qwen3-ASR stream request.
+    static let qwenMaximumRequestSeconds: Float = 1200
+    /// Grace periods for stopping a supervisor before escalating.
+    static let shutdownGrace: Duration = .seconds(15)
+    static let terminateGrace: Duration = .seconds(10)
+
     nonisolated let kind: OmniASRModelKind
     nonisolated let modelDirectory: URL
     nonisolated let configuration: OmniBackendConfiguration
@@ -56,9 +64,9 @@ actor OmniASRRuntime {
     private(set) var state: State = .idle
     private var supervisor: Process?
     private var controlPipe: Pipe?
+    private var servingEndpoint: OmniServerEndpoint?
     private var preparation: Task<OmniServerEndpoint, Error>?
     private var retirement: Task<Void, Never>?
-    private var supervisorEvents: AsyncThrowingStream<[String: Any], Error>.Iterator?
     private let session: URLSession
     private var activeUses = 0
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
@@ -73,6 +81,11 @@ actor OmniASRRuntime {
         sessionConfiguration.timeoutIntervalForRequest = 600
         sessionConfiguration.timeoutIntervalForResource = 3600
         self.session = URLSession(configuration: sessionConfiguration)
+    }
+
+    var isServing: Bool {
+        if case .ready = state { return true }
+        return false
     }
 
     /// Starts the server once; concurrent callers share the same launch.
@@ -97,6 +110,7 @@ actor OmniASRRuntime {
             let endpoint = try await task.value
             if case .starting = state {
                 state = .ready(endpoint)
+                servingEndpoint = endpoint
             }
             guard case .ready = state else { throw OmniASRRuntimeError.retired }
             return endpoint
@@ -109,7 +123,7 @@ actor OmniASRRuntime {
         }
     }
 
-    /// Holds the server for work outside `transcribe`, such as a live session.
+    /// Holds the server for work that spans requests, such as a live session.
     func beginUse() throws -> OmniServerEndpoint {
         guard case .ready(let endpoint) = state else { throw OmniASRRuntimeError.retired }
         activeUses += 1
@@ -124,8 +138,7 @@ actor OmniASRRuntime {
         }
     }
 
-    /// Idempotent and awaitable: new work is refused at once, work already in
-    /// flight finishes, and every caller returns after the server is gone.
+    /// Idempotent and awaitable: see the type documentation.
     func retire() async {
         if let retirement {
             await retirement.value
@@ -139,6 +152,7 @@ actor OmniASRRuntime {
         retirement = task
         await task.value
         state = .stopped
+        servingEndpoint = nil
     }
 
     private func drainActiveUses() async {
@@ -152,6 +166,19 @@ actor OmniASRRuntime {
     ) async throws -> OmniTranscriptionResult {
         let endpoint = try beginUse()
         defer { endUse() }
+        return try await transcribe(request, holding: endpoint, onDelta: onDelta)
+    }
+
+    /// For callers that already hold a lease from `beginUse()`; keeps working
+    /// while the runtime drains toward retirement.
+    func transcribe(
+        _ request: OmniTranscriptionRequest,
+        holding endpoint: OmniServerEndpoint,
+        onDelta: (@Sendable (String) -> Void)? = nil
+    ) async throws -> OmniTranscriptionResult {
+        guard activeUses > 0, servingEndpoint == endpoint else {
+            throw OmniASRRuntimeError.retired
+        }
         let boundary = "voxt-\(UUID().uuidString)"
         var urlRequest = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/audio/transcriptions"))
         urlRequest.httpMethod = "POST"
@@ -177,6 +204,14 @@ actor OmniASRRuntime {
         return try parser.finish()
     }
 
+    /// The supervisor exits after its server dies; requests must stop here
+    /// instead of reaching whatever later binds the port.
+    private func supervisorExited() {
+        guard case .ready = state else { return }
+        state = .failed("The local Omni server stopped unexpectedly.")
+        servingEndpoint = nil
+    }
+
     private func launch() async throws -> OmniServerEndpoint {
         let process = Process()
         process.executableURL = configuration.pythonExecutable
@@ -198,9 +233,14 @@ actor OmniASRRuntime {
         process.environment = environment
         let control = Pipe()
         let events = Pipe()
+        // Writing shutdown to a supervisor that just exited must not raise SIGPIPE in Voxt.
+        _ = fcntl(control.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         process.standardInput = control
         process.standardOutput = events
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] _ in
+            Task { await self?.supervisorExited() }
+        }
         do {
             try process.run()
         } catch {
@@ -212,7 +252,6 @@ actor OmniASRRuntime {
         guard let first = try await iterator.next() else {
             throw OmniASRRuntimeError.launchFailed("supervisor exited before reporting")
         }
-        supervisorEvents = iterator
         guard first["event"] as? String == "ready",
               let host = first["host"] as? String,
               let port = first["port"] as? Int,
@@ -229,24 +268,31 @@ actor OmniASRRuntime {
         )
     }
 
+    /// Asks for an orderly shutdown, then escalates: SIGTERM lets the supervisor
+    /// reap its tree, and SIGKILL still takes the tree down through its lifeline.
     private func stopSupervisor() async {
-        preparation?.cancel()
         guard let process = supervisor else { return }
         supervisor = nil
-        if process.isRunning, let controlPipe {
+        if let controlPipe {
             let shutdown = Data("{\"command\": \"shutdown\"}\n".utf8)
             try? controlPipe.fileHandleForWriting.write(contentsOf: shutdown)
             try? controlPipe.fileHandleForWriting.close()
         }
         controlPipe = nil
-        await Self.waitForExit(process)
-        supervisorEvents = nil
+        if await Self.waitForExit(process, within: Self.shutdownGrace) { return }
+        process.terminate()
+        if await Self.waitForExit(process, within: Self.terminateGrace) { return }
+        kill(process.processIdentifier, SIGKILL)
+        _ = await Self.waitForExit(process, within: Self.terminateGrace)
     }
 
-    private static func waitForExit(_ process: Process) async {
+    private static func waitForExit(_ process: Process, within limit: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + limit
         while process.isRunning {
+            guard ContinuousClock.now < deadline else { return false }
             try? await Task.sleep(for: .milliseconds(20))
         }
+        return true
     }
 
     private nonisolated static func eventStream(
@@ -295,12 +341,17 @@ extension OmniASRRuntime {
         chunkDurationSeconds: Float = 1200,
         minChunkDurationSeconds: Float = 1
     ) async throws -> (text: String, language: String?) {
+        // The server accepts at most 1200 s per Qwen3-ASR request, so a cut
+        // never moves past the chunk end; the original could cut up to 5 s later.
         let chunks = OmniTranscriptionPlanning.energySplitChunks(
             samples,
             sampleRate: sampleRate,
-            chunkDurationSeconds: chunkDurationSeconds,
-            minChunkDurationSeconds: minChunkDurationSeconds
+            chunkDurationSeconds: min(chunkDurationSeconds, Self.qwenMaximumRequestSeconds),
+            minChunkDurationSeconds: minChunkDurationSeconds,
+            allowsCutPastChunkEnd: false
         )
+        let endpoint = try beginUse()
+        defer { endUse() }
         var remainingTokens = maxTokens
         var resolvedLanguage = language
         var text = ""
@@ -316,7 +367,7 @@ extension OmniASRRuntime {
                 stopAtEndOfText: true,
                 stopOnTokenLoop: true,
                 includeGenerationMetadata: true
-            ))
+            ), holding: endpoint)
             guard let metadata = result.generationMetadata else {
                 throw OmniTranscriptionError.streamError("generation metadata missing")
             }
@@ -338,6 +389,8 @@ extension OmniASRRuntime {
         languageHint: String?,
         stageMaxTokens: Int
     ) async throws -> String {
+        let endpoint = try beginUse()
+        defer { endUse() }
         var texts: [String] = []
         let windows = OmniTranscriptionPlanning.fixedWindows(
             sampleCount: samples.count,
@@ -357,7 +410,7 @@ extension OmniASRRuntime {
                 ),
                 stopAtEndOfText: false,
                 stopOnTokenLoop: false
-            ))
+            ), holding: endpoint)
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { texts.append(text) }
         }
@@ -380,6 +433,8 @@ extension OmniASRRuntime {
             chunkDurationSeconds: chunkDurationSeconds,
             minChunkDurationSeconds: minChunkDurationSeconds
         )
+        let endpoint = try beginUse()
+        defer { endUse() }
         var texts: [String] = []
         var segments: [OmniTranscriptSegment] = []
         for chunk in chunks {
@@ -392,7 +447,7 @@ extension OmniASRRuntime {
                 maxNewTokens: maxTokensPerChunk,
                 stopAtEndOfText: true,
                 stopOnTokenLoop: true
-            ))
+            ), holding: endpoint)
             let text = OmniTranscriptionPlanning.offsetMossTimestampsInFinishedText(
                 result.text.trimmingCharacters(in: .whitespacesAndNewlines),
                 by: chunk.offsetSeconds

@@ -229,7 +229,8 @@ nonisolated enum OmniTranscriptionPlanning {
         chunkDurationSeconds: Float,
         minChunkDurationSeconds: Float,
         searchExpandSeconds: Float = 5.0,
-        minWindowMilliseconds: Float = 100.0
+        minWindowMilliseconds: Float = 100.0,
+        allowsCutPastChunkEnd: Bool = true
     ) -> [PaddedChunk] {
         let totalSamples = samples.count
         let minSamples = Int(minChunkDurationSeconds * Float(sampleRate))
@@ -256,7 +257,7 @@ nonisolated enum OmniTranscriptionPlanning {
                 break
             }
             let searchStart = max(startSample, endSample - searchSamples)
-            let searchEnd = min(totalSamples, endSample + searchSamples)
+            let searchEnd = min(totalSamples, endSample + (allowsCutPastChunkEnd ? searchSamples : 0))
             var cutSample = endSample
             if searchEnd - searchStart > minWindowSamples {
                 let energyCount = searchEnd - searchStart - minWindowSamples + 1
@@ -344,6 +345,35 @@ nonisolated enum OmniTranscriptionPlanning {
             }
         }
         return output + bufferedTag
+    }
+}
+
+/// Joins transcript pieces the way the Omni server joins segments: a space only
+/// between two characters of scripts that separate words with spaces.
+nonisolated enum OmniTranscriptJoining {
+    private static let unspacedScriptRanges: [ClosedRange<UInt32>] = [
+        0x0E00...0x0EFF, 0x1000...0x109F, 0x1780...0x17FF, 0x2E80...0x303F,
+        0x3040...0x30FF, 0x3400...0x9FFF, 0xF900...0xFAFF, 0xFF00...0xFFEF,
+        0x20000...0x2FA1F,
+    ]
+
+    static func isSpacedScript(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first, !character.isWhitespace else { return false }
+        return !unspacedScriptRanges.contains { $0.contains(scalar.value) }
+    }
+
+    static func join(_ parts: [String]) -> String {
+        var joined = ""
+        for part in parts {
+            let stripped = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !stripped.isEmpty else { continue }
+            if let last = joined.last, let first = stripped.first,
+               isSpacedScript(last), isSpacedScript(first) {
+                joined += " "
+            }
+            joined += stripped
+        }
+        return joined
     }
 }
 
