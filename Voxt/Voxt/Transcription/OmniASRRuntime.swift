@@ -9,6 +9,33 @@ nonisolated struct OmniBackendConfiguration: Sendable, Equatable {
     var startupTimeoutSeconds: Double = 180
 }
 
+/// The last bytes a child process wrote, kept in memory only.
+nonisolated final class OmniDiagnosticTail: @unchecked Sendable {
+    private let limit: Int
+    private let lock = NSLock()
+    private var bytes = Data()
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func append(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes.append(data)
+        if bytes.count > limit {
+            bytes = Data(bytes.suffix(limit))
+        }
+    }
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: bytes, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 nonisolated struct OmniServerEndpoint: Sendable, Equatable {
     let host: String
     let port: Int
@@ -56,6 +83,8 @@ actor OmniASRRuntime {
     /// Grace periods for stopping a supervisor before escalating.
     static let shutdownGrace: Duration = .seconds(15)
     static let terminateGrace: Duration = .seconds(10)
+    /// Enough of the supervisor's stderr to show why a start failed.
+    static let diagnosticTailBytes = 2048
 
     nonisolated let kind: OmniASRModelKind
     nonisolated let modelDirectory: URL
@@ -227,17 +256,29 @@ actor OmniASRRuntime {
         }
         process.arguments = arguments
         process.currentDirectoryURL = configuration.backendDirectory
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONPATH"] = configuration.backendDirectory.path
-        environment["PYTHONUNBUFFERED"] = "1"
-        process.environment = environment
+        process.environment = Self.supervisorEnvironment(
+            inheriting: ProcessInfo.processInfo.environment,
+            backendDirectory: configuration.backendDirectory
+        )
         let control = Pipe()
         let events = Pipe()
+        let diagnostics = Pipe()
         // Writing shutdown to a supervisor that just exited must not raise SIGPIPE in Voxt.
         _ = fcntl(control.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         process.standardInput = control
         process.standardOutput = events
-        process.standardError = FileHandle.nullDevice
+        process.standardError = diagnostics
+        // Drained for the server's whole life so it never blocks on a full pipe;
+        // only the tail is kept, in memory, to explain a failed start.
+        let stderrTail = OmniDiagnosticTail(limit: Self.diagnosticTailBytes)
+        diagnostics.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderrTail.append(data)
+            }
+        }
         process.terminationHandler = { [weak self] _ in
             Task { await self?.supervisorExited() }
         }
@@ -250,7 +291,9 @@ actor OmniASRRuntime {
         controlPipe = control
         var iterator = Self.eventStream(events.fileHandleForReading).makeAsyncIterator()
         guard let first = try await iterator.next() else {
-            throw OmniASRRuntimeError.launchFailed("supervisor exited before reporting")
+            throw OmniASRRuntimeError.launchFailed(
+                "supervisor exited before reporting: \(stderrTail.text)"
+            )
         }
         guard first["event"] as? String == "ready",
               let host = first["host"] as? String,
@@ -284,6 +327,20 @@ actor OmniASRRuntime {
         if await Self.waitForExit(process, within: Self.terminateGrace) { return }
         kill(process.processIdentifier, SIGKILL)
         _ = await Self.waitForExit(process, within: Self.terminateGrace)
+    }
+
+    /// Voxt's environment without the dynamic loader settings a debugger or XCTest
+    /// injects; the supervisor sets its own library path for FFmpeg.
+    nonisolated static func supervisorEnvironment(
+        inheriting inherited: [String: String],
+        backendDirectory: URL
+    ) -> [String: String] {
+        var environment = inherited.filter {
+            !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("__XPC_DYLD_")
+        }
+        environment["PYTHONPATH"] = backendDirectory.path
+        environment["PYTHONUNBUFFERED"] = "1"
+        return environment
     }
 
     private static func waitForExit(_ process: Process, within limit: Duration) async -> Bool {

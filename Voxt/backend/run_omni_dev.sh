@@ -26,7 +26,8 @@ case "${1:-}" in
       -configuration Debug \
       -destination 'platform=macOS' \
       -xcconfig "$voxt_dir/Config/OmniDev.xcconfig" \
-      -derivedDataPath "$derived_data"
+      -derivedDataPath "$derived_data" \
+      -skipPackagePluginValidation
     ;;
   run)
     test -d "$app" || { echo "Build first: $0 build" >&2; exit 1; }

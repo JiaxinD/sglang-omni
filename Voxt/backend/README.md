@@ -1,14 +1,17 @@
 # Voxt on the local SGLang-Omni server
 
-This directory runs three of Voxt's local speech models on a local SGLang-Omni
-server with native MLX on Apple Silicon. Every other model keeps Voxt's
-original Swift backend.
+This directory runs Voxt's local speech models on a local SGLang-Omni server
+with native MLX on Apple Silicon. Voxt routes only Qwen3-ASR 0.6B 4-bit to it
+today; every other model keeps Voxt's original Swift backend.
 
-| Checkpoint | Omni backend | Voxt behavior kept |
-| --- | --- | --- |
-| `mlx-community/Qwen3-ASR-0.6B-4bit` | Qwen3-ASR MLX runner (existing) | Final with context bias and language hint, 1200 s energy-cut chunks sharing one token budget, first detected language carried forward; live preview over the realtime transcription socket |
-| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | MOSS MLX runner (new), bf16 checkpoint as installed | Timestamped diarization or plain text by prompt, chunk timestamps on the recording timeline, speaker segments; live preview with the original 4 s window schedule |
-| `mlx-community/whisper-large-v3-turbo` | Whisper MLX encoder-decoder runner (new) | Independent 30 s windows, no language token without a hint, generation-config suppression with timestamps masked; batch preview unchanged |
+| Checkpoint | Omni backend | Voxt routing | Voxt behavior kept |
+| --- | --- | --- | --- |
+| `mlx-community/Qwen3-ASR-0.6B-4bit` | Qwen3-ASR MLX runner (existing) | On | Final with context bias and language hint, 1200 s energy-cut chunks sharing one token budget, first detected language carried forward; live preview over the realtime transcription socket |
+| `OpenMOSS-Team/MOSS-Transcribe-Diarize` | MOSS MLX runner (new), bf16 checkpoint as installed | Off: server-tested, not yet accepted in the app | Timestamped diarization or plain text by prompt, chunk timestamps on the recording timeline, speaker segments; live preview with the original 4 s window schedule |
+| `mlx-community/whisper-large-v3-turbo` | Whisper MLX encoder-decoder runner (new) | Off: server-tested, not yet accepted in the app | Independent 30 s windows, no language token without a hint, generation-config suppression with timestamps masked; batch preview unchanged |
+
+To route MOSS or Whisper as well, add its repository to
+`OmniASRBackend.modelKindsByRepo` in `Voxt/Transcription/OmniASRBackend.swift`.
 
 Not migrated, and still on the Swift backend: the other Qwen3-ASR and Whisper
 variants, Cohere, Parakeet, Nemotron, SenseVoice, speaker analysis, VAD and the
