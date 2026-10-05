@@ -21,6 +21,10 @@ import threading
 from types import FrameType
 
 
+# Mirrors the supervisor's stop signals.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+
+
 def kill_group_when_parent_exits(parent_pid: int) -> None:
     queue = select.kqueue()
     watch = select.kevent(
@@ -50,14 +54,24 @@ def main() -> int:
     threading.Thread(
         target=kill_group_when_parent_exits, args=(os.getppid(),), daemon=True
     ).start()
-    server = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL)
+    server: subprocess.Popen[bytes] | None = None
+    early: list[int] = []
 
     def forward(signal_number: int, frame: FrameType | None) -> None:
         del frame
-        server.send_signal(signal_number)
+        if server is None:
+            early.append(signal_number)
+        else:
+            server.send_signal(signal_number)
 
-    signal.signal(signal.SIGTERM, forward)
-    signal.signal(signal.SIGINT, forward)
+    for stop_signal in STOP_SIGNALS:
+        signal.signal(stop_signal, forward)
+    # The supervisor blocks these while it spawns us, and a blocked mask survives
+    # exec: unblocked here, so the server starts able to shut down gracefully.
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
+    server = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL)
+    for signal_number in early:
+        server.send_signal(signal_number)
     return server.wait()
 
 

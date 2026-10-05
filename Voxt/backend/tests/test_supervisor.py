@@ -97,9 +97,8 @@ def test_ready_event_carries_a_verified_loopback_endpoint(tmp_path: Path) -> Non
     assert isinstance(ready["port"], int)
     assert str(ready["model_name"]).startswith("voxt-qwen3_asr-")
     assert ready["server_pid"] == owned[0]
-    assert json.loads(Path(f"{pid_file}.env").read_text()) == {
-        "SGLANG_OMNI_STRICT_PORT": "1"
-    }
+    report = json.loads(Path(f"{pid_file}.env").read_text())
+    assert report["SGLANG_OMNI_STRICT_PORT"] == "1"
     supervisor.stdin.close()
     supervisor.wait(timeout=15)
     assert wait_until_gone(owned) == []
@@ -251,3 +250,27 @@ def test_a_stop_queued_before_launch_never_starts_the_server(tmp_path: Path) -> 
     assert next_event(supervisor)["event"] == "stopped"
     assert supervisor.wait(timeout=10) == 0
     assert not pid_file.exists()
+
+
+def test_the_server_starts_with_termination_signals_deliverable(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    try:
+        assert next_event(supervisor)["event"] == "ready"
+        report = json.loads(Path(f"{pid_file}.env").read_text())
+        stop_signals = {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT}
+        assert set(report["blocked_signals"]) & {int(s) for s in stop_signals} == set()
+    finally:
+        supervisor.kill()
+        wait_until_gone(server_pids(pid_file))
+
+
+def test_shutdown_lets_the_server_exit_gracefully(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    assert next_event(supervisor)["event"] == "ready"
+    started = time.monotonic()
+    supervisor.stdin.write('{"command": "shutdown"}\n')
+    supervisor.stdin.flush()
+    assert next_event(supervisor)["event"] == "stopped"
+    assert time.monotonic() - started < 2.0
+    assert Path(f"{pid_file}.graceful").read_text() == str(int(signal.SIGTERM))
+    supervisor.wait(timeout=10)

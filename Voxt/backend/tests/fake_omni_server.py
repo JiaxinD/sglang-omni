@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -36,8 +37,25 @@ stage_child = subprocess.Popen(
 time.sleep(0.3)
 Path(arguments.pid_file).write_text(json.dumps([os.getpid(), stage_child.pid]))
 Path(arguments.pid_file + ".env").write_text(
-    json.dumps({"SGLANG_OMNI_STRICT_PORT": os.environ.get("SGLANG_OMNI_STRICT_PORT")})
+    json.dumps(
+        {
+            "SGLANG_OMNI_STRICT_PORT": os.environ.get("SGLANG_OMNI_STRICT_PORT"),
+            "blocked_signals": sorted(
+                int(blocked) for blocked in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+            ),
+        }
+    )
 )
+
+
+def exit_gracefully(signal_number: int, frame: object) -> None:
+    """Like uvicorn: a termination signal is an orderly shutdown."""
+    Path(arguments.pid_file + ".graceful").write_text(str(signal_number))
+    stage_child.terminate()
+    os._exit(0)
+
+
+signal.signal(signal.SIGTERM, exit_gracefully)
 time.sleep(arguments.startup_delay_s)
 reported_name = arguments.report_model_name or arguments.model_name
 
