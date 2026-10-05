@@ -83,7 +83,7 @@ async def test_only_manual_turns_are_accepted() -> None:
         }
     )
     assert recorder.events[-1]["type"] == "transcription_session.updated"
-    assert session.language == "en"
+    assert session.language == "English"
     assert [event["event_index"] for event in recorder.events] == [1, 2]
 
 
@@ -231,6 +231,61 @@ async def test_closing_cancels_the_decode_in_flight() -> None:
     worker.gate.set()
     await session.refresh_task
     assert recorder.of_type("transcription.segment") == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_preview_decode_reports_an_error() -> None:
+    worker = FakeWorker(failure=RuntimeError("model output"))
+    session, recorder = new_session(worker)
+    await append(session, 200)
+    errors = recorder.of_type("error")
+    assert [event["error"]["code"] for event in errors] == ["transcription_failed"]
+    assert "model output" not in str(recorder.events)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_decode_reports_an_error_and_the_session_goes_on() -> None:
+    worker = FakeWorker(failure=RuntimeError("model output"))
+    session, recorder = new_session(worker, max_segment_seconds=30.0)
+    await session.handle(pcm_event(50))
+    assert await session.handle({"type": "input_audio_buffer.commit"})
+    assert recorder.events[-1]["error"]["code"] == "transcription_failed"
+    worker.failure = None
+    assert not await session.handle({"type": "transcription.done"})
+    assert recorder.events[-1]["type"] == "transcription.completed"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_session_language_is_used_as_given() -> None:
+    worker = FakeWorker()
+    session, recorder = new_session(worker)
+    await session.handle(
+        {
+            "type": "session.update",
+            "session": {"turn_detection": None, "language": "Klingon"},
+        }
+    )
+    await append(session, 200)
+    assert worker.calls[0].options.language == "Klingon"
+    await session.handle(
+        {"type": "session.update", "session": {"turn_detection": None, "language": ""}}
+    )
+    assert session.language is None
+
+
+@pytest.mark.asyncio
+async def test_a_very_short_final_tail_is_decoded() -> None:
+    worker = FakeWorker()
+    session, recorder = new_session(worker, max_segment_seconds=1.0)
+    # 1 s cut, then a 3 ms tail: the tail is still finalized.
+    await session.handle(pcm_event(1003))
+    await session.handle({"type": "input_audio_buffer.commit"})
+    finals = [
+        event
+        for event in recorder.of_type("transcription.segment")
+        if event["is_final"]
+    ]
+    assert [event["text"] for event in finals] == ["heard 16000", "heard 48"]
 
 
 @pytest.mark.parametrize(

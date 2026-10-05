@@ -124,7 +124,6 @@ def test_streaming_without_metadata_leaves_it_out() -> None:
         (b"not audio", {}),
         (wav_bytes(0.1), {"include_generation_metadata": "true"}),
         (wav_bytes(0.1), {"audio_layout": "sideways"}),
-        (wav_bytes(0.1), {"language": "klingon"}),
         (wav_bytes(0.1), {"max_new_tokens": "many"}),
     ],
 )
@@ -135,6 +134,13 @@ def test_invalid_requests_are_rejected_before_decoding(
     response = post(client_for(worker), wav, **fields)
     assert response.status_code == 400
     assert worker.calls == []
+
+
+def test_an_unknown_language_is_passed_on_as_given() -> None:
+    worker = FakeWorker()
+    response = post(client_for(worker), wav_bytes(0.1), language=" Klingon ")
+    assert response.status_code == 200
+    assert worker.calls[0].options.language == "Klingon"
 
 
 def test_a_failed_decode_streams_an_error_without_content() -> None:
@@ -181,3 +187,27 @@ def test_realtime_socket_runs_a_manual_session() -> None:
     ]
     assert [event["text"] for event in finals] == ["heard 3200"]
     assert events[-1]["text"] == "heard 3200"
+
+
+def test_a_failed_live_decode_is_reported_on_the_socket() -> None:
+    client = client_for(FakeWorker(failure=RuntimeError("secret transcript")))
+    pcm = np.full(3200, 3000, dtype="<i2").tobytes()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.send_json(
+            {"type": "session.update", "session": {"turn_detection": None}}
+        )
+        assert (
+            json.loads(socket.receive_text())["type"] == "transcription_session.updated"
+        )
+        socket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm).decode(),
+            }
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while not any(event["type"] == "error" for event in events):
+            events.append(json.loads(socket.receive_text()))
+    assert events[-1]["error"]["code"] == "transcription_failed"
+    assert "secret" not in json.dumps(events)

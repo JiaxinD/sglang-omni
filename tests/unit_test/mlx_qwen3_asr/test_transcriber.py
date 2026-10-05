@@ -20,7 +20,7 @@ from sglang_omni_mlx.qwen3_asr.transcriber import (  # noqa: E402
     TranscriptionCancelled,
     TranscriptionOptions,
     load_tokenizer,
-    resolve_language,
+    normalize_language,
 )
 
 SPECIAL_TOKENS = [
@@ -221,15 +221,27 @@ def test_cancellation_stops_decoding() -> None:
         ("zh-CN", "Chinese"),
         ("cn", "Chinese"),
         ("yue", "Cantonese"),
+        # Like Voxt's Swift port: an unknown name is used as given, never an error.
+        ("  Klingon ", "Klingon"),
+        ("", None),
+        ("   ", None),
     ],
 )
-def test_resolve_language(language: str, expected: str) -> None:
-    assert resolve_language(language) == expected
+def test_normalize_language(language: str, expected: str | None) -> None:
+    assert normalize_language(language) == expected
 
 
-def test_resolve_language_rejects_unknown_languages() -> None:
-    with pytest.raises(ValueError):
-        resolve_language("klingon")
+def test_an_unknown_language_goes_into_the_prompt_as_given() -> None:
+    transcriber, _ = scripted_transcriber("hello", IM_END_ID)
+    prompt = transcriber.prompt_ids(3, TranscriptionOptions(language="Klingon"))
+    assert CharacterTokenizer().decode(prompt).endswith("language Klingon<asr_text>")
+    result = transcribe(transcriber, language="Klingon")
+    assert (result.text, result.language) == ("hello", "Klingon")
+
+
+def test_a_detected_language_outside_the_table_is_reported_as_given() -> None:
+    transcriber, _ = scripted_transcriber("language Elvish<asr_text>hi", IM_END_ID)
+    assert transcribe(transcriber).language == "Elvish"
 
 
 @pytest.mark.skipif(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
@@ -23,8 +24,11 @@ from sglang_omni_mlx.qwen3_asr.transcriber import (
     TranscriptionCancelled,
     TranscriptionOptions,
     TranscriptionResult,
+    normalize_language,
 )
 from sglang_omni_mlx.qwen3_asr.worker import TranscriptionWorker
+
+logger = logging.getLogger(__name__)
 
 # A refresh re-decodes the whole segment; after two refreshes it continues from
 # the shown text, minus its last tokens, which may still change.
@@ -148,7 +152,9 @@ class RealtimeSession:
                 )
             else:
                 language = session.get("language")
-                self.language = language if isinstance(language, str) else None
+                self.language = (
+                    normalize_language(language) if isinstance(language, str) else None
+                )
                 await self.send({"type": "transcription_session.updated"})
             return True
         elif event_type == "input_audio_buffer.append":
@@ -214,6 +220,7 @@ class RealtimeSession:
             pass
         if self.refresh_task is None or self.refresh_task.done():
             self.refresh_task = asyncio.create_task(self.refresh())
+            self.refresh_task.add_done_callback(log_refresh_failure)
         else:
             pass
 
@@ -304,6 +311,14 @@ class RealtimeSession:
             )
         except TranscriptionCancelled:
             return None
+        except Exception as error:
+            # Any failure ends this decode with an error event the client acts
+            # on; the type alone is logged, never the audio or text.
+            logger.error(f"realtime decode failed: {type(error).__name__}")
+            await self.send_error(
+                "server_error", "transcription_failed", "Transcription failed."
+            )
+            return None
         if result.language:
             segment.language = result.language
         else:
@@ -324,16 +339,21 @@ class RealtimeSession:
                 if peak_is_silent(samples, SILENT_PEAK):
                     text = ""
                 else:
-                    text = await self.decode(segment, samples) or ""
-            self.committed.append((segment.segment_id, text))
-            await self.send(
-                {
-                    "type": "transcription.segment",
-                    "segment_id": segment.segment_id,
-                    "text": text,
-                    "is_final": True,
-                }
-            )
+                    text = await self.decode(segment, samples)
+            # A failed or cancelled decode has already been reported (or the
+            # client left); its segment is dropped rather than committed empty.
+            if text is not None:
+                self.committed.append((segment.segment_id, text))
+                await self.send(
+                    {
+                        "type": "transcription.segment",
+                        "segment_id": segment.segment_id,
+                        "text": text,
+                        "is_final": True,
+                    }
+                )
+            else:
+                pass
             self.samples = self.samples[cut_sample - self.buffer_start_sample :]
             self.buffer_start_sample = cut_sample
             if cut_sample < end_sample:
@@ -344,6 +364,14 @@ class RealtimeSession:
     def close(self) -> None:
         """The client left: stop any decode in flight."""
         self.cancel_flag.set()
+
+
+def log_refresh_failure(task: asyncio.Task[None]) -> None:
+    """A refresh that died (say, on a closed socket) is logged by type only."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(f"realtime refresh failed: {type(task.exception()).__name__}")
+    else:
+        pass
 
 
 def realtime_settings(

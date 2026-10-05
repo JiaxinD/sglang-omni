@@ -134,3 +134,14 @@ def test_peak_is_silent() -> None:
     assert peak_is_silent(np.zeros(0, dtype=np.float32), 1e-3)
     assert peak_is_silent(np.full(10, 5e-4, dtype=np.float32), 1e-3)
     assert not peak_is_silent(np.array([0.0, -0.01], dtype=np.float32), 1e-3)
+
+
+@pytest.mark.parametrize("sample_count", [0, 1, 48, 150, 199, 399])
+@pytest.mark.parametrize("layout", [AudioLayout.REFERENCE, AudioLayout.VOXT_SWIFT])
+def test_audio_shorter_than_one_fft_window_still_has_frames(
+    sample_count: int, layout: AudioLayout
+) -> None:
+    samples = speech_like_audio(1.0)[:sample_count]
+    mel = np.array(log_mel(samples, layout))
+    assert mel.shape[0] == 128 and mel.shape[1] >= 1
+    assert np.isfinite(mel).all()

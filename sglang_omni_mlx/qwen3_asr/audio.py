@@ -148,6 +148,13 @@ def log_mel(samples: np.ndarray, layout: AudioLayout) -> mx.array:
     The same operations as Voxt's Swift front end. The reference drops the final
     centered STFT frame; the Swift layout keeps it.
     """
+    if len(samples) < FFT_SIZE:
+        # Reflect padding needs more samples than half a window; a tail this
+        # short (a realtime cut or a stop right after one) is zero-filled to
+        # one window.
+        samples = np.pad(samples, (0, FFT_SIZE - len(samples)))
+    else:
+        pass
     audio = mx.array(samples.astype(np.float32))
     padding = FFT_SIZE // 2
     padded = mx.concatenate(

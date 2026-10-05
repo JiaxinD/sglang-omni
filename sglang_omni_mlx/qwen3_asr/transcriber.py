@@ -86,17 +86,24 @@ class TranscriptionCancelled(Exception):
     """The caller gave up on the transcription."""
 
 
-def resolve_language(language: str) -> str:
-    """A Qwen3-ASR language code or name as the canonical prompt name."""
-    normalized = language.strip().casefold()
-    if normalized == "cn" or normalized.startswith(("zh-", "zh_")):
+def normalize_language(language: str) -> str | None:
+    """The canonical prompt name for a Qwen3-ASR language code or name.
+
+    Like Voxt's Swift port, a name outside the table is used as given and a
+    blank one means no language.
+    """
+    stripped = language.strip()
+    normalized = stripped.casefold()
+    if not stripped:
+        return None
+    elif normalized == "cn" or normalized.startswith(("zh-", "zh_")):
         return "Chinese"
     elif normalized in LANGUAGE_CODE_TO_NAME:
         return LANGUAGE_CODE_TO_NAME[normalized]
     elif normalized in LANGUAGE_NAME_BY_CASEFOLD:
         return LANGUAGE_NAME_BY_CASEFOLD[normalized]
     else:
-        raise ValueError(f"Unsupported language: {language!r}")
+        return stripped
 
 
 def load_tokenizer(model_directory: Path) -> Tokenizer:
@@ -162,8 +169,9 @@ class Qwen3ASRTranscriber:
             + AUDIO_PAD * audio_token_count
             + "<|audio_end|><|im_end|>\n<|im_start|>assistant\n"
         )
-        if options.language is not None:
-            prompt += f"language {resolve_language(options.language)}{ASR_TEXT_MARKER}"
+        language = normalize_language(options.language or "")
+        if language is not None:
+            prompt += f"language {language}{ASR_TEXT_MARKER}"
         else:
             pass
         return self.tokenizer.encode(prompt, add_special_tokens=False).ids + list(
@@ -279,10 +287,8 @@ class Qwen3ASRTranscriber:
             else output_ids
         )
         text = self.tokenizer.decode(transcript_ids, skip_special_tokens=True)
-        language = (
-            resolve_language(options.language)
-            if options.language is not None
-            else detected
+        language = normalize_language(options.language or "") or (
+            normalize_language(detected) if detected is not None else None
         )
         return text, language
 

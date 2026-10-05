@@ -31,7 +31,7 @@ from sglang_omni_mlx.qwen3_asr.transcriber import (
     TranscriptionCancelled,
     TranscriptionOptions,
     TranscriptionResult,
-    resolve_language,
+    normalize_language,
 )
 from sglang_omni_mlx.qwen3_asr.worker import TranscriptionWorker
 
@@ -86,9 +86,7 @@ def build_app(
             language = form.get("language")
             options = TranscriptionOptions(
                 language=(
-                    resolve_language(language)
-                    if isinstance(language, str) and language
-                    else None
+                    normalize_language(language) if isinstance(language, str) else None
                 ),
                 context=(
                     form.get("prompt") if isinstance(form.get("prompt"), str) else None
@@ -164,6 +162,9 @@ def build_app(
             await websocket.close()
         except WebSocketDisconnect:
             pass
+        except Exception as error:
+            # The socket closes; the type alone is logged, never audio or text.
+            logger.error(f"realtime session failed: {type(error).__name__}")
         finally:
             session.close()
 
