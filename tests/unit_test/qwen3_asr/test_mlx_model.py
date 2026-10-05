@@ -305,3 +305,58 @@ def test_shared_mlx_prefill_matches_direct_greedy_forward() -> None:
     assert pending.full_token_ids == ids[0].tolist()
     assert pending.req_id == "audio"
     assert pending.cache[0].offset == len(token_ids)
+
+
+def lean_cache_runner(monkeypatch, lean: str | None):
+    if lean is None:
+        monkeypatch.delenv("SGLANG_OMNI_MLX_LEAN_KV_CACHE", raising=False)
+    else:
+        monkeypatch.setenv("SGLANG_OMNI_MLX_LEAN_KV_CACHE", lean)
+    runner = object.__new__(make_qwen3_asr_mlx_runner_class())
+    runner._max_seq_len = 4096  # noqa: leading-underscore  # upstream name
+    runner._cache_pool = []  # noqa: leading-underscore  # upstream name
+    runner._cache_layout = SimpleNamespace(  # noqa: leading-underscore  # upstream name
+        has_auxiliary_state=False
+    )
+    return runner
+
+
+def upstream_runner_class(runner) -> type:
+    """The SGLang class that defines the per-request cache hooks."""
+    return next(
+        cls
+        for cls in type(runner).__mro__
+        if "_new_native_cache" in vars(cls) and cls is not Qwen3ASRMlxModelRunner
+    )
+
+
+def test_lean_kv_cache_starts_small_and_is_not_pooled(monkeypatch) -> None:
+    runner = lean_cache_runner(monkeypatch, "1")
+    created: list[int] = []
+    monkeypatch.setattr(
+        upstream_runner_class(runner),
+        "_new_native_cache",
+        lambda self: created.append(self._max_seq_len) or ["cache"],
+    )
+
+    cache = runner._new_native_cache()
+    runner._release_cache(cache)
+
+    assert created == [1024]
+    assert runner._cache_pool == []
+
+
+def test_kv_cache_keeps_the_upstream_policy_by_default(monkeypatch) -> None:
+    runner = lean_cache_runner(monkeypatch, None)
+    created: list[int] = []
+    monkeypatch.setattr(
+        upstream_runner_class(runner),
+        "_new_native_cache",
+        lambda self: created.append(self._max_seq_len) or ["cache"],
+    )
+
+    cache = runner._new_native_cache()
+    runner._release_cache(cache)
+
+    assert created == [4096]
+    assert runner._cache_pool == [["cache"]]
