@@ -274,6 +274,9 @@ def test_qwen_live_preview_decodes_every_second_like_the_swift_session(
     command = launch_command(tmp_path, "qwen3_asr")
     flag = command.index("--realtime_decode_interval_ms")
     assert command[flag + 1] == "1000"
+    # The Swift session decodes on the first 100 ms feed.
+    first = command.index("--realtime_first_decode_ms")
+    assert command[first + 1] == "100"
     assert "--enable-realtime" in command
 
 

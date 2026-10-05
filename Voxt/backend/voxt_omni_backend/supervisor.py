@@ -36,8 +36,15 @@ from voxt_omni_backend.model_views import build_whisper_hf_view
 LOOPBACK_HOST = "127.0.0.1"
 ModelKind = Literal["qwen3_asr", "moss_transcribe_diarize", "whisper"]
 MODEL_KINDS: tuple[ModelKind, ...] = ("qwen3_asr", "moss_transcribe_diarize", "whisper")
-# Voxt's Swift Qwen live session decodes once a second (StreamingConfig default).
-QWEN_REALTIME_OPTIONS = ("--enable-realtime", "--realtime_decode_interval_ms", "1000")
+# Voxt's Swift Qwen live session decodes on its first 100 ms feed, then once a
+# second (StreamingConfig default).
+QWEN_REALTIME_OPTIONS = (
+    "--enable-realtime",
+    "--realtime_decode_interval_ms",
+    "1000",
+    "--realtime_first_decode_ms",
+    "100",
+)
 HEALTH_POLL_INTERVAL_S = 0.1
 HTTP_PROBE_TIMEOUT_S = 1.0
 TERMINATE_GRACE_S = 5.0
