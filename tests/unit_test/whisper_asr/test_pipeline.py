@@ -499,6 +499,7 @@ def test_whisper_mlx_profile_disables_cuda_only_features(
     assert defaults["disable_cuda_graph"] is True
     assert defaults["disable_radix_cache"] is True
     assert defaults["enable_torch_compile"] is False
+    assert defaults["attention_backend"] == "torch_native"
     assert "cuda_graph_backend_prefill" not in defaults
     assert overrides["enable_torch_compile"] is False
     assert overrides["chunked_prefill_size"] == 0

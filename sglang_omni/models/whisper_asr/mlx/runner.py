@@ -56,10 +56,12 @@ class WhisperSuppression:
             mask[mx.array(sorted(set(blocked)), dtype=mx.int32)] = SUPPRESSED_LOGIT
             return mask
 
-        return cls(
-            first_step_mask=mask_for(suppress_token_ids + begin_suppress_token_ids),
-            later_step_mask=mask_for(suppress_token_ids),
-        )
+        first_step_mask = mask_for(suppress_token_ids + begin_suppress_token_ids)
+        later_step_mask = mask_for(suppress_token_ids)
+        # MLX streams are thread-local: a lazy mask would be evaluated on the
+        # loading thread's stream from the scheduler thread.
+        mx.eval(first_step_mask, later_step_mask)
+        return cls(first_step_mask=first_step_mask, later_step_mask=later_step_mask)
 
     def first_step(self, logits: mx.array) -> mx.array:
         return logits.astype(mx.float32) + self.first_step_mask

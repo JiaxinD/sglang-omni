@@ -415,8 +415,10 @@ class WhisperASREngineBuilder(AsrEngineBuilder[WhisperASRRequestData]):
             else:
                 pass
             # Cross-attention state exists only inside the native MLX prefill,
-            # so token-only radix reuse is unsafe.
+            # so token-only radix reuse is unsafe. SGLang otherwise pins Whisper
+            # to flashinfer, whose cache bookkeeping needs Triton.
             return {
+                "attention_backend": "torch_native",
                 "max_running_requests": self.max_running_requests,
                 "disable_cuda_graph": True,
                 "disable_overlap_schedule": True,

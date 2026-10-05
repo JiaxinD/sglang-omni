@@ -225,3 +225,29 @@ def test_runner_strips_encoder_placeholders_and_suppresses_first_token() -> None
     assert pending.cache[0].offset == len(prompt)
     assert int(pending.lazy_token.item()) < TIMESTAMP_BEGIN
     assert "speech" in runner.cross_states_by_request
+
+
+def test_suppression_built_on_one_thread_evaluates_on_another() -> None:
+    import threading
+
+    mx.set_default_device(mx.gpu)
+    suppression = WhisperSuppression.build(
+        vocab_size=VOCAB_SIZE,
+        suppress_token_ids=[3],
+        begin_suppress_token_ids=[5],
+        timestamp_begin_token_id=TIMESTAMP_BEGIN,
+    )
+    failures: list[BaseException] = []
+
+    def scheduler_thread() -> None:
+        try:
+            with mx.stream(mx.new_thread_local_stream(mx.gpu)):
+                mx.eval(suppression.first_step(mx.zeros((1, VOCAB_SIZE))))
+        except RuntimeError as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=scheduler_thread)
+    thread.start()
+    thread.join()
+
+    assert failures == []
