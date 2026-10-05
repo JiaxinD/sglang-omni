@@ -308,3 +308,23 @@ def test_shutdown_lets_the_server_exit_gracefully(tmp_path: Path) -> None:
     assert time.monotonic() - started < 2.0
     assert Path(f"{pid_file}.graceful").read_text() == str(int(signal.SIGTERM))
     supervisor.wait(timeout=10)
+
+
+def test_servers_release_mlx_memory_between_requests(tmp_path: Path) -> None:
+    import argparse
+
+    from voxt_omni_backend.supervisor import server_launch
+
+    arguments = argparse.Namespace(
+        model_kind="qwen3_asr",
+        model_directory=str(tmp_path),
+        derived_root=str(tmp_path / "derived"),
+        ffmpeg_library_directory=None,
+        startup_timeout_s=20.0,
+        server_command=None,
+    )
+    environment = server_launch(arguments).environment
+    # Voxt's Swift backend frees MLX buffers after inference; the server must
+    # not keep freed buffers or a pooled per-request KV cache while idle.
+    assert environment["SGLANG_MLX_CACHE_LIMIT_GB"] == "0"
+    assert environment["SGLANG_OMNI_MLX_LEAN_KV_CACHE"] == "1"

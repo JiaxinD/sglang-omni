@@ -301,6 +301,10 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
             "HF_HUB_OFFLINE": "1",
             # Fail fast instead of serving on a port nobody is watching.
             "SGLANG_OMNI_STRICT_PORT": "1",
+            # Like Voxt's Swift backend, release MLX memory after inference:
+            # no recycled-buffer cache and no pooled per-request KV cache.
+            "SGLANG_MLX_CACHE_LIMIT_GB": "0",
+            "SGLANG_OMNI_MLX_LEAN_KV_CACHE": "1",
             "NO_PROXY": f"{LOOPBACK_HOST},localhost",
             "no_proxy": f"{LOOPBACK_HOST},localhost",
         }
