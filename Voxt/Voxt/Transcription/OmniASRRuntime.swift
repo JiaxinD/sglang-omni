@@ -292,10 +292,14 @@ extension OmniASRRuntime {
         language: String?,
         context: String?,
         maxTokens: Int,
-        chunkDurationSeconds: Float = 1200
+        chunkDurationSeconds: Float = 1200,
+        minChunkDurationSeconds: Float = 1
     ) async throws -> (text: String, language: String?) {
         let chunks = OmniTranscriptionPlanning.energySplitChunks(
-            samples, sampleRate: sampleRate, chunkDurationSeconds: chunkDurationSeconds, minChunkDurationSeconds: 1
+            samples,
+            sampleRate: sampleRate,
+            chunkDurationSeconds: chunkDurationSeconds,
+            minChunkDurationSeconds: minChunkDurationSeconds
         )
         var remainingTokens = maxTokens
         var resolvedLanguage = language
@@ -366,10 +370,15 @@ extension OmniASRRuntime {
         samples: [Float],
         sampleRate: Int,
         prompt: String?,
-        maxTokensPerChunk: Int
+        maxTokensPerChunk: Int,
+        chunkDurationSeconds: Float = 1200,
+        minChunkDurationSeconds: Float = 1
     ) async throws -> (text: String, segments: [OmniTranscriptSegment]) {
         let chunks = OmniTranscriptionPlanning.energySplitChunks(
-            samples, sampleRate: sampleRate, chunkDurationSeconds: 1200, minChunkDurationSeconds: 1
+            samples,
+            sampleRate: sampleRate,
+            chunkDurationSeconds: chunkDurationSeconds,
+            minChunkDurationSeconds: minChunkDurationSeconds
         )
         var texts: [String] = []
         var segments: [OmniTranscriptSegment] = []
