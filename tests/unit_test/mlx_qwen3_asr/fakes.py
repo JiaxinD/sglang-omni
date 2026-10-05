@@ -45,6 +45,9 @@ class FakeWorker:
     gate: asyncio.Event | None = None
     transcriber: PrefixTranscriber = field(default_factory=PrefixTranscriber)
 
+    def request_states(self) -> dict[str, int]:
+        return {}
+
     async def transcribe(
         self,
         samples: np.ndarray,

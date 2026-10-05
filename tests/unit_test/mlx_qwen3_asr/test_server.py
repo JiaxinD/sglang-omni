@@ -57,7 +57,11 @@ def sse_events(body: str) -> list[object]:
 
 def test_health_and_models() -> None:
     client = client_for(FakeWorker())
-    assert client.get("/health").json() == {"status": "healthy", "running": True}
+    assert client.get("/health").json() == {
+        "status": "healthy",
+        "running": True,
+        "request_states": {},
+    }
     assert client.get("/v1/models").json()["data"] == [
         {"id": MODEL_NAME, "object": "model"}
     ]

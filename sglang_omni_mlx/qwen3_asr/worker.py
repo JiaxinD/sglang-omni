@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,36 @@ class TranscriptionWorker:
         self.transcriber: Qwen3ASRTranscriber = self.executor.submit(
             Qwen3ASRTranscriber, model_directory
         ).result()
+        self.state_lock = threading.Lock()
+        self.state_counts: Counter[str] = Counter()
+
+    def request_states(self) -> dict[str, int]:
+        """Requests waiting for the worker and running on it; empty when idle."""
+        with self.state_lock:
+            return {state: count for state, count in self.state_counts.items() if count}
+
+    def move_state(self, leaving: str | None, entering: str | None) -> None:
+        with self.state_lock:
+            if leaving is not None:
+                self.state_counts[leaving] -= 1
+            else:
+                pass
+            if entering is not None:
+                self.state_counts[entering] += 1
+            else:
+                pass
+
+    def run(
+        self,
+        samples: np.ndarray,
+        options: TranscriptionOptions,
+        cancel: threading.Event,
+    ) -> TranscriptionResult:
+        self.move_state("queued", "running")
+        try:
+            return self.transcriber.transcribe(samples, options, cancel)
+        finally:
+            self.move_state("running", None)
 
     async def transcribe(
         self,
@@ -34,6 +65,14 @@ class TranscriptionWorker:
         options: TranscriptionOptions,
         cancel: threading.Event,
     ) -> TranscriptionResult:
-        return await asyncio.get_running_loop().run_in_executor(
-            self.executor, self.transcriber.transcribe, samples, options, cancel
-        )
+        self.move_state(None, "queued")
+        future = self.executor.submit(self.run, samples, options, cancel)
+        future.add_done_callback(self.forget_if_never_run)
+        return await asyncio.wrap_future(future)
+
+    def forget_if_never_run(self, future: Future[TranscriptionResult]) -> None:
+        # A caller that gives up while queued cancels the job before it runs.
+        if future.cancelled():
+            self.move_state("queued", None)
+        else:
+            pass

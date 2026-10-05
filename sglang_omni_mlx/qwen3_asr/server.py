@@ -67,7 +67,13 @@ def build_app(
     worker: TranscriptionWorker, model_name: str, settings: RealtimeSettings
 ) -> Starlette:
     async def health(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "healthy", "running": True})
+        return JSONResponse(
+            {
+                "status": "healthy",
+                "running": True,
+                "request_states": worker.request_states(),
+            }
+        )
 
     async def models(request: Request) -> JSONResponse:
         return JSONResponse(

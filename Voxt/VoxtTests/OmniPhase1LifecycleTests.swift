@@ -159,11 +159,14 @@ final class OmniPhase1LifecycleTests: XCTestCase {
         let load = Task { @MainActor in try await manager.loadModel() }
         let started = await ProcessTree.waitForDescendants(timeoutSeconds: 10)
         XCTAssertTrue(started, "the cold start never spawned the supervisor")
-        try await Task.sleep(for: .milliseconds(1500))
+        // The server is ready about a second after the supervisor starts; give
+        // up well inside that window.
+        try await Task.sleep(for: .milliseconds(200))
 
         manager.cancelPendingModelLoadForApplicationTermination()
         load.cancel()
-        _ = try? await load.value
+        let loaded = try? await load.value
+        XCTAssertNil(loaded, "the load finished before it was cancelled, so no cold start was cancelled")
         let gone = await ProcessTree.waitUntilNoDescendants(timeoutSeconds: 5)
         XCTAssertTrue(gone, "processes left: \(ProcessTree.descendants())")
         await manager.shutdownForApplicationTermination()
