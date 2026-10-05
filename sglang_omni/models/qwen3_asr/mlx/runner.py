@@ -48,6 +48,13 @@ class Qwen3ASRMlxModelRunner(AudioMlxModelRunner):
         )
 
 
+    def audio_layout_options(self, item) -> dict[str, object]:
+        from ..swift_layout import AUDIO_LAYOUT_PARAM
+
+        layout = (getattr(item, "model_specific_data", None) or {}).get(AUDIO_LAYOUT_PARAM)
+        return {"layout": layout} if layout else {}
+
+
 def make_qwen3_asr_mlx_runner_class():
     """Build the extension class after the MLX backend has been selected."""
     from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner

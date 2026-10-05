@@ -59,6 +59,13 @@ from .audio_lengths import (
     qwen3_asr_num_audio_tokens,
 )
 from .languages import resolve_language
+from .swift_layout import (
+    AUDIO_LAYOUT_PARAM,
+    VOXT_SWIFT_LAYOUT,
+    swift_log_mel,
+    swift_output_length,
+    validate_audio_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +280,7 @@ def make_qwen3_asr_scheduler_adapters(
         forced_language = (
             None if requested_language is None else resolve_language(requested_language)
         )
+        audio_layout = validate_audio_layout(params.get(AUDIO_LAYOUT_PARAM))
         # Note(Audrey): the checkpoint reads biasing text from the system turn.
         raw_context = params.get("prompt")
         bias_context = str(raw_context).strip() if raw_context else None
@@ -315,11 +323,17 @@ def make_qwen3_asr_scheduler_adapters(
                 pass
             estimated_mel_frames = len(audio) // hop_length
             estimated_audio_tokens = qwen3_asr_num_audio_tokens(estimated_mel_frames)
+            if audio_layout == VOXT_SWIFT_LAYOUT:
+                estimated_mel_frames += 1
+                estimated_audio_tokens = swift_output_length(estimated_mel_frames)
+            else:
+                pass
         else:
             pass
 
         cached_embedding = None
-        if audio_encoder_service is not None:
+        # Cached embeddings are reference-layout encoder output.
+        if audio_encoder_service is not None and audio_layout is None:
             assert estimated_audio_tokens is not None
             cached_embedding = audio_encoder_service.lookup_cached_embedding(
                 fingerprint, estimated_audio_tokens
@@ -354,7 +368,13 @@ def make_qwen3_asr_scheduler_adapters(
         else:
             pass
 
-        if cached_embedding is None:
+        if cached_embedding is None and audio_layout == VOXT_SWIFT_LAYOUT:
+            features = swift_log_mel(audio, feature_extractor)
+            feature_attention_mask = torch.ones(
+                (1, features.shape[-1]), dtype=torch.long
+            )
+            num_audio_tokens = swift_output_length(features.shape[-1])
+        elif cached_embedding is None:
             # note (Jeffro Qu): unlike Whisper's default 30s window, here we pad the mel to the clip's true length.
             # WhisperFeatureExtractor defaults to padding="max_length", padding every clip to nb_max_frames=3000 (~30s),
             # so a short clip pays the full 30s of mel FFT on silence.
@@ -414,6 +434,7 @@ def make_qwen3_asr_scheduler_adapters(
             hash=prepared.fingerprint_int,
             feature=features,
             model_specific_data={
+                **({AUDIO_LAYOUT_PARAM: audio_layout} if audio_layout else {}),
                 "feature_attention_mask": feature_attention_mask,
                 # note (luojiaxuan): the pre-LM encoder service reads these to
                 # split batched encoder output and key its embedding cache.

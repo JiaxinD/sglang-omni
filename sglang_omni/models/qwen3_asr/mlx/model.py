@@ -13,6 +13,7 @@ import numpy as np
 from mlx_lm.models.base import create_attention_mask, scaled_dot_product_attention
 from mlx_lm.models.cache import KVCache
 
+from ..swift_layout import VOXT_SWIFT_LAYOUT, swift_output_length
 from .config import AudioEncoderConfig, ModelConfig, TextConfig
 
 MlxQuantizedTensor: TypeAlias = tuple[mx.array, mx.array, mx.array]
@@ -171,6 +172,47 @@ class AudioEncoderLayer(nn.Module):
         return hidden_states
 
 
+def swift_window_bounds(
+    chunk_lens: List[int],
+    chunks_per_input: List[int],
+    *,
+    chunks_per_window: int,
+    seq_len: int,
+) -> List[int]:
+    """Voxt's Swift encoder windows: per-window sums of the credited chunk
+    lengths, each clamped to the rows that exist, then any rows left over."""
+    window_lens: List[int] = []
+    chunk_offset = 0
+    for chunk_count in chunks_per_input:
+        remaining = chunk_count
+        while remaining > 0:
+            take = min(chunks_per_window, remaining)
+            end = min(chunk_offset + take, len(chunk_lens))
+            if chunk_offset >= end:
+                break
+            else:
+                pass
+            window_len = sum(chunk_lens[chunk_offset:end])
+            if window_len > 0:
+                window_lens.append(window_len)
+            else:
+                pass
+            chunk_offset = end
+            remaining -= take
+    bounds = [0]
+    for window_len in window_lens:
+        end = min(bounds[-1] + window_len, seq_len)
+        if end > bounds[-1]:
+            bounds.append(end)
+        else:
+            pass
+    if bounds[-1] < seq_len:
+        bounds.append(seq_len)
+    else:
+        pass
+    return bounds
+
+
 class AudioEncoder(nn.Module):
     """Qwen3-ASR Audio Encoder with Conv2d frontend and transformer layers."""
 
@@ -230,6 +272,7 @@ class AudioEncoder(nn.Module):
         self,
         input_features: mx.array,
         feature_attention_mask: Optional[mx.array] = None,
+        layout: Optional[str] = None,
     ) -> mx.array:
         if feature_attention_mask is not None:
             feature_lens = feature_attention_mask.sum(axis=-1).astype(mx.int32)
@@ -303,31 +346,46 @@ class AudioEncoder(nn.Module):
         pos_emb = self.positional_embedding(x.shape[1])
         x = x + pos_emb[None, :, :]
 
+        if layout == VOXT_SWIFT_LAYOUT:
+            # Voxt's Swift port credits each chunk by its own length formula and
+            # slices that many rows of the padded conv output.
+            swift_chunk_lens = [swift_output_length(int(n)) for n in chunk_lengths]
+            valid_lens = [min(n, x.shape[1]) for n in swift_chunk_lens]
+        else:
+            valid_lens = [int(n) for n in feature_lens_after_cnn_np]
+
         hidden_list = []
         for i in range(x.shape[0]):
-            valid_len = int(feature_lens_after_cnn_np[i])
-            hidden_list.append(x[i, :valid_len])
+            hidden_list.append(x[i, : valid_lens[i]])
 
         hidden_states = mx.concatenate(hidden_list, axis=0)
 
-        aftercnn_lens_np = np.array(aftercnn_lens)
-        window_aftercnn = max_len_after_cnn * (
-            self.n_window_infer // (self.n_window * 2)
-        )
+        if layout == VOXT_SWIFT_LAYOUT:
+            cu_seqlens = swift_window_bounds(
+                swift_chunk_lens,
+                [int(n) for n in chunk_num],
+                chunks_per_window=max(1, self.n_window_infer // chunk_size),
+                seq_len=hidden_states.shape[0],
+            )
+        else:
+            aftercnn_lens_np = np.array(aftercnn_lens)
+            window_aftercnn = max_len_after_cnn * (
+                self.n_window_infer // (self.n_window * 2)
+            )
 
-        cu_chunk_lens = [0]
-        for cnn_len in aftercnn_lens_np:
-            cnn_len = int(cnn_len)
-            num_full_windows = cnn_len // window_aftercnn
-            for _ in range(num_full_windows):
-                cu_chunk_lens.append(window_aftercnn)
-            remainder = cnn_len % window_aftercnn
-            if remainder != 0:
-                cu_chunk_lens.append(remainder)
-            else:
-                pass
+            cu_chunk_lens = [0]
+            for cnn_len in aftercnn_lens_np:
+                cnn_len = int(cnn_len)
+                num_full_windows = cnn_len // window_aftercnn
+                for _ in range(num_full_windows):
+                    cu_chunk_lens.append(window_aftercnn)
+                remainder = cnn_len % window_aftercnn
+                if remainder != 0:
+                    cu_chunk_lens.append(remainder)
+                else:
+                    pass
 
-        cu_seqlens = np.cumsum(cu_chunk_lens).tolist()
+            cu_seqlens = np.cumsum(cu_chunk_lens).tolist()
 
         seq_len = hidden_states.shape[0]
         attention_mask = self.create_block_attention_mask(
@@ -545,9 +603,10 @@ class Qwen3ASRModel(nn.Module):
         self,
         input_features: mx.array,
         feature_attention_mask: Optional[mx.array] = None,
+        layout: Optional[str] = None,
     ) -> mx.array:
         """Encode audio features."""
-        return self.audio_tower(input_features, feature_attention_mask)
+        return self.audio_tower(input_features, feature_attention_mask, layout=layout)
 
     def build_inputs_embeds(
         self,
@@ -556,10 +615,18 @@ class Qwen3ASRModel(nn.Module):
         *,
         audio_start: int,
         num_audio_tokens: int,
+        layout: Optional[str] = None,
     ) -> mx.array:
         """Build input embeddings with audio features merged in."""
         inputs_embeds = self.model.embed_tokens(input_ids)
         audio_features = audio_features.astype(inputs_embeds.dtype)
+        if layout == VOXT_SWIFT_LAYOUT:
+            # Swift fills as many placeholders as it has rows; the rest keep the
+            # <|audio_pad|> embedding, and surplus rows are dropped.
+            audio_features = audio_features[:num_audio_tokens]
+            num_audio_tokens = audio_features.shape[0]
+        else:
+            pass
         if num_audio_tokens != audio_features.shape[0]:
             raise ValueError(
                 "Qwen3-ASR audio placeholder and feature counts differ: "

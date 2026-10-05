@@ -4083,3 +4083,66 @@ def test_transcription_stream_without_metadata_fails_when_it_was_requested() -> 
 
     assert "transcript.text.done" not in response.text
     assert '"type": "error"' in response.text
+
+
+@pytest.mark.parametrize("stream", ["true", "false"])
+def test_transcription_passes_the_requested_audio_layout(stream: str) -> None:
+    transcription_client = MetadataTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client,
+        max_native_clip_s=3.0,
+        architectures=["Qwen3ASRForConditionalGeneration"],
+    )
+
+    client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": stream, "audio_layout": "voxt_swift"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    params = Client.build_omni_request(transcription_client.requests[0]).params
+    assert params["audio_layout"] == "voxt_swift"
+
+
+def test_transcription_leaves_the_audio_layout_unset_by_default() -> None:
+    transcription_client = MetadataTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client,
+        max_native_clip_s=3.0,
+        architectures=["Qwen3ASRForConditionalGeneration"],
+    )
+
+    client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": "true"},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    params = Client.build_omni_request(transcription_client.requests[0]).params
+    assert "audio_layout" not in params
+
+
+@pytest.mark.parametrize(
+    ("layout", "architectures"),
+    [
+        ("voxt_swift", ["WhisperForConditionalGeneration"]),
+        ("other", ["Qwen3ASRForConditionalGeneration"]),
+    ],
+)
+def test_transcription_rejects_audio_layout_where_unsupported(
+    layout: str, architectures: list[str]
+) -> None:
+    transcription_client = MetadataTranscriptionClient()
+    client = chunking_test_client(
+        transcription_client, max_native_clip_s=3.0, architectures=architectures
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "asr", "stream": "true", "audio_layout": layout},
+        files={"file": ("clip.wav", wav_upload(0.5), "audio/wav")},
+    )
+
+    assert response.status_code == 400
+    assert "audio_layout" in response.json()["detail"]
+    assert transcription_client.requests == []

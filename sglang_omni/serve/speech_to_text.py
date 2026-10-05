@@ -24,6 +24,7 @@ from sglang_omni.client import (
     SamplingParams,
 )
 from sglang_omni.client.types import (
+    AUDIO_LAYOUT_PARAM,
     INCLUDE_GENERATION_METADATA_PARAM,
     GenerationMetadata,
 )
@@ -81,6 +82,7 @@ class SpeechToTextForm:
     stream: bool
     stop_rules: GreedyStopRules
     include_generation_metadata: bool
+    audio_layout: str | None = None
 
 
 async def parse_speech_to_text_form(
@@ -96,6 +98,7 @@ async def parse_speech_to_text_form(
     stop_at_end_of_text: bool = Form(default=False),
     stop_on_token_loop: bool = Form(default=False),
     include_generation_metadata: bool = Form(default=False),
+    audio_layout: str | None = Form(default=None),
 ) -> SpeechToTextForm:
     return SpeechToTextForm(
         file=file,
@@ -112,6 +115,7 @@ async def parse_speech_to_text_form(
             stop_on_token_loop=stop_on_token_loop,
         ),
         include_generation_metadata=include_generation_metadata,
+        audio_layout=audio_layout,
     )
 
 
@@ -180,9 +184,14 @@ def build_speech_to_text_generate_request(
     segment_timestamps: bool = False,
     stop_rules: GreedyStopRules | None = None,
     include_generation_metadata: bool = False,
+    audio_layout: str | None = None,
 ) -> GenerateRequest:
     """Keep endpoint policy out of model-neutral request construction."""
     params: dict[str, str | bool] = {"task": task}
+    if audio_layout is not None:
+        params[AUDIO_LAYOUT_PARAM] = audio_layout
+    else:
+        pass
     if include_generation_metadata:
         params[INCLUDE_GENERATION_METADATA_PARAM] = True
     else:

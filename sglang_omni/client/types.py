@@ -144,6 +144,10 @@ class GenerateRequest:
 
 
 INCLUDE_GENERATION_METADATA_PARAM = "include_generation_metadata"
+# Opt-in prompt audio layout; "voxt_swift" reproduces Voxt's Swift Qwen3-ASR port.
+AUDIO_LAYOUT_PARAM = "audio_layout"
+VOXT_SWIFT_AUDIO_LAYOUT = "voxt_swift"
+AUDIO_LAYOUTS = frozenset({VOXT_SWIFT_AUDIO_LAYOUT})
 
 
 @dataclass(frozen=True, kw_only=True)
