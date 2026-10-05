@@ -39,6 +39,8 @@ MODEL_KINDS: tuple[ModelKind, ...] = ("qwen3_asr", "moss_transcribe_diarize", "w
 HEALTH_POLL_INTERVAL_S = 0.1
 HTTP_PROBE_TIMEOUT_S = 1.0
 TERMINATE_GRACE_S = 5.0
+# A server stopped before it was ready has no in-flight work to finish.
+STARTUP_TERMINATE_GRACE_S = 1.0
 CONTROL_POLL_INTERVAL_S = 0.1
 TREE_REFRESH_INTERVAL_S = 1.0
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
@@ -161,7 +163,7 @@ class OwnedProcessTree:
                 pass
         return live
 
-    def reap(self) -> None:
+    def reap(self, grace_s: float = TERMINATE_GRACE_S) -> None:
         """Stop the server and its descendants; no other process is signalled.
 
         Safe to call repeatedly: members that already exited are skipped.
@@ -178,7 +180,7 @@ class OwnedProcessTree:
                 member.terminate()
             except psutil.NoSuchProcess:
                 pass
-        _gone, alive = psutil.wait_procs(members, timeout=TERMINATE_GRACE_S)
+        _gone, alive = psutil.wait_procs(members, timeout=grace_s)
         for survivor in alive:
             try:
                 survivor.kill()
@@ -327,6 +329,16 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
 
 def run(arguments: argparse.Namespace, control: ControlChannel) -> int:
     launch = server_launch(arguments)
+    queued = control.poll(0)
+    if queued is not None:
+        # Voxt gave up on this launch before the server was even started.
+        if queued == "shutdown":
+            emit({"event": "stopped"})
+        else:
+            pass
+        return 0
+    else:
+        pass
     log_directory = Path(arguments.derived_root) / "omni-logs"
     log_directory.mkdir(parents=True, exist_ok=True)
     started_s = time.monotonic()
@@ -354,6 +366,7 @@ def run(arguments: argparse.Namespace, control: ControlChannel) -> int:
             started_s + float(arguments.startup_timeout_s),
         )
         if outcome in CONTROL_MESSAGES:
+            owned_tree.reap(STARTUP_TERMINATE_GRACE_S)
             message = outcome
         elif outcome is not None:
             emit({"event": "failed", "reason": outcome})

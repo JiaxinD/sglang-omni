@@ -241,3 +241,13 @@ def test_startup_timeout_reaps_a_server_that_never_becomes_healthy(
     assert event["event"] == "failed"
     assert "timeout" in str(event["reason"])
     assert wait_until_gone(server_pids(pid_file)) == []
+
+
+def test_a_stop_queued_before_launch_never_starts_the_server(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    supervisor.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+    supervisor.stdin.close()
+
+    assert next_event(supervisor)["event"] == "stopped"
+    assert supervisor.wait(timeout=10) == 0
+    assert not pid_file.exists()

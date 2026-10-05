@@ -88,3 +88,23 @@ def test_view_rejects_an_incomplete_installation(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="tokenizer.json"):
         build_whisper_hf_view(model_directory, tmp_path / "view")
+
+
+def test_view_building_does_not_import_a_model_library() -> None:
+    import subprocess
+    import sys
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, voxt_omni_backend.supervisor; "
+            "print('transformers' in sys.modules, 'torch' in sys.modules)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert probe.stdout.strip() == "False False"
