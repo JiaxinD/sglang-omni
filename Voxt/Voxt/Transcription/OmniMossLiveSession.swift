@@ -172,8 +172,10 @@ nonisolated final class OmniMossLiveSession: @unchecked Sendable {
         do {
             let result = try await runtime.transcribe(request, onDelta: onDelta)
             guard !Task.isCancelled else { return }
-            let text = OmniTranscriptionPlanning.offsetMossTimestamps(result.text, by: offsetSeconds)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = OmniTranscriptionPlanning.offsetMossTimestampsInFinishedText(
+                result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                by: offsetSeconds
+            )
             switch kind {
             case .partial:
                 let completed = state.withLock { state -> String in

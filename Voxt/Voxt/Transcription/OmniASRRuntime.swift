@@ -149,7 +149,7 @@ actor OmniASRRuntime {
                 onDelta?(delta)
             }
         }
-        return OmniTranscriptionResult(text: try parser.finish())
+        return try parser.finish()
     }
 
     private func launch() async throws -> OmniServerEndpoint {
@@ -255,5 +255,119 @@ nonisolated extension URLSession {
         var uploadRequest = request
         uploadRequest.httpBody = body
         return try await bytes(for: uploadRequest)
+    }
+}
+
+extension OmniASRRuntime {
+    /// Qwen3-ASR Final as MLXAudio decoded it: ≤1200 s energy-cut chunks share one
+    /// token budget, and the first chunk's detected language is forced on the rest.
+    func transcribeQwenFinal(
+        samples: [Float],
+        sampleRate: Int,
+        language: String?,
+        context: String?,
+        maxTokens: Int,
+        chunkDurationSeconds: Float = 1200
+    ) async throws -> (text: String, language: String?) {
+        let chunks = OmniTranscriptionPlanning.energySplitChunks(
+            samples, sampleRate: sampleRate, chunkDurationSeconds: chunkDurationSeconds, minChunkDurationSeconds: 1
+        )
+        var remainingTokens = maxTokens
+        var resolvedLanguage = language
+        var text = ""
+        for chunk in chunks {
+            if remainingTokens <= 0 { break }
+            try Task.checkCancellation()
+            let result = try await transcribe(OmniTranscriptionRequest(
+                samples: chunk.samples,
+                sampleRate: sampleRate,
+                language: resolvedLanguage,
+                prompt: context,
+                maxNewTokens: remainingTokens,
+                stopAtEndOfText: true,
+                stopOnTokenLoop: true,
+                includeGenerationMetadata: true
+            ))
+            guard let metadata = result.generationMetadata else {
+                throw OmniTranscriptionError.streamError("generation metadata missing")
+            }
+            remainingTokens -= metadata.generatedTokenCount
+            if resolvedLanguage == nil {
+                resolvedLanguage = metadata.language
+            }
+            text += result.text
+        }
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines), resolvedLanguage)
+    }
+}
+
+extension OmniASRRuntime {
+    /// Whisper Final as MLXAudio decoded it: independent 30 s windows joined by a space.
+    func transcribeWhisperFinal(
+        samples: [Float],
+        sampleRate: Int,
+        languageHint: String?,
+        stageMaxTokens: Int
+    ) async throws -> String {
+        var texts: [String] = []
+        let windows = OmniTranscriptionPlanning.fixedWindows(
+            sampleCount: samples.count,
+            sampleRate: sampleRate,
+            windowSeconds: OmniTranscriptionPlanning.whisperWindowSeconds
+        )
+        for window in windows {
+            try Task.checkCancellation()
+            let result = try await transcribe(OmniTranscriptionRequest(
+                samples: Array(samples[window.sampleRange]),
+                sampleRate: sampleRate,
+                language: languageHint ?? "auto",
+                prompt: nil,
+                maxNewTokens: OmniTranscriptionPlanning.whisperMaxNewTokens(
+                    stageMaxTokens: stageMaxTokens,
+                    languageHint: languageHint
+                ),
+                stopAtEndOfText: false,
+                stopOnTokenLoop: false
+            ))
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { texts.append(text) }
+        }
+        return texts.joined(separator: " ")
+    }
+
+    /// MOSS Final as MLXAudio decoded it: ≤1200 s energy-cut chunks, each with the
+    /// full token budget, timestamps shifted onto the recording timeline.
+    func transcribeMossFinal(
+        samples: [Float],
+        sampleRate: Int,
+        prompt: String?,
+        maxTokensPerChunk: Int
+    ) async throws -> (text: String, segments: [OmniTranscriptSegment]) {
+        let chunks = OmniTranscriptionPlanning.energySplitChunks(
+            samples, sampleRate: sampleRate, chunkDurationSeconds: 1200, minChunkDurationSeconds: 1
+        )
+        var texts: [String] = []
+        var segments: [OmniTranscriptSegment] = []
+        for chunk in chunks {
+            try Task.checkCancellation()
+            let result = try await transcribe(OmniTranscriptionRequest(
+                samples: chunk.samples,
+                sampleRate: sampleRate,
+                language: nil,
+                prompt: prompt,
+                maxNewTokens: maxTokensPerChunk,
+                stopAtEndOfText: true,
+                stopOnTokenLoop: true
+            ))
+            let text = OmniTranscriptionPlanning.offsetMossTimestampsInFinishedText(
+                result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                by: chunk.offsetSeconds
+            )
+            if !text.isEmpty { texts.append(text) }
+            let chunkSeconds = Double(chunk.samples.count) / Double(sampleRate)
+            segments += OmniMossSegments.parse(text, fallbackEndSeconds: chunkSeconds)
+                .filter { $0.speakerID != nil }
+        }
+        return (texts.joined(separator: "\n"), segments)
     }
 }

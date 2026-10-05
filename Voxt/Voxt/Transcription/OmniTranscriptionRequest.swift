@@ -15,10 +15,18 @@ nonisolated struct OmniTranscriptionRequest: Sendable, Equatable {
     var maxNewTokens: Int?
     var stopAtEndOfText: Bool
     var stopOnTokenLoop: Bool
+    var includeGenerationMetadata = false
+}
+
+nonisolated struct OmniGenerationMetadata: Sendable, Equatable {
+    let generatedTokenCount: Int
+    let language: String?
+    let hitLengthLimit: Bool
 }
 
 nonisolated struct OmniTranscriptionResult: Sendable, Equatable {
     let text: String
+    var generationMetadata: OmniGenerationMetadata? = nil
 }
 
 nonisolated enum OmniTranscriptionError: LocalizedError, Equatable {
@@ -108,6 +116,9 @@ nonisolated enum OmniMultipartBody {
         if request.stopOnTokenLoop {
             fields.append(("stop_on_token_loop", "true"))
         }
+        if request.includeGenerationMetadata {
+            fields.append(("include_generation_metadata", "true"))
+        }
         var body = Data()
         for (name, value) in fields {
             body.append(Data("--\(boundary)\r\n".utf8))
@@ -128,7 +139,7 @@ nonisolated enum OmniMultipartBody {
 nonisolated struct OmniTranscriptionStreamParser {
     enum Outcome: Equatable {
         case pending
-        case done(String)
+        case done(OmniTranscriptionResult)
     }
 
     private(set) var outcome: Outcome = .pending
@@ -152,7 +163,18 @@ nonisolated struct OmniTranscriptionStreamParser {
         case "transcript.text.delta":
             return event["delta"] as? String
         case "transcript.text.done":
-            outcome = .done(event["text"] as? String ?? "")
+            var result = OmniTranscriptionResult(text: event["text"] as? String ?? "")
+            if let metadata = event["generation_metadata"] as? [String: Any] {
+                guard let count = metadata["generated_token_count"] as? Int,
+                      let finishReason = metadata["finish_reason"] as? String
+                else { throw OmniTranscriptionError.malformedEvent(payload) }
+                result.generationMetadata = OmniGenerationMetadata(
+                    generatedTokenCount: count,
+                    language: metadata["language"] as? String,
+                    hitLengthLimit: finishReason == "length"
+                )
+            }
+            outcome = .done(result)
             return nil
         case "error":
             let error = event["error"] as? [String: Any]
@@ -162,9 +184,9 @@ nonisolated struct OmniTranscriptionStreamParser {
         }
     }
 
-    func finish() throws -> String {
-        guard case .done(let text) = outcome else { throw OmniTranscriptionError.streamEndedWithoutDone }
-        return text
+    func finish() throws -> OmniTranscriptionResult {
+        guard case .done(let result) = outcome else { throw OmniTranscriptionError.streamEndedWithoutDone }
+        return result
     }
 }
 
@@ -270,9 +292,27 @@ nonisolated enum OmniTranscriptionPlanning {
         return max(1, min(stageMaxTokens, whisperDecoderPositions - promptTokenCount - 1))
     }
 
-    /// MOSS timestamps restart at each chunk; shift them onto the recording's
-    /// timeline with MLXAudio's tag rule: a bracketed number of at most 24
-    /// characters, comma decimals allowed.
+    /// MOSS timestamps restart at each chunk. A pass's finished text shifts every
+    /// bracketed decimal onto the recording timeline, as MLXAudio did.
+    static func offsetMossTimestampsInFinishedText(_ text: String, by offsetSeconds: Double) -> String {
+        guard offsetSeconds != 0 else { return text }
+        let pattern = try! NSRegularExpression(pattern: #"\[(\d+(?:[\.,]\d+)?)\]"#)
+        let source = text as NSString
+        var output = ""
+        var cursor = 0
+        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            guard let value = Double(source.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")) else {
+                continue
+            }
+            output += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            output += String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
+            cursor = match.range.location + match.range.length
+        }
+        return output + source.substring(from: cursor)
+    }
+
+    /// Streamed MOSS text shifts tags with MLXAudio's incremental rule: a
+    /// bracketed number of at most 24 characters, comma decimals allowed.
     static func offsetMossTimestamps(_ text: String, by offsetSeconds: Double) -> String {
         guard offsetSeconds != 0 else { return text }
         func offsetTag(_ tag: String) -> String {
