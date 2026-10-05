@@ -23,8 +23,21 @@ parser.add_argument("--exit-after-s", type=float, default=0.0)
 parser.add_argument("--report-model-name", default=None)
 arguments, _unknown = parser.parse_known_args()
 
-stage_child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+# A stage child with its own child, like a launcher's worker and its tracker.
+stage_child = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+        "time.sleep(600)",
+    ]
+)
+time.sleep(0.3)
 Path(arguments.pid_file).write_text(json.dumps([os.getpid(), stage_child.pid]))
+Path(arguments.pid_file + ".env").write_text(
+    json.dumps({"SGLANG_OMNI_STRICT_PORT": os.environ.get("SGLANG_OMNI_STRICT_PORT")})
+)
 time.sleep(arguments.startup_delay_s)
 reported_name = arguments.report_model_name or arguments.model_name
 

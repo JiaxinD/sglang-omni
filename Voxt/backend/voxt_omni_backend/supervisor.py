@@ -2,8 +2,10 @@
 """Owns one local SGLang-Omni server for Voxt: launch, verify, report, reap.
 
 Events go to stdout as JSON lines. Voxt holds this process's stdin open; a
-shutdown command or end-of-file (Voxt exited or crashed) stops the server and
-every process it started. Logs carry state and timing only.
+shutdown command, end-of-file (Voxt exited or crashed) or a termination signal
+stops the server and every process it started, at any point including startup.
+The server runs under the lifeline runner, so it also dies if this supervisor
+is killed outright. Logs carry state and timing only.
 """
 
 from __future__ import annotations
@@ -38,9 +40,13 @@ HEALTH_POLL_INTERVAL_S = 0.1
 HTTP_PROBE_TIMEOUT_S = 1.0
 TERMINATE_GRACE_S = 5.0
 CONTROL_POLL_INTERVAL_S = 0.1
+TREE_REFRESH_INTERVAL_S = 1.0
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
 logger = logging.getLogger("voxt_omni_backend.supervisor")
 loopback_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ControlMessage = Literal["shutdown", "closed", "signal"]
+CONTROL_MESSAGES: tuple[ControlMessage, ...] = ("shutdown", "closed", "signal")
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -51,13 +57,12 @@ class ServerLaunch:
     port: int
 
 
-class SupervisorStopped(Exception):
-    """A termination signal asked the supervisor to stop."""
-
-
 def emit(event: dict[str, object]) -> None:
-    sys.stdout.write(json.dumps(event) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(event) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        logger.info("event pipe closed")
 
 
 def free_loopback_port() -> int:
@@ -88,18 +93,25 @@ class OwnedProcessTree:
     """The server and every descendant seen so far, keyed by pid and start time.
 
     A descendant reparented after the server dies is still recognised, and a
-    recycled pid with a different start time is never signalled.
+    recycled pid with a different start time is never signalled. The root is
+    only walked while the supervisor's own child handle says it is running.
     """
 
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
         self.process = process
         self.start_times_by_pid: dict[int, float] = {}
+        self.refreshed_at = 0.0
+        self.root_start_time = psutil.Process(process.pid).create_time()
         self.refresh()
 
     def refresh(self) -> None:
+        if self.process.poll() is not None:
+            return
+        else:
+            pass
         try:
-            server = psutil.Process(self.process.pid)
-            members = [server, *server.children(recursive=True)]
+            root = psutil.Process(self.process.pid)
+            members = [root, *root.children(recursive=True)]
         except psutil.NoSuchProcess:
             members = []
         for member in members:
@@ -107,6 +119,34 @@ class OwnedProcessTree:
                 self.start_times_by_pid[member.pid] = member.create_time()
             except psutil.NoSuchProcess:
                 pass
+        self.refreshed_at = time.monotonic()
+
+    def refresh_periodically(self) -> None:
+        if time.monotonic() - self.refreshed_at >= TREE_REFRESH_INTERVAL_S:
+            self.refresh()
+        else:
+            pass
+
+    def session_members(self) -> list[psutil.Process]:
+        """Processes still in the server's session, even after its leader exited.
+
+        The server leads a new session, so its id is the server pid; it cannot
+        be reused while any member lives, and members started before the
+        server are excluded.
+        """
+        members: list[psutil.Process] = []
+        for candidate in psutil.process_iter():
+            try:
+                if (
+                    os.getsid(candidate.pid) == self.process.pid
+                    and candidate.create_time() >= self.root_start_time
+                ):
+                    members.append(candidate)
+                else:
+                    pass
+            except (ProcessLookupError, PermissionError, psutil.NoSuchProcess):
+                pass
+        return members
 
     def live_members(self) -> list[psutil.Process]:
         live: list[psutil.Process] = []
@@ -122,9 +162,17 @@ class OwnedProcessTree:
         return live
 
     def reap(self) -> None:
-        """Stop the server and its descendants; no other process is signalled."""
+        """Stop the server and its descendants; no other process is signalled.
+
+        Safe to call repeatedly: members that already exited are skipped.
+        """
         self.refresh()
-        members = self.live_members()
+        members = list(
+            {
+                member.pid: member
+                for member in self.live_members() + self.session_members()
+            }.values()
+        )
         for member in members:
             try:
                 member.terminate()
@@ -136,16 +184,55 @@ class OwnedProcessTree:
                 survivor.kill()
             except psutil.NoSuchProcess:
                 pass
-        self.process.wait()
+        psutil.wait_procs(alive, timeout=TERMINATE_GRACE_S)
+        self.process.poll()
+
+
+class ControlChannel:
+    """Shutdown requests from Voxt's pipe and from termination signals."""
+
+    def __init__(self) -> None:
+        self.messages: queue.Queue[ControlMessage] = queue.Queue()
+
+    def start(self) -> None:
+        threading.Thread(target=self.read_pipe, daemon=True).start()
+        for stop_signal in STOP_SIGNALS:
+            signal.signal(stop_signal, self.on_signal)
+
+    def read_pipe(self) -> None:
+        for line in sys.stdin:
+            try:
+                command = json.loads(line).get("command")
+            except (ValueError, AttributeError):
+                logger.warning("ignored malformed control line")
+                continue
+            if command == "shutdown":
+                self.messages.put("shutdown")
+            else:
+                logger.warning("ignored unknown control command")
+        self.messages.put("closed")
+
+    def on_signal(self, signal_number: int, frame: FrameType | None) -> None:
+        del frame
+        self.messages.put("signal")
+
+    def poll(self, timeout_s: float) -> ControlMessage | None:
+        try:
+            return self.messages.get(timeout=timeout_s)
+        except queue.Empty:
+            return None
 
 
 def ready_failure(
-    owned_tree: OwnedProcessTree, launch: ServerLaunch, deadline: float
+    owned_tree: OwnedProcessTree,
+    control: ControlChannel,
+    launch: ServerLaunch,
+    deadline: float,
 ) -> str | None:
-    """None once our own instance answers; otherwise why it never will."""
+    """None once our own instance answers; a control message or a failure otherwise."""
     base_url = f"http://{LOOPBACK_HOST}:{launch.port}"
     while time.monotonic() < deadline:
-        owned_tree.refresh()
+        owned_tree.refresh_periodically()
         exit_code = owned_tree.process.poll()
         if exit_code is not None:
             return f"server exited with code {exit_code} before it was ready"
@@ -166,14 +253,12 @@ def ready_failure(
                 return "a different server instance answered on the launch port"
         else:
             pass
-        time.sleep(HEALTH_POLL_INTERVAL_S)
+        message = control.poll(HEALTH_POLL_INTERVAL_S)
+        if message is not None:
+            return message
+        else:
+            pass
     return "startup timeout"
-
-
-def control_commands(command_queue: queue.Queue[str | None]) -> None:
-    for line in sys.stdin:
-        command_queue.put(line)
-    command_queue.put(None)
 
 
 def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
@@ -203,16 +288,27 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
         {
             "SGLANG_USE_MLX": "1",
             "HF_HUB_OFFLINE": "1",
+            # Fail fast instead of serving on a port nobody is watching.
+            "SGLANG_OMNI_STRICT_PORT": "1",
             "NO_PROXY": f"{LOOPBACK_HOST},localhost",
             "no_proxy": f"{LOOPBACK_HOST},localhost",
         }
     )
     if arguments.ffmpeg_library_directory:
-        environment["DYLD_LIBRARY_PATH"] = arguments.ffmpeg_library_directory
+        inherited = environment.get("DYLD_LIBRARY_PATH")
+        environment["DYLD_LIBRARY_PATH"] = (
+            f"{arguments.ffmpeg_library_directory}:{inherited}"
+            if inherited
+            else arguments.ffmpeg_library_directory
+        )
     else:
         pass
     return ServerLaunch(
         command=[
+            sys.executable,
+            "-m",
+            "voxt_omni_backend.lifeline",
+            "--",
             *base_command,
             "--model-path",
             str(model_path),
@@ -229,73 +325,70 @@ def server_launch(arguments: argparse.Namespace) -> ServerLaunch:
     )
 
 
-def run(arguments: argparse.Namespace) -> int:
+def run(arguments: argparse.Namespace, control: ControlChannel) -> int:
     launch = server_launch(arguments)
     log_directory = Path(arguments.derived_root) / "omni-logs"
     log_directory.mkdir(parents=True, exist_ok=True)
     started_s = time.monotonic()
-    with open(log_directory / f"{launch.model_name}.log", "wb") as server_log:
-        process = subprocess.Popen(
-            launch.command,
-            env=launch.environment,
-            stdin=subprocess.DEVNULL,
-            stdout=server_log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    logger.info(f"server started pid={process.pid} port={launch.port}")
-    owned_tree = OwnedProcessTree(process)
+    # A stop signal between spawning and owning the server must not leak it.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
     try:
-        failure = ready_failure(
-            owned_tree, launch, started_s + float(arguments.startup_timeout_s)
+        with open(log_directory / f"{launch.model_name}.log", "wb") as server_log:
+            process = subprocess.Popen(
+                launch.command,
+                env=launch.environment,
+                stdin=subprocess.DEVNULL,
+                stdout=server_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        owned_tree = OwnedProcessTree(process)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    logger.info(f"server started pid={process.pid} port={launch.port}")
+    try:
+        outcome = ready_failure(
+            owned_tree,
+            control,
+            launch,
+            started_s + float(arguments.startup_timeout_s),
         )
-        if failure is not None:
-            emit({"event": "failed", "reason": failure})
+        if outcome in CONTROL_MESSAGES:
+            message = outcome
+        elif outcome is not None:
+            emit({"event": "failed", "reason": outcome})
             return 1
         else:
-            pass
-        emit(
-            {
-                "event": "ready",
-                "host": LOOPBACK_HOST,
-                "port": launch.port,
-                "model_name": launch.model_name,
-                "server_pid": process.pid,
-                "startup_s": round(time.monotonic() - started_s, 3),
-            }
-        )
-        command_queue: queue.Queue[str | None] = queue.Queue()
-        threading.Thread(
-            target=control_commands, args=(command_queue,), daemon=True
-        ).start()
-        while True:
-            owned_tree.refresh()
+            emit(
+                {
+                    "event": "ready",
+                    "host": LOOPBACK_HOST,
+                    "port": launch.port,
+                    "model_name": launch.model_name,
+                    "server_pid": process.pid,
+                    "startup_s": round(time.monotonic() - started_s, 3),
+                }
+            )
+            message = None
+        while message is None:
+            owned_tree.refresh_periodically()
             exit_code = process.poll()
             if exit_code is not None:
                 emit({"event": "exited", "exit_code": exit_code})
                 return 1
             else:
                 pass
-            try:
-                line = command_queue.get(timeout=CONTROL_POLL_INTERVAL_S)
-            except queue.Empty:
-                continue
-            if line is None:
-                logger.info("control pipe closed")
-                return 0
-            elif json.loads(line).get("command") == "shutdown":
-                owned_tree.reap()
-                emit({"event": "stopped"})
-                return 0
-            else:
-                logger.warning("ignored unknown control command")
-    finally:
+            message = control.poll(CONTROL_POLL_INTERVAL_S)
         owned_tree.reap()
-
-
-def stop_on_signal(signal_number: int, frame: FrameType | None) -> None:
-    del frame
-    raise SupervisorStopped(signal.Signals(signal_number).name)
+        if message == "shutdown":
+            emit({"event": "stopped"})
+        else:
+            logger.info(f"stopped after control message {message}")
+        return 0
+    finally:
+        # A second signal must not interrupt cleanup before escalation.
+        signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        owned_tree.reap()
 
 
 def main() -> int:
@@ -314,13 +407,13 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(message)s"
     )
-    signal.signal(signal.SIGTERM, stop_on_signal)
-    signal.signal(signal.SIGINT, stop_on_signal)
+    control = ControlChannel()
+    control.start()
     try:
-        return run(arguments)
-    except SupervisorStopped as stopped:
-        logger.info(f"stopped by {stopped}")
-        return 0
+        return run(arguments, control)
+    except (OSError, ValueError) as error:
+        emit({"event": "failed", "reason": f"{type(error).__name__}: {error}"})
+        return 1
 
 
 if __name__ == "__main__":

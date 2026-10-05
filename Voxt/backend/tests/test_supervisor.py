@@ -60,7 +60,17 @@ def next_event(supervisor: subprocess.Popen[str]) -> dict[str, object]:
 
 
 def server_pids(pid_file: Path) -> list[int]:
-    return json.loads(pid_file.read_text())
+    """The fake server, its stage child and that child's own children."""
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    server_pid, stage_pid = json.loads(pid_file.read_text())
+    try:
+        grandchildren = [child.pid for child in psutil.Process(stage_pid).children()]
+        lifeline = [psutil.Process(server_pid).ppid()]
+    except psutil.NoSuchProcess:
+        grandchildren, lifeline = [], []
+    return [*lifeline, server_pid, stage_pid, *grandchildren]
 
 
 def wait_until_gone(pids: list[int], timeout_s: float = 10.0) -> list[int]:
@@ -79,17 +89,82 @@ def wait_until_gone(pids: list[int], timeout_s: float = 10.0) -> list[int]:
 
 def test_ready_event_carries_a_verified_loopback_endpoint(tmp_path: Path) -> None:
     supervisor, pid_file = start_supervisor(tmp_path)
-    try:
-        ready = next_event(supervisor)
+    ready = next_event(supervisor)
+    owned = server_pids(pid_file)
 
-        assert ready["event"] == "ready"
-        assert ready["host"] == "127.0.0.1"
-        assert isinstance(ready["port"], int)
-        assert str(ready["model_name"]).startswith("voxt-qwen3_asr-")
-        assert ready["server_pid"] == server_pids(pid_file)[0]
-    finally:
-        supervisor.kill()
-        wait_until_gone(server_pids(pid_file))
+    assert ready["event"] == "ready"
+    assert ready["host"] == "127.0.0.1"
+    assert isinstance(ready["port"], int)
+    assert str(ready["model_name"]).startswith("voxt-qwen3_asr-")
+    assert ready["server_pid"] == owned[0]
+    assert json.loads(Path(f"{pid_file}.env").read_text()) == {
+        "SGLANG_OMNI_STRICT_PORT": "1"
+    }
+    supervisor.stdin.close()
+    supervisor.wait(timeout=15)
+    assert wait_until_gone(owned) == []
+
+
+def test_a_killed_supervisor_takes_the_server_tree_with_it(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    assert next_event(supervisor)["event"] == "ready"
+    owned = server_pids(pid_file)
+
+    supervisor.kill()
+
+    supervisor.wait(timeout=10)
+    assert wait_until_gone(owned) == []
+
+
+def test_sighup_reaps_the_server_tree(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    assert next_event(supervisor)["event"] == "ready"
+    owned = server_pids(pid_file)
+
+    supervisor.send_signal(signal.SIGHUP)
+
+    supervisor.wait(timeout=15)
+    assert wait_until_gone(owned) == []
+
+
+def test_control_pipe_eof_during_startup_stops_without_waiting_for_ready(
+    tmp_path: Path,
+) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path, "--startup-delay-s", "60")
+    owned = server_pids(pid_file)
+    closed_at = time.monotonic()
+
+    supervisor.stdin.close()
+
+    assert supervisor.wait(timeout=15) == 0
+    assert time.monotonic() - closed_at < 10
+    assert "ready" not in supervisor.stdout.read()
+    assert wait_until_gone(owned) == []
+
+
+def test_shutdown_during_startup_reports_stopped(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path, "--startup-delay-s", "60")
+    owned = server_pids(pid_file)
+
+    supervisor.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+    supervisor.stdin.flush()
+
+    assert next_event(supervisor)["event"] == "stopped"
+    assert supervisor.wait(timeout=15) == 0
+    assert wait_until_gone(owned) == []
+
+
+def test_malformed_control_lines_are_ignored(tmp_path: Path) -> None:
+    supervisor, pid_file = start_supervisor(tmp_path)
+    assert next_event(supervisor)["event"] == "ready"
+    owned = server_pids(pid_file)
+
+    supervisor.stdin.write("not json\n")
+    supervisor.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+    supervisor.stdin.flush()
+
+    assert next_event(supervisor)["event"] == "stopped"
+    assert wait_until_gone(owned) == []
 
 
 def test_control_pipe_eof_reaps_only_the_owned_process_tree(tmp_path: Path) -> None:
