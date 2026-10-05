@@ -296,6 +296,81 @@ final class OmniPhase1BenchmarkTests: XCTestCase {
         await manager.shutdownForApplicationTermination()
     }
 
+    // MARK: - Meeting live preview with background chunks
+
+    /// A meeting's two consumers of one model: the live session (its own
+    /// transcriber, as MeetingMLXNativeLiveSession builds it) fed in real time,
+    /// while a second transcriber on the same manager runs the strict chunk
+    /// Final for each completed 15 s window, as MeetingSegmentTranscribing does.
+    /// Records every live update time and each chunk's latency.
+    func testMeetingConcurrencyBenchmark() async throws {
+        let settings = try settings()
+        let clips = try loadClips(settings)
+        let writer = try BenchmarkWriter(settings.output.appendingPathComponent("\(settings.run)-meeting.jsonl"))
+        let manager = try await makeManager(settings)
+        let liveTranscriber = MLXTranscriber(modelManager: manager, transcriptionPurpose: .meeting)
+        let chunkTranscriber = MLXTranscriber(modelManager: manager, transcriptionPurpose: .meeting)
+        manager.beginActiveUse()
+        _ = try await manager.loadModel()
+        let chunkSamples = 15 * 16000
+
+        for (index, clip) in clips.enumerated() {
+            let samples = try DebugAudioClipIO.loadMonoSamples(
+                from: settings.clips.appendingPathComponent("\(clip.id).wav")
+            ).samples
+            let timeline = SessionTimeline()
+            var updateOffsetsMs: [Int] = []
+            let session = try await liveTranscriber.makeMeetingNativeStreamingConfiguration().session
+            let start = ContinuousClock.now
+            let consumer = Task { @MainActor in
+                for await event in session.events {
+                    if case .displayUpdate(let confirmedText, let provisionalText) = event,
+                       !(confirmedText + provisionalText).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        updateOffsetsMs.append(start.duration(to: .now).milliseconds)
+                    } else if case .failed = event {
+                        timeline.liveFailed = true
+                    }
+                }
+            }
+            var chunkTasks: [Task<[String: Any], Never>] = []
+            var fed = 0
+            var nextChunkEnd = chunkSamples
+            while fed < samples.count {
+                try await Task.sleep(for: .milliseconds(100))
+                let due = min(samples.count, start.duration(to: .now).milliseconds * 16)
+                if due > fed {
+                    session.feedAudio(samples: Array(samples[fed..<due]))
+                    fed = due
+                }
+                while fed >= nextChunkEnd {
+                    let chunk = Array(samples[(nextChunkEnd - chunkSamples)..<nextChunkEnd])
+                    let launchedAtMs = start.duration(to: .now).milliseconds
+                    chunkTasks.append(Task { @MainActor in
+                        let chunkStart = ContinuousClock.now
+                        let text = (try? await chunkTranscriber.transcribeBufferedResult(
+                            samples: chunk, sampleRate: 16000
+                        ))?.text
+                        return ["launched_ms": launchedAtMs, "ms": chunkStart.duration(to: .now).milliseconds,
+                                "failed": text == nil]
+                    })
+                    nextChunkEnd += chunkSamples
+                }
+            }
+            var chunks: [[String: Any]] = []
+            for task in chunkTasks { chunks.append(await task.value) }
+            session.cancel()
+            consumer.cancel()
+            writer.write([
+                "event": "meeting", "run": settings.run, "index": index, "id": clip.id,
+                "audio_seconds": clip.duration, "update_offsets_ms": updateOffsetsMs,
+                "chunks": chunks, "live_failed": timeline.liveFailed,
+            ])
+            try await Task.sleep(for: .milliseconds(1500))
+        }
+        manager.endActiveUse()
+        await manager.shutdownForApplicationTermination()
+    }
+
     private func waitUntil(timeoutSeconds: Double, _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(timeoutSeconds)
         while !condition() {
