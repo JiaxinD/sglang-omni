@@ -133,12 +133,14 @@ nonisolated struct OmniTranscriptionStreamParser {
 
     private(set) var outcome: Outcome = .pending
 
-    mutating func consume(line: String) throws {
-        guard line.hasPrefix("data:") else { return }
+    /// Returns the text delta the line carried, if any.
+    @discardableResult
+    mutating func consume(line: String) throws -> String? {
+        guard line.hasPrefix("data:") else { return nil }
         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
         if payload == "[DONE]" {
             guard case .done = outcome else { throw OmniTranscriptionError.streamEndedWithoutDone }
-            return
+            return nil
         }
         guard let data = payload.data(using: .utf8),
               let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -148,14 +150,15 @@ nonisolated struct OmniTranscriptionStreamParser {
         }
         switch type {
         case "transcript.text.delta":
-            break
+            return event["delta"] as? String
         case "transcript.text.done":
             outcome = .done(event["text"] as? String ?? "")
+            return nil
         case "error":
             let error = event["error"] as? [String: Any]
             throw OmniTranscriptionError.streamError(error?["message"] as? String ?? payload)
         default:
-            break
+            return nil
         }
     }
 
@@ -267,20 +270,80 @@ nonisolated enum OmniTranscriptionPlanning {
         return max(1, min(stageMaxTokens, whisperDecoderPositions - promptTokenCount - 1))
     }
 
-    /// MOSS timestamps restart at each chunk; shift them onto the recording's timeline.
+    /// MOSS timestamps restart at each chunk; shift them onto the recording's
+    /// timeline with MLXAudio's tag rule: a bracketed number of at most 24
+    /// characters, comma decimals allowed.
     static func offsetMossTimestamps(_ text: String, by offsetSeconds: Double) -> String {
         guard offsetSeconds != 0 else { return text }
-        let pattern = try! NSRegularExpression(pattern: #"\[(\d+(?:\.\d+)?)\]"#)
-        let source = text as NSString
-        var result = ""
-        var cursor = 0
-        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
-            result += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-            let value = Double(source.substring(with: match.range(at: 1))) ?? 0
-            result += String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
-            cursor = match.range.location + match.range.length
+        func offsetTag(_ tag: String) -> String {
+            guard let value = Double(tag.dropFirst().dropLast().replacingOccurrences(of: ",", with: ".")) else {
+                return tag
+            }
+            return String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
         }
-        result += source.substring(from: cursor)
-        return result
+        var output = ""
+        var bufferedTag = ""
+        var isBufferingTag = false
+        for character in text {
+            if isBufferingTag {
+                bufferedTag.append(character)
+                if character == "]" {
+                    output += offsetTag(bufferedTag)
+                    bufferedTag = ""
+                    isBufferingTag = false
+                } else if bufferedTag.count > 24 {
+                    output += bufferedTag
+                    bufferedTag = ""
+                    isBufferingTag = false
+                }
+            } else if character == "[" {
+                bufferedTag = "["
+                isBufferingTag = true
+            } else {
+                output.append(character)
+            }
+        }
+        return output + bufferedTag
+    }
+}
+
+nonisolated struct OmniTranscriptSegment: Sendable, Equatable {
+    let text: String
+    let startSeconds: Double
+    let endSeconds: Double
+    let speakerID: String?
+}
+
+/// MOSS's `[start][Sxx]text[end]` markup, parsed with the rule MLXAudio used.
+nonisolated enum OmniMossSegments {
+    static func parse(_ text: String, fallbackEndSeconds: Double) -> [OmniTranscriptSegment] {
+        let pattern = try! NSRegularExpression(
+            pattern: #"\[(\d+(?:[\.,]\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:[\.,]\d+)?)\]"#,
+            options: [.dotMatchesLineSeparators]
+        )
+        let source = text as NSString
+        func seconds(_ range: NSRange) -> Double? {
+            Double(source.substring(with: range).replacingOccurrences(of: ",", with: "."))
+        }
+        var segments: [OmniTranscriptSegment] = []
+        for match in pattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            guard let start = seconds(match.range(at: 1)),
+                  let end = seconds(match.range(at: 4)),
+                  end >= start
+            else { continue }
+            let segmentText = source.substring(with: match.range(at: 3))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !segmentText.isEmpty else { continue }
+            segments.append(OmniTranscriptSegment(
+                text: segmentText,
+                startSeconds: start,
+                endSeconds: end,
+                speakerID: source.substring(with: match.range(at: 2))
+            ))
+        }
+        if segments.isEmpty {
+            return [OmniTranscriptSegment(text: text, startSeconds: 0, endSeconds: max(fallbackEndSeconds, 0), speakerID: nil)]
+        }
+        return segments
     }
 }

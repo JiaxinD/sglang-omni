@@ -120,7 +120,10 @@ actor OmniASRRuntime {
         state = .stopped
     }
 
-    func transcribe(_ request: OmniTranscriptionRequest) async throws -> OmniTranscriptionResult {
+    func transcribe(
+        _ request: OmniTranscriptionRequest,
+        onDelta: (@Sendable (String) -> Void)? = nil
+    ) async throws -> OmniTranscriptionResult {
         guard case .ready(let endpoint) = state else {
             throw OmniASRRuntimeError.retired
         }
@@ -142,7 +145,9 @@ actor OmniASRRuntime {
         var parser = OmniTranscriptionStreamParser()
         for try await line in bytes.lines {
             try Task.checkCancellation()
-            try parser.consume(line: line)
+            if let delta = try parser.consume(line: line), !delta.isEmpty {
+                onDelta?(delta)
+            }
         }
         return OmniTranscriptionResult(text: try parser.finish())
     }
