@@ -252,6 +252,37 @@ def test_a_stop_queued_before_launch_never_starts_the_server(tmp_path: Path) -> 
     assert not pid_file.exists()
 
 
+def launch_command(tmp_path: Path, model_kind: str) -> list[str]:
+    import argparse
+
+    from voxt_omni_backend.supervisor import server_launch
+
+    arguments = argparse.Namespace(
+        model_kind=model_kind,
+        model_directory=str(tmp_path),
+        derived_root=str(tmp_path / "derived"),
+        ffmpeg_library_directory=None,
+        startup_timeout_s=20.0,
+        server_command=None,
+    )
+    return server_launch(arguments).command
+
+
+def test_qwen_live_preview_decodes_every_second_like_the_swift_session(
+    tmp_path: Path,
+) -> None:
+    command = launch_command(tmp_path, "qwen3_asr")
+    flag = command.index("--realtime_decode_interval_ms")
+    assert command[flag + 1] == "1000"
+    assert "--enable-realtime" in command
+
+
+def test_models_without_live_sockets_get_no_realtime_options(tmp_path: Path) -> None:
+    command = launch_command(tmp_path, "moss_transcribe_diarize")
+    assert "--realtime_decode_interval_ms" not in command
+    assert "--enable-realtime" not in command
+
+
 def test_the_server_starts_with_termination_signals_deliverable(tmp_path: Path) -> None:
     supervisor, pid_file = start_supervisor(tmp_path)
     try:
