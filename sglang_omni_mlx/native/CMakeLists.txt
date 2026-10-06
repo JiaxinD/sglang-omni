@@ -50,16 +50,24 @@ add_library(qwen3_asr STATIC
   src/audio.cpp
   src/model.cpp
   src/tokenizer.cpp
-  src/transcriber.cpp)
+  src/transcriber.cpp
+  src/worker.cpp
+  src/realtime.cpp
+  src/form.cpp)
 target_include_directories(qwen3_asr PUBLIC src)
 target_link_libraries(qwen3_asr PUBLIC mlx nlohmann_json::nlohmann_json pcre2-8-static
   "-framework CoreFoundation")
 target_compile_options(qwen3_asr PUBLIC ${MLX_CXX_FLAGS} PRIVATE -Wall -Wextra)
 
+# The server: the same HTTP and realtime API as the Python server, and Voxt's
+# supervisor protocol with --supervised.
+add_executable(qwen3_asr_server src/server.cpp)
+target_link_libraries(qwen3_asr_server PRIVATE qwen3_asr civetweb-c-library)
+
 # Parity tool: transcribes WAV files and prints one JSON line per file.
 add_executable(qwen3_asr_transcribe tools/transcribe.cpp)
 target_link_libraries(qwen3_asr_transcribe PRIVATE qwen3_asr)
 
-set_target_properties(qwen3_asr_transcribe PROPERTIES
+set_target_properties(qwen3_asr_server qwen3_asr_transcribe PROPERTIES
   BUILD_RPATH "${MLX_LIBRARY_DIRS};@loader_path"
   INSTALL_RPATH "@loader_path")
