@@ -19,16 +19,31 @@ namespace {
 
 constexpr int kKvCacheStepTokens = 256;
 
-mx::array Gelu(const mx::array &x) {
+std::vector<mx::array> GeluGraph(const std::vector<mx::array> &inputs) {
   // x * (1 + erf(x / sqrt(2))) / 2, as mlx.nn.gelu.
-  return mx::divide(
+  const mx::array &x = inputs[0];
+  return {mx::divide(
       mx::multiply(x, mx::add(mx::array(1.0f),
                               mx::erf(mx::divide(
                                   x, mx::array(static_cast<float>(M_SQRT2)))))),
-      mx::array(2.0f));
+      mx::array(2.0f))};
 }
 
-mx::array Silu(const mx::array &x) { return mx::multiply(x, mx::sigmoid(x)); }
+std::vector<mx::array> SiluGraph(const std::vector<mx::array> &inputs) {
+  return {mx::multiply(inputs[0], mx::sigmoid(inputs[0]))};
+}
+
+// Compiled shapeless, as mlx.nn compiles gelu and silu: one fused kernel
+// instead of one per elementwise op.
+mx::array Gelu(const mx::array &x) {
+  static const auto compiled = mx::compile(GeluGraph, true);
+  return compiled({x})[0];
+}
+
+mx::array Silu(const mx::array &x) {
+  static const auto compiled = mx::compile(SiluGraph, true);
+  return compiled({x})[0];
+}
 
 mx::array SinusoidalPositions(int length, int channels) {
   const double timescale_step = std::log(10000.0) / (channels / 2 - 1);

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "audio.h"
+#include "model.h"
 #include "nlohmann/json.hpp"
 #include "tokenizer.h"
 #include "transcriber.h"
@@ -27,6 +28,7 @@ int main(int argc, char **argv) {
   std::string dump_mel_filters;
   std::string encode_lines;
   bool encode = false;
+  bool profile = false;
   qwen3_asr::TranscriptionOptions options;
   std::vector<std::string> files;
   for (int i = 1; i < argc; ++i) {
@@ -50,6 +52,8 @@ int main(int argc, char **argv) {
       encode_text = value();
     } else if (argument == "--encode-lines") {
       encode_lines = value();
+    } else if (argument == "--profile") {
+      profile = true;
     } else if (argument == "--dump-mel-filters") {
       dump_mel_filters = value();
     } else {
@@ -78,6 +82,56 @@ int main(int argc, char **argv) {
                         {"decoded_skip", tokenizer.Decode(ids, true)}})
                        .dump()
                 << "\n";
+    }
+    return 0;
+  } else if (profile) {
+    namespace mx = mlx::core;
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a, Clock::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const qwen3_asr::Qwen3ASR model(model_path);
+    const qwen3_asr::Tokenizer tokenizer(model_path);
+    std::ifstream stream(files.at(0), std::ios::binary);
+    std::ostringstream bytes;
+    bytes << stream.rdbuf();
+    const std::vector<float> samples = qwen3_asr::DecodeWav(bytes.str());
+    for (int round = 0; round < 3; ++round) {
+      const auto t0 = Clock::now();
+      mx::array mel = qwen3_asr::LogMel(samples, AudioLayout::kVoxtSwift);
+      mx::eval(mel);
+      const auto t1 = Clock::now();
+      mx::array encoded = model.EncodeAudio(mel, AudioLayout::kVoxtSwift);
+      mx::eval(encoded);
+      const auto t2 = Clock::now();
+      std::string prompt =
+          "<|im_start|>system\n<|im_end|>\n<|im_start|>user\n<|audio_start|>";
+      for (int i = 0;
+           i < qwen3_asr::TokenCount(mel.shape(-1), AudioLayout::kVoxtSwift);
+           ++i)
+        prompt += "<|audio_pad|>";
+      prompt += "<|audio_end|><|im_end|>\n<|im_start|>assistant\nlanguage "
+                "English<asr_text>";
+      const std::vector<int> ids = tokenizer.Encode(prompt);
+      const mx::array input(ids.data(), {1, static_cast<int>(ids.size())},
+                            mx::int32);
+      std::vector<qwen3_asr::KVCache> caches = model.NewCaches();
+      mx::array token =
+          mx::argmax(model.Decode(model.EmbedTokens(input), caches));
+      mx::eval(token);
+      const auto t3 = Clock::now();
+      constexpr int steps = 100;
+      for (int i = 0; i < steps; ++i) {
+        token = mx::argmax(model.Decode(
+            model.EmbedTokens(mx::reshape(token, {1, 1})), caches));
+        mx::async_eval({token});
+      }
+      mx::eval(token);
+      const auto t4 = Clock::now();
+      std::cout << "samples " << samples.size() / 16000.0 << "s mel "
+                << ms(t0, t1) << "ms enc " << ms(t1, t2) << "ms prefill("
+                << ids.size() << ") " << ms(t2, t3) << "ms decode "
+                << ms(t3, t4) / steps << "ms/token\n";
     }
     return 0;
   } else if (encode) {
