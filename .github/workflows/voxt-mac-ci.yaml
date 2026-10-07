@@ -119,6 +119,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # The runner's active developer directory may be the Command Line Tools,
+      # which have no xcodebuild: use the newest installed Xcode instead.
+      - name: Select Xcode
+        run: |
+          if ! /usr/bin/xcrun --find xcodebuild >/dev/null 2>&1 || ! xcodebuild -version >/dev/null 2>&1; then
+            xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+            if [ -z "$xcode" ]; then
+              echo "::error::No Xcode in /Applications; the runner needs Xcode to build Voxt."
+              exit 1
+            else
+              echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+              export DEVELOPER_DIR="$xcode/Contents/Developer"
+            fi
+          else
+            :
+          fi
+          xcodebuild -version
+
       - name: Build for testing
         working-directory: Voxt
         run: |
