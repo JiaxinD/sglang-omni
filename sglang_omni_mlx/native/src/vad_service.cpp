@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "vad_service.h"
 
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <typeinfo>
 
 #include "audio.h"
 #include "http.h"
@@ -13,6 +15,9 @@ namespace silero_vad {
 namespace {
 
 using omni_server::Json;
+
+// The largest message a stream accepts: 30 s of audio.
+constexpr size_t kMaxMessageBytes = 30 * kSampleRate * sizeof(float);
 
 // One socket's stream: its model state, the samples of an unfinished chunk
 // and a partial (fragmented) message.
@@ -134,6 +139,15 @@ int SocketData(mg_connection *connection, int bits, char *data, size_t length,
     return 1;
   } else {
   }
+  // Audio comes in binary messages only, checked before it is buffered.
+  if (opcode == MG_WEBSOCKET_OPCODE_TEXT ||
+      socket->fragments.size() + length > kMaxMessageBytes) {
+    SendText(connection,
+             Json({{"error", "Audio must be binary messages of at most 30 s."}})
+                 .dump());
+    return 0;
+  } else {
+  }
   socket->fragments.append(data, length);
   if ((bits & 0x80) == 0) {
     return 1;
@@ -153,6 +167,13 @@ int SocketData(mg_connection *connection, int bits, char *data, size_t length,
   socket->pending.resize(previous + sample_count);
   std::memcpy(socket->pending.data() + previous, message.data(),
               message.size());
+  for (size_t index = previous; index < socket->pending.size(); ++index) {
+    if (!std::isfinite(socket->pending[index])) {
+      SendText(connection, Json({{"error", "Audio must be finite."}}).dump());
+      return 0;
+    } else {
+    }
+  }
   try {
     const std::vector<float> probabilities =
         service->FeedSamples(socket->pending, socket->stream);

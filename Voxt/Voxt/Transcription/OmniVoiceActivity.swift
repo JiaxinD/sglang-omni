@@ -26,6 +26,11 @@ actor OmniSileroVADRuntime {
             // The model moved (storage root changed): serve the new copy.
             self.runtime = nil
             await runtime.retire()
+        } else if let runtime, await !runtime.canServe {
+            // Its server failed or exited; holders of the old endpoint come
+            // back here after their next failed request.
+            self.runtime = nil
+            await runtime.retire()
         }
         let runtime: OmniASRRuntime
         if let current = self.runtime {

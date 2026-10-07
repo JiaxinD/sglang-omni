@@ -269,3 +269,21 @@ def test_shutdown_reports_stopped() -> None:
     running.process.stdin.flush()
     assert json.loads(running.process.stdout.readline()) == {"event": "stopped"}
     assert running.process.wait(timeout=10) == 0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "text audio",
+        np.array([0.0, np.nan], dtype="<f4").tobytes(),
+        np.zeros(30 * 16000 + 1, dtype="<f4").tobytes(),
+    ],
+)
+def test_text_non_finite_and_oversized_messages_close_the_stream(
+    server: Server, message
+) -> None:
+    with server.stream() as socket:
+        socket.send(message)
+        assert "error" in json.loads(socket.recv(timeout=30))
+        with pytest.raises(Exception):
+            socket.recv(timeout=30)

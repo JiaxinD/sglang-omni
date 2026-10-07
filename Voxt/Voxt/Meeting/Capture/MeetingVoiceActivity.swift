@@ -391,8 +391,25 @@ actor ASRSileroStreamingVoiceActivityDetector {
                 omniStreams[streamID] = nil
             }
             await stream.close()
+            await releaseOmniEndpoint(after: error, endpoint: endpoint)
             throw error
         }
+    }
+
+    /// After a transport failure the server may be gone: the next call
+    /// acquires again, which restarts a server that died. Every stream on the
+    /// old endpoint closes with it, so none of them later fails against, and
+    /// releases, the new one.
+    private func releaseOmniEndpoint(after error: Error, endpoint: OmniServerEndpoint) async {
+        // A call that started on an endpoint already replaced has nothing to release.
+        guard omniEndpoint == endpoint, !(error is CancellationError), !(error is OmniVoiceActivityError) else { return }
+        omniEndpoint = nil
+        let streams = omniStreams.values
+        omniStreams.removeAll()
+        for stream in streams {
+            await stream.close()
+        }
+        await OmniSileroVADRuntime.shared.release()
     }
 
     private func omniEndpointIfAvailable() async throws -> OmniServerEndpoint {
@@ -490,16 +507,22 @@ actor ASRSileroOfflineVoiceActivityDetector: ASROfflineVoiceActivityBackend {
         guard !prepared.isEmpty else { return [] }
 
         let profile = MeetingSileroVADSensitivity.stored().configuration()
-        let ranges = try await OmniVoiceActivityRequests.speechTimestamps(
-            samples16k: prepared,
-            options: .init(
-                threshold: profile.onsetProbabilityThreshold,
-                minSpeechDurationMs: Int((profile.minSpeechSeconds * 1_000).rounded(.up)),
-                minSilenceDurationMs: Int((profile.minSilenceSeconds * 1_000).rounded(.up)),
-                speechPadMs: Int((profile.speechPadSeconds * 1_000).rounded(.up))
-            ),
-            endpoint: endpoint
-        )
+        let ranges: [Range<Int>]
+        do {
+            ranges = try await OmniVoiceActivityRequests.speechTimestamps(
+                samples16k: prepared,
+                options: .init(
+                    threshold: profile.onsetProbabilityThreshold,
+                    minSpeechDurationMs: Int((profile.minSpeechSeconds * 1_000).rounded(.up)),
+                    minSilenceDurationMs: Int((profile.minSilenceSeconds * 1_000).rounded(.up)),
+                    speechPadMs: Int((profile.speechPadSeconds * 1_000).rounded(.up))
+                ),
+                endpoint: endpoint
+            )
+        } catch {
+            await releaseOmniEndpoint(after: error, endpoint: endpoint)
+            throw error
+        }
         return ranges.compactMap { range in
             let start = Double(range.lowerBound) / Double(sampleRate)
             let end = Double(range.upperBound) / Double(sampleRate)
@@ -521,6 +544,15 @@ actor ASRSileroOfflineVoiceActivityDetector: ASROfflineVoiceActivityBackend {
         }
         omniEndpoint = endpoint
         return endpoint
+    }
+
+    /// After a transport failure the server may be gone: the next call
+    /// acquires again, which restarts a server that died.
+    private func releaseOmniEndpoint(after error: Error, endpoint: OmniServerEndpoint) async {
+        // A call that started on an endpoint already replaced has nothing to release.
+        guard omniEndpoint == endpoint, !(error is CancellationError), !(error is OmniVoiceActivityError) else { return }
+        omniEndpoint = nil
+        await OmniSileroVADRuntime.shared.release()
     }
 
     private func loadModelIfAvailable() async throws -> SileroVAD {

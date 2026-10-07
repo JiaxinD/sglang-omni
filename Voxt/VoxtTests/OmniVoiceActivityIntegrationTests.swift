@@ -81,6 +81,34 @@ final class OmniVoiceActivityIntegrationTests: XCTestCase {
         await detector.unload()
     }
 
+    /// A server that dies costs one failed call; the next call starts a new one.
+    func testStreamingDetectorRecoversAfterTheServerDies() async throws {
+        let samples = try clip()
+        let detector = ASRSileroStreamingVoiceActivityDetector()
+        let chunk = { (index: Int) in Array(samples[index * 512 ..< (index + 1) * 512]) }
+        let first = try await detector.probability(samples: chunk(0), sampleRate: 16_000, streamID: "recovery")
+        XCTAssertNotNil(first)
+
+        let kill = Process()
+        kill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        kill.arguments = ["-KILL", "-f", "model-kind silero_vad"]
+        try kill.run()
+        kill.waitUntilExit()
+        XCTAssertEqual(kill.terminationStatus, 0)
+
+        var recovered = false
+        for index in 1 ..< 6 {
+            if (try? await detector.probability(samples: chunk(index), sampleRate: 16_000, streamID: "recovery")) != nil {
+                recovered = true
+                break
+            } else {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        XCTAssertTrue(recovered)
+        await detector.unload()
+    }
+
     /// The offline detector finds the same speech ranges as getSpeechTimestamps
     /// with the stored meeting profile, to within one chunk.
     func testOfflineDetectorMatchesMLXAudioVAD() async throws {
