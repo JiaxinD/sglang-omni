@@ -20,10 +20,13 @@ on:
       - ".github/workflows/voxt-mac-ci.yaml"
   workflow_dispatch:
 
-# One Apple Silicon runner: runs queue instead of competing for it.
+# One run per pull request; a new push replaces it. The single Apple Silicon
+# runner takes one job at a time, so runs of different pull requests queue
+# there. (One shared group would keep only the newest pending run and cancel
+# the other pull requests' runs.)
 concurrency:
-  group: voxt-mac-ci
-  cancel-in-progress: false
+  group: voxt-mac-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
