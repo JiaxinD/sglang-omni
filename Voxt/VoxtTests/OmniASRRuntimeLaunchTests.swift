@@ -93,6 +93,43 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
 
         XCTAssertEqual(tail.text, "456789ab")
     }
+
+    func testLineBufferJoinsLinesSplitAcrossReads() {
+        let buffer = OmniLineBuffer()
+        XCTAssertEqual(buffer.append(Data("{\"event\":".utf8)), [])
+        XCTAssertEqual(buffer.append(Data("\"ready\"}\n\n{\"a\":1}\n{\"b".utf8)),
+                       [Data("{\"event\":\"ready\"}".utf8), Data("{\"a\":1}".utf8)])
+        XCTAssertEqual(buffer.append(Data("\":2}\n".utf8)), [Data("{\"b\":2}".utf8)])
+    }
+
+    /// Servers that print nothing must not hold Swift concurrency threads: with
+    /// a blocking read per server, a few live servers starved every task.
+    func testIdleEventStreamsLeaveConcurrencyThreadsFree() throws {
+        let pipes = (0 ..< 64).map { _ in Pipe() }
+        let readers = pipes.map { pipe in
+            Task.detached {
+                var iterator = OmniASRRuntime.eventStream(pipe.fileHandleForReading).makeAsyncIterator()
+                return try await iterator.next()?["event"] as? String
+            }
+        }
+        // Let every reader start waiting for output first.
+        Thread.sleep(forTimeInterval: 0.5)
+        let unrelated = expectation(description: "an unrelated task runs")
+        Task.detached { unrelated.fulfill() }
+        wait(for: [unrelated], timeout: 5)
+
+        try pipes[0].fileHandleForWriting.write(contentsOf: Data("{\"event\":\"ready\"}\n".utf8))
+        let first = expectation(description: "the first stream reads its event")
+        Task.detached {
+            let event = try await readers[0].value
+            XCTAssertEqual(event, "ready")
+            first.fulfill()
+        }
+        wait(for: [first], timeout: 5)
+        for pipe in pipes {
+            try pipe.fileHandleForWriting.close()
+        }
+    }
 }
 
 @MainActor

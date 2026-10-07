@@ -339,25 +339,58 @@ actor OmniASRRuntime {
         return true
     }
 
-    private nonisolated static func eventStream(
+    /// The server's stdout as JSON events. Read by the file handle's own
+    /// dispatch source: a blocking read on the Swift concurrency pool would
+    /// hold one of its few threads for each live server, and with several
+    /// servers (Qwen3-ASR, Silero VAD, Sortformer) starve every other task.
+    nonisolated static func eventStream(
         _ handle: FileHandle
     ) -> AsyncThrowingStream<[String: Any], Error> {
         AsyncThrowingStream { continuation in
-            let reader = Task.detached {
-                do {
-                    for try await line in handle.bytes.lines {
-                        guard let data = line.data(using: .utf8),
-                              let event = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                        else { continue }
-                        continuation.yield(event)
-                    }
+            let lines = OmniLineBuffer()
+            handle.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
                     continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                } else {
+                    do {
+                        for line in lines.append(data) {
+                            if let event = try JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                                continuation.yield(event)
+                            }
+                        }
+                    } catch {
+                        handle.readabilityHandler = nil
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
-            continuation.onTermination = { _ in reader.cancel() }
+            continuation.onTermination = { _ in handle.readabilityHandler = nil }
         }
+    }
+}
+
+/// Splits bytes into newline-terminated lines across reads.
+nonisolated final class OmniLineBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = Data()
+
+    /// The complete lines in what has arrived so far, without their newlines;
+    /// a trailing partial line waits for the next call.
+    func append(_ data: Data) -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        pending.append(data)
+        var lines: [Data] = []
+        while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
+            let line = pending[pending.startIndex ..< newline]
+            if !line.isEmpty {
+                lines.append(Data(line))
+            }
+            pending.removeSubrange(pending.startIndex ... newline)
+        }
+        return lines
     }
 }
 
