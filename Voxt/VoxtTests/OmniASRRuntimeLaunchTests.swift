@@ -1,11 +1,11 @@
 // OmniASRRuntimeLaunchTests.swift
-// Covers how the Omni runtime starts its supervisor process.
+// Covers how the Omni runtime starts its native server process.
 
 import XCTest
 @testable import Voxt
 
 final class OmniASRRuntimeLaunchTests: XCTestCase {
-    func testSupervisorEnvironmentDropsInjectedDynamicLoaderVariables() {
+    func testRuntimeEnvironmentDropsInjectedDynamicLoaderVariables() {
         let inherited = [
             "PATH": "/usr/bin",
             "HOME": "/Users/someone",
@@ -13,22 +13,77 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
             "DYLD_LIBRARY_PATH": "/Xcode/usr/lib",
             "DYLD_FRAMEWORK_PATH": "/Xcode/Frameworks",
             "__XPC_DYLD_LIBRARY_PATH": "/Xcode/usr/lib",
-            "PYTHONPATH": "/somewhere/else",
         ]
 
-        let environment = OmniASRRuntime.supervisorEnvironment(
-            inheriting: inherited,
-            backendDirectory: URL(fileURLWithPath: "/backend", isDirectory: true)
-        )
+        let environment = OmniASRRuntime.runtimeEnvironment(inheriting: inherited)
 
-        XCTAssertEqual(environment["PATH"], "/usr/bin")
-        XCTAssertEqual(environment["HOME"], "/Users/someone")
-        XCTAssertEqual(environment["PYTHONPATH"], "/backend")
-        XCTAssertEqual(environment["PYTHONUNBUFFERED"], "1")
-        XCTAssertEqual(
-            environment.keys.filter { $0.hasPrefix("DYLD_") || $0.hasPrefix("__XPC_DYLD_") },
-            []
+        XCTAssertEqual(environment, ["PATH": "/usr/bin", "HOME": "/Users/someone"])
+    }
+
+    func testLaunchSettingsNeedTheOmniBackendAndARuntimePath() {
+        XCTAssertNil(OmniASRBackend.LaunchSettings(environment: ["VOXT_OMNI_RUNTIME": "/opt/qwen3_asr_server"]))
+        XCTAssertNil(OmniASRBackend.LaunchSettings(environment: ["VOXT_ASR_BACKEND": "omni"]))
+        XCTAssertNil(OmniASRBackend.LaunchSettings(environment: ["VOXT_ASR_BACKEND": "omni", "VOXT_OMNI_RUNTIME": ""]))
+        let settings = OmniASRBackend.LaunchSettings(environment: [
+            "VOXT_ASR_BACKEND": "omni",
+            "VOXT_OMNI_RUNTIME": "/opt/qwen3_asr_server",
+        ])
+        XCTAssertEqual(settings?.runtimeExecutable, URL(fileURLWithPath: "/opt/qwen3_asr_server"))
+    }
+
+    /// The runtime binary is started directly in supervised mode, not through Python.
+    func testLaunchRunsTheRuntimeInSupervisedMode() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voxt-omni-launch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let runtimeExecutable = scratch.appendingPathComponent("qwen3_asr_server")
+        let arguments = scratch.appendingPathComponent("arguments")
+        let environment = scratch.appendingPathComponent("environment")
+        // Records how it was started, then reports a failed start.
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' "$0" "$@" > '\(arguments.path)'
+        env > '\(environment.path)'
+        echo '{"event": "failed", "reason": "recorded"}'
+        """
+        try script.write(to: runtimeExecutable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtimeExecutable.path)
+        let modelDirectory = scratch.appendingPathComponent("model", isDirectory: true)
+        let derivedRoot = scratch.appendingPathComponent("derived", isDirectory: true)
+        let configuration = OmniBackendConfiguration(
+            runtimeExecutable: runtimeExecutable,
+            derivedRoot: derivedRoot,
+            startupTimeoutSeconds: 42
         )
+        let runtime = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: modelDirectory, configuration: configuration)
+
+        do {
+            _ = try await runtime.prepare()
+            XCTFail("the recording runtime never reports ready")
+        } catch {
+            XCTAssertEqual(error as? OmniASRRuntimeError, .launchFailed("recorded"))
+        }
+        await runtime.retire()
+
+        let commandLine = try String(contentsOf: arguments, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .dropLast()
+            .map(String.init)
+        XCTAssertEqual(commandLine, [
+            runtimeExecutable.path,
+            "--supervised",
+            "--model-kind", "qwen3_asr",
+            "--model-directory", modelDirectory.path,
+            "--derived-root", derivedRoot.path,
+            "--startup-timeout-s", "42.0",
+        ])
+        let variables = try String(contentsOf: environment, encoding: .utf8)
+            .split(separator: "\n")
+            .compactMap { $0.split(separator: "=", maxSplits: 1).first.map(String.init) }
+        XCTAssertFalse(variables.contains("PYTHONPATH"))
+        XCTAssertFalse(variables.contains("PYTHONUNBUFFERED"))
+        XCTAssertEqual(variables.filter { $0.hasPrefix("DYLD_") || $0.hasPrefix("__XPC_DYLD_") }, [])
     }
 
     func testDiagnosticTailKeepsOnlyTheEndOfLongOutput() {
@@ -55,8 +110,7 @@ final class OmniModelManagerRecoveryTests: XCTestCase {
     func testALoadedOmniRuntimeThatStoppedServingIsReplacedOnTheNextLoad() async throws {
         let scratch = FileManager.default.temporaryDirectory
         let configuration = OmniBackendConfiguration(
-            pythonExecutable: URL(fileURLWithPath: "/usr/bin/false"),
-            backendDirectory: scratch,
+            runtimeExecutable: URL(fileURLWithPath: "/usr/bin/false"),
             derivedRoot: scratch
         )
         let loads = LoadCounter()

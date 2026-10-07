@@ -563,8 +563,10 @@ int main(int argc, char **argv) {
   }
 
   const std::string reason = stop.Wait();
+  // Every decode in flight is cancelled and the process exits at once:
+  // civetweb's own stop waits out its 2 s poll quantum, and an owner stopping
+  // the server has no use for the open responses.
   worker->CancelAll();
-  mg_stop(context);
   if (reason == "shutdown") {
     Emit({{"event", "stopped"}});
   } else {
