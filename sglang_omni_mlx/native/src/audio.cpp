@@ -97,7 +97,8 @@ std::vector<float> BuildMelFilterBank() {
 std::vector<float> BuildPeriodicHannWindow() {
   std::vector<float> window(kFftSize);
   const float denominator = static_cast<float>(kFftSize);
-  const float pi = static_cast<float>(M_PI);
+  // Swift's Float.pi: pi rounded toward zero, one step below (float)M_PI.
+  const float pi = std::nextafter(static_cast<float>(M_PI), 0.0f);
   for (int n = 0; n < kFftSize; ++n) {
     window[n] =
         0.5f *
