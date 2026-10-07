@@ -126,6 +126,10 @@ def provision_corpus(data_root: Path) -> Path:
         raise SystemExit("the rebuilt corpus does not match corpus/v1.sha256")
     else:
         pass
+    # The clips are all later runs read: the archives and their extracted
+    # audio (about 2 GB) are only needed to rebuild them.
+    shutil.rmtree(corpus_root / "raw", ignore_errors=True)
+    shutil.rmtree(extracted, ignore_errors=True)
     return corpus_directory
 
 
