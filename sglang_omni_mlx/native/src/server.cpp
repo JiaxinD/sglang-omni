@@ -483,10 +483,13 @@ int main(int argc, char **argv) {
   mg_init_library(0);
   const std::string listening =
       arguments.host + ":" + std::to_string(arguments.port);
+  // civetweb serves each connection on its own worker thread, and an open
+  // WebSocket keeps its thread: every VAD stream Voxt opens (one per stream
+  // ID, across all its detectors) holds one, so allow far more than it uses.
   const char *options[] = {"listening_ports",
                            listening.c_str(),
                            "num_threads",
-                           "16",
+                           "64",
                            "request_timeout_ms",
                            "3600000",
                            "websocket_timeout_ms",

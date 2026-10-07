@@ -287,3 +287,17 @@ def test_text_non_finite_and_oversized_messages_close_the_stream(
         assert "error" in json.loads(socket.recv(timeout=30))
         with pytest.raises(Exception):
             socket.recv(timeout=30)
+
+
+def test_many_open_streams_are_served(server: Server) -> None:
+    """Each open stream holds a server thread; 40 at once must all answer."""
+    chunk = samples(STREAM_CLIP)[:512].astype("<f4").tobytes()
+    sockets = [server.stream() for _ in range(40)]
+    try:
+        for socket in sockets:
+            socket.send(chunk)
+        for socket in sockets:
+            assert json.loads(socket.recv(timeout=10))["probability"] is not None
+    finally:
+        for socket in sockets:
+            socket.close()
