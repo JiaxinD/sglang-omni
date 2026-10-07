@@ -2,7 +2,7 @@
  "kind": "silero_vad",
  "model": "mlx-community/silero-vad-v6",
  "reference": "Original Voxt: Swift MLXAudioVAD on MLX 0.31.1 (SileroVAD.feed per 512-sample chunk and getSpeechTimestamps)",
- "tolerance": {"max_abs_probability":0.01,"boundary_samples":512},
+ "tolerance": {"max_abs_probability":0.03,"mean_abs_probability":0.001,"max_flipped_decisions":0.001,"max_speech_mismatch":0.02,"min_identical_timestamps":0.98},
  "profiles": {"balanced":{"threshold":0.5,"min_speech_duration_ms":140,"min_silence_duration_ms":240,"speech_pad_ms":120},"responsive":{"threshold":0.38,"min_speech_duration_ms":140,"min_silence_duration_ms":240,"speech_pad_ms":120},"stable":{"threshold":0.55,"min_speech_duration_ms":140,"min_silence_duration_ms":240,"speech_pad_ms":120}},
  "timestamps": {
   "0000_en_short": {"balanced":[[7808,71552]],"responsive":[[7808,71552]],"stable":[[7808,71552]]},

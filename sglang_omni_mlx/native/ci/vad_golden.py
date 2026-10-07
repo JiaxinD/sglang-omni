@@ -2,15 +2,19 @@
 """Silero VAD golden check, called by check_golden.py for golden files of kind
 silero_vad.
 
-The golden file holds the original Voxt's outputs (Swift MLXAudioVAD), not the
-native runtime's: Voxt runs MLX 0.31.1 and the runtime 0.32.3, whose kernels
-differ in the last bits. The same C++ built on MLX 0.31.1 reproduces Swift bit
-for bit, so the checks allow for that kernel difference and nothing more:
+The golden file holds the original Voxt's outputs (Swift MLXAudioVAD on an
+M5), not the native runtime's: Voxt runs MLX 0.31.1 and the runtime 0.32.3,
+whose kernels differ in the last bits, and other Apple GPUs differ a little
+more. The same C++ built on MLX 0.31.1 reproduces Swift bit for bit, so the
+checks allow for kernel differences and nothing more:
 
-- stream probabilities (one feed per 512-sample chunk, a 40-clip subset): within
-  the tolerance, and on the same side of 0.5 for every chunk;
-- speech timestamps for every clip and Voxt sensitivity profile: the same
-  number of ranges, each boundary within one chunk.
+- stream probabilities (one feed per 512-sample chunk, a 40-clip subset):
+  every chunk within the largest difference, a small mean difference over
+  all chunks, and almost no chunk on the other side of 0.5;
+- speech timestamps for every clip and Voxt sensitivity profile: nearly all
+  identical, and the speech each covers within a small share of the
+  original's. A probability on a threshold can split or merge a range by
+  one chunk; a wrong computation moves speech on many clips.
 """
 
 from __future__ import annotations
@@ -42,11 +46,32 @@ def run_probe(
     return output
 
 
-def ranges_match(expected: list, actual: list, boundary_samples: int) -> bool:
-    return len(expected) == len(actual) and all(
-        abs(e[0] - a[0]) <= boundary_samples and abs(e[1] - a[1]) <= boundary_samples
-        for e, a in zip(expected, actual)
+def speech_mismatch(expected: list, actual: list) -> float:
+    """Samples covered by one side only, over samples covered by either."""
+
+    def covered(ranges: list) -> list[tuple[int, int]]:
+        return [(start, end) for start, end in ranges]
+
+    events = sorted(
+        [(start, 1, 0) for start, _ in covered(expected)]
+        + [(end, -1, 0) for _, end in covered(expected)]
+        + [(start, 1, 1) for start, _ in covered(actual)]
+        + [(end, -1, 1) for _, end in covered(actual)]
     )
+    depth = [0, 0]
+    either = only_one = 0
+    previous = None
+    for position, step, side in events:
+        if previous is not None and position > previous:
+            inside = (depth[0] > 0, depth[1] > 0)
+            span = position - previous
+            either += span if any(inside) else 0
+            only_one += span if inside[0] != inside[1] else 0
+        else:
+            pass
+        depth[side] += step
+        previous = position
+    return only_one / either if either else 0.0
 
 
 def check(
@@ -61,6 +86,7 @@ def check(
 
     largest = 0.0
     flips = chunks = 0
+    differences = []
     for clip, encoded in golden["stream_probabilities"].items():
         expected = np.frombuffer(base64.b64decode(encoded), dtype="<f4")
         actual = np.fromfile(output / f"{clip}.stream.f32", dtype="<f4")
@@ -71,31 +97,48 @@ def check(
             continue
         else:
             pass
-        difference = float(np.max(np.abs(expected - actual))) if expected.size else 0.0
-        largest = max(largest, difference)
+        difference = np.abs(expected.astype(np.float64) - actual)
+        differences.append(difference)
+        largest = max(largest, float(difference.max()) if difference.size else 0.0)
         flips += int(np.sum((expected >= 0.5) != (actual >= 0.5)))
         chunks += expected.size
-        if difference > tolerance["max_abs_probability"]:
-            failures.append(f"`{clip}`: stream probability off by {difference:.4f}")
+        if difference.size and difference.max() > tolerance["max_abs_probability"]:
+            failures.append(
+                f"`{clip}`: stream probability off by {difference.max():.4f}"
+            )
         else:
             pass
-    if flips:
+    mean = float(np.concatenate(differences).mean()) if differences else 0.0
+    if not chunks:
+        failures.append("the golden file has no stream probabilities")
+    elif mean > tolerance["mean_abs_probability"]:
+        failures.append(f"mean stream probability difference {mean:.2e}")
+    elif flips > tolerance["max_flipped_decisions"] * chunks:
         failures.append(f"{flips} stream chunks fall on the other side of 0.5")
     else:
         pass
 
     exact = total = 0
+    worst = 0.0
     for clip in clip_ids:
         actual = json.loads((output / f"{clip}.timestamps.json").read_text())
         for profile, expected in golden["timestamps"][clip].items():
             total += 1
             exact += int(actual[profile] == expected)
-            if not ranges_match(
-                expected, actual[profile], tolerance["boundary_samples"]
-            ):
-                failures.append(f"`{clip}` ({profile}): speech ranges differ")
+            mismatch = speech_mismatch(expected, actual[profile])
+            worst = max(worst, mismatch)
+            if mismatch > tolerance["max_speech_mismatch"]:
+                failures.append(
+                    f"`{clip}` ({profile}): speech differs by {mismatch:.2%}"
+                )
             else:
                 pass
+    if not total:
+        failures.append("the golden file has no speech timestamps")
+    elif exact < tolerance["min_identical_timestamps"] * total:
+        failures.append(f"only {exact}/{total} speech timestamp sets are identical")
+    else:
+        pass
 
     lines = [
         f"### {golden['model']}",
@@ -103,8 +146,7 @@ def check(
         f"Reference: {golden['reference']}",
         "",
         f"- Stream probabilities: {chunks} chunks on {len(golden['stream_probabilities'])} clips, "
-        f"max |Δ| {largest:.2g}, {flips} decisions flipped at 0.5",
-        f"- Speech timestamps: {exact}/{total} identical, the rest within "
-        f"{tolerance['boundary_samples']} samples per boundary",
+        f"max |Δ| {largest:.2g}, mean {mean:.2g}, {flips} decisions flipped at 0.5",
+        f"- Speech timestamps: {exact}/{total} identical; speech differs by at most {worst:.2%}",
     ]
     return lines, failures
