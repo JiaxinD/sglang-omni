@@ -214,6 +214,7 @@ jobs:
             -only-testing:VoxtTests/OmniTranscriptionRequestTests \
             -only-testing:VoxtTests/OmniRealtimeSessionUpdateTests \
             -only-testing:VoxtTests/OmniASRRuntimeLaunchTests \
+            -only-testing:VoxtTests/OmniVoiceActivityTests \
             -only-testing:VoxtTests/OmniModelManagerRecoveryTests \
             -only-testing:VoxtTests/OmniFailurePathTests \
             -only-testing:VoxtTests/MLXModelManagerLifecycleTests \
