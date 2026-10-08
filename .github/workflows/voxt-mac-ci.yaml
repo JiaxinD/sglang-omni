@@ -161,20 +161,32 @@ jobs:
           fi
 
       # The runner's active developer directory may be the Command Line Tools,
-      # which have no xcodebuild: use the newest installed Xcode instead.
+      # which have no xcodebuild: use the newest Xcode installed anywhere the
+      # runner's user can read (Spotlight, /Applications, ~/Applications).
       - name: Select Xcode
         run: |
-          if ! /usr/bin/xcrun --find xcodebuild >/dev/null 2>&1 || ! xcodebuild -version >/dev/null 2>&1; then
-            xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if /usr/bin/xcrun --find xcodebuild >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1; then
+            :
+          else
+            candidates="$( { mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null; \
+              ls -d /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app 2>/dev/null; } | sort -u )"
+            xcode=""
+            while IFS= read -r app; do
+              if [ -n "$app" ] && [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ]; then
+                xcode="$app"
+              else
+                :
+              fi
+            done <<< "$(echo "$candidates" | sort -V)"
             if [ -z "$xcode" ]; then
-              echo "::error::No Xcode in /Applications; the runner needs Xcode to build Voxt."
+              echo "runner user: $(whoami); xcode-select -p: $(xcode-select -p 2>&1)"
+              echo "Xcode bundles found: ${candidates:-none}"
+              echo "::error::No usable Xcode for the runner's user; install Xcode in /Applications or run sudo xcode-select -s <Xcode.app> on the runner."
               exit 1
             else
               echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
               export DEVELOPER_DIR="$xcode/Contents/Developer"
             fi
-          else
-            :
           fi
           xcodebuild -version
 
