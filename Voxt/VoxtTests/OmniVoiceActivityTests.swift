@@ -29,4 +29,38 @@ final class OmniVoiceActivityTests: XCTestCase {
         XCTAssertThrowsError(try OmniVoiceActivityRequests.ranges(fromResponse: Data(#"{"timestamps":[{"start":9,"end":3}]}"#.utf8)))
         XCTAssertThrowsError(try OmniVoiceActivityRequests.ranges(fromResponse: Data(#"{"detail":"x"}"#.utf8)))
     }
+
+    /// Detectors that find the shared server dead at the same time all get
+    /// the same replacement.
+    func testConcurrentRecoveryStartsOneReplacement() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voxt-vad-recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        // Reports ready with its own pid, then exits: every server "dies" at once.
+        let server = scratch.appendingPathComponent("qwen3_asr_server")
+        let script = #"""
+        #!/bin/sh
+        echo "{\"event\":\"ready\",\"host\":\"127.0.0.1\",\"port\":1,\"model_name\":\"m\",\"server_pid\":$$}"
+        sleep 0.2
+        """#
+        try script.write(to: server, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: server.path)
+        let configuration = OmniBackendConfiguration(runtimeExecutable: server, derivedRoot: scratch)
+        let shared = OmniSileroVADRuntime(configuration: { configuration })
+
+        _ = try await shared.acquire(modelDirectory: scratch)
+        for _ in 0 ..< 10 {
+            try await Task.sleep(for: .milliseconds(600))
+            async let first = shared.acquire(modelDirectory: scratch)
+            async let second = shared.acquire(modelDirectory: scratch)
+            async let third = shared.acquire(modelDirectory: scratch)
+            let endpoints = try await [first, second, third]
+            let pids = Set(endpoints.map(\.serverProcessIdentifier))
+            XCTAssertEqual(pids.count, 1, "concurrent recoveries started \(pids.count) servers")
+        }
+        for _ in 0 ..< 31 {
+            await shared.release()
+        }
+    }
 }

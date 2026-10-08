@@ -10,27 +10,41 @@ actor OmniSileroVADRuntime {
     private var runtime: OmniASRRuntime?
     private var modelDirectory: URL?
     private var leases = 0
+    private let configuration: @Sendable () -> OmniBackendConfiguration?
+
+    init(
+        configuration: @escaping @Sendable () -> OmniBackendConfiguration? = {
+            OmniASRBackend.configuration(derivedRoot: ModelStorageDirectoryManager.resolvedDerivedRootURL())
+        }
+    ) {
+        self.configuration = configuration
+    }
 
     /// Whether Silero runs on the native runtime in this process.
     nonisolated static var isEnabled: Bool { OmniASRBackend.launchSettings != nil }
 
     /// A ready endpoint, held until `release()`.
     func acquire(modelDirectory directory: URL) async throws -> OmniServerEndpoint {
-        guard let configuration = OmniASRBackend.configuration(
-            derivedRoot: ModelStorageDirectoryManager.resolvedDerivedRootURL()
-        ) else {
+        guard let configuration = configuration() else {
             throw OmniASRRuntimeError.launchFailed("The native runtime is not configured.")
         }
         leases += 1
-        if let runtime, modelDirectory != directory {
-            // The model moved (storage root changed): serve the new copy.
-            self.runtime = nil
-            await runtime.retire()
-        } else if let runtime, await !runtime.canServe {
-            // Its server failed or exited; holders of the old endpoint come
-            // back here after their next failed request.
-            self.runtime = nil
-            await runtime.retire()
+        // Drop a runtime whose model moved (storage root changed) or whose
+        // server failed or exited; holders of the old endpoint come back here
+        // after their next failed request. Checking suspends, and another
+        // acquire may replace the runtime meanwhile: re-read it after every
+        // suspension and drop only the runtime that was checked.
+        while let current = self.runtime {
+            let usable = modelDirectory == directory
+            if usable, await current.canServe {
+                break
+            } else if self.runtime === current {
+                self.runtime = nil
+                modelDirectory = nil
+                await current.retire()
+            } else {
+                continue
+            }
         }
         let runtime: OmniASRRuntime
         if let current = self.runtime {
