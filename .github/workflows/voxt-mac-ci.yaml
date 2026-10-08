@@ -189,6 +189,14 @@ jobs:
             fi
           fi
           xcodebuild -version
+          # Since Xcode 26 the Metal compiler is a separate component, which
+          # mlx-swift needs for its kernels; it stays installed once fetched.
+          if ! xcrun --find metal >/dev/null 2>&1 || ! xcrun metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          else
+            :
+          fi
+          xcrun metal --version
 
       - name: Build for testing
         working-directory: Voxt
