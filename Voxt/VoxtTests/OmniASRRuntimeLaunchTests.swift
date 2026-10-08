@@ -86,6 +86,37 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
         XCTAssertEqual(variables.filter { $0.hasPrefix("DYLD_") || $0.hasPrefix("__XPC_DYLD_") }, [])
     }
 
+    /// A server that never reports is stopped at the startup deadline, and the
+    /// launch fails instead of waiting forever.
+    func testAServerThatNeverReportsFailsAtTheStartupDeadline() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voxt-omni-deadline-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let runtimeExecutable = scratch.appendingPathComponent("qwen3_asr_server")
+        try "#!/bin/sh\nexec sleep 60\n".write(to: runtimeExecutable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtimeExecutable.path)
+        let configuration = OmniBackendConfiguration(
+            runtimeExecutable: runtimeExecutable,
+            derivedRoot: scratch,
+            startupTimeoutSeconds: 0.5
+        )
+        let runtime = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: scratch, configuration: configuration)
+
+        let startedAt = ContinuousClock.now
+        do {
+            _ = try await runtime.prepare()
+            XCTFail("the server never reports ready")
+        } catch {
+            XCTAssertEqual(
+                error as? OmniASRRuntimeError,
+                .launchFailed("the server did not report ready within 0.5 s")
+            )
+        }
+        XCTAssertLessThan(startedAt.duration(to: .now), .seconds(10))
+        await runtime.retire()
+    }
+
     func testDiagnosticTailKeepsOnlyTheEndOfLongOutput() {
         let tail = OmniDiagnosticTail(limit: 8)
         tail.append(Data("0123456789".utf8))

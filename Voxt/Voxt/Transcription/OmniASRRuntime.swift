@@ -283,11 +283,28 @@ actor OmniASRRuntime {
         }
         serverProcess = process
         controlPipe = control
+        // A server that never reports (a stalled model load) is killed at the
+        // startup deadline: its stdout then ends and the launch fails.
+        let timedOut = OmniStartupDeadline()
+        let serverPID = process.processIdentifier
+        let seconds = configuration.startupTimeoutSeconds
+        let deadline = Task.detached {
+            try await Task.sleep(for: .seconds(seconds))
+            timedOut.expire()
+            kill(serverPID, SIGKILL)
+        }
+        defer { deadline.cancel() }
         var iterator = Self.eventStream(events.fileHandleForReading).makeAsyncIterator()
         guard let first = try await iterator.next() else {
-            throw OmniASRRuntimeError.launchFailed(
-                "server exited before reporting: \(stderrTail.text)"
-            )
+            if timedOut.expired {
+                throw OmniASRRuntimeError.launchFailed(
+                    "the server did not report ready within \(String(format: "%g", seconds)) s"
+                )
+            } else {
+                throw OmniASRRuntimeError.launchFailed(
+                    "server exited before reporting: \(stderrTail.text)"
+                )
+            }
         }
         guard first["event"] as? String == "ready",
               let host = first["host"] as? String,
@@ -368,6 +385,24 @@ actor OmniASRRuntime {
             }
             continuation.onTermination = { _ in handle.readabilityHandler = nil }
         }
+    }
+}
+
+/// Whether a launch's startup deadline passed.
+nonisolated final class OmniStartupDeadline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var passed = false
+
+    func expire() {
+        lock.lock()
+        passed = true
+        lock.unlock()
+    }
+
+    var expired: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return passed
     }
 }
 
