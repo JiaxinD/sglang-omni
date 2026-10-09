@@ -21,6 +21,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <stdexcept>
@@ -392,10 +393,20 @@ Arguments ParseArguments(int argc, char **argv) {
       throw std::invalid_argument("unknown argument " + flag);
     }
   }
+  const double max_segment_samples =
+      arguments.max_segment_seconds * qwen3_asr::kSampleRate;
   if (model_kind != "qwen3_asr") {
     throw std::invalid_argument("only --model-kind qwen3_asr is served");
   } else if (arguments.model_path.empty()) {
     throw std::invalid_argument("--model-path is required");
+  } else if (arguments.decode_interval_ms <= 0) {
+    throw std::invalid_argument("--decode-interval-ms must be positive");
+  } else if (arguments.first_decode_ms < 0) {
+    throw std::invalid_argument("--first-decode-ms must not be negative");
+  } else if (!(max_segment_samples >= 1 &&
+               max_segment_samples <= std::numeric_limits<int>::max())) {
+    throw std::invalid_argument(
+        "--max-segment-seconds must span one sample to 134217 s");
   } else {
   }
   if (arguments.model_name.empty()) {

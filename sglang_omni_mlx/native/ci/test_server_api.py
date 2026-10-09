@@ -324,3 +324,29 @@ def test_only_qwen3_asr_is_served() -> None:
     )
     assert completed.returncode == 2
     assert completed.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--max-segment-seconds", "0"),
+        ("--max-segment-seconds", "0.00001"),
+        ("--decode-interval-ms", "0"),
+        ("--first-decode-ms", "-1"),
+    ],
+)
+def test_invalid_realtime_settings_fail_at_startup(flag: str, value: str) -> None:
+    completed = subprocess.run(
+        [
+            str(Path(RUNTIME_BIN) / "qwen3_asr_server"),
+            "--model-directory",
+            "x",
+            flag,
+            value,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 2
+    assert flag in completed.stderr
