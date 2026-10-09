@@ -191,7 +191,8 @@ def test_invalid_requests_are_rejected(server: Server, fields: dict, wav) -> Non
         fields, clip("0006_en_short") if wav == "wav" else wav
     )
     assert status == 400
-    assert "detail" in json.loads(body)
+    detail = json.loads(body)["detail"]
+    assert all(name in detail for name in fields)
 
 
 def long_wav(seconds: int) -> bytes:

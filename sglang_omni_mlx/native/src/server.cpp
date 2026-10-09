@@ -62,7 +62,8 @@ int WriteJson(mg_connection *connection, int status, const Json &body) {
   WriteResponse(connection, status,
                 status == 200   ? "OK"
                 : status == 400 ? "Bad Request"
-                                : "Error",
+                : status == 405 ? "Method Not Allowed"
+                                : "Internal Server Error",
                 "application/json", body.dump());
   return status;
 }
@@ -165,7 +166,11 @@ int HandleTranscriptions(mg_connection *connection, void *data) {
     const auto max_new_tokens = Field(*form, "max_new_tokens");
     if (max_new_tokens.has_value() && !max_new_tokens->empty()) {
       size_t parsed = 0;
-      options.max_new_tokens = std::stoi(*max_new_tokens, &parsed);
+      try {
+        options.max_new_tokens = std::stoi(*max_new_tokens, &parsed);
+      } catch (const std::invalid_argument &) {
+        // parsed stays 0, so the check below names the field.
+      }
       if (parsed != max_new_tokens->size()) {
         throw std::invalid_argument("max_new_tokens must be an integer");
       } else {
