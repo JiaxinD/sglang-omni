@@ -8,10 +8,7 @@
 // --supervised speaks Voxt's supervisor protocol on stdin/stdout: a JSON
 // "ready" event once serving (or "failed"), "stopped" after a shutdown
 // command; end of stdin or a termination signal stops the server.
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <signal.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -319,19 +316,6 @@ void SocketClosed(const mg_connection *connection, void *) {
   }
 }
 
-int FreeLoopbackPort() {
-  const int descriptor = socket(AF_INET, SOCK_STREAM, 0);
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = 0;
-  bind(descriptor, reinterpret_cast<sockaddr *>(&address), sizeof(address));
-  socklen_t length = sizeof(address);
-  getsockname(descriptor, reinterpret_cast<sockaddr *>(&address), &length);
-  close(descriptor);
-  return ntohs(address.sin_port);
-}
-
 std::string RandomHex(int length) {
   std::mt19937_64 generator{std::random_device{}()};
   static constexpr char kHex[] = "0123456789abcdef";
@@ -411,10 +395,6 @@ Arguments ParseArguments(int argc, char **argv) {
   }
   if (arguments.model_name.empty()) {
     arguments.model_name = "voxt-qwen3_asr-" + RandomHex(12);
-  } else {
-  }
-  if (arguments.port == 0) {
-    arguments.port = FreeLoopbackPort();
   } else {
   }
   return arguments;
@@ -552,6 +532,11 @@ int main(int argc, char **argv) {
     return 1;
   } else {
   }
+  // Port 0 lets the system pick a free port when the socket binds.
+  mg_server_port server_port{};
+  mg_get_server_ports(context, 1, &server_port);
+  const std::string endpoint =
+      arguments.host + ":" + std::to_string(server_port.port);
   mg_set_request_handler(context, "/health$", HandleHealth, &state);
   mg_set_request_handler(context, "/v1/models$", HandleModels, &state);
   mg_set_request_handler(context, "/v1/audio/transcriptions$",
@@ -564,12 +549,12 @@ int main(int argc, char **argv) {
   if (arguments.supervised) {
     Emit({{"event", "ready"},
           {"host", arguments.host},
-          {"port", arguments.port},
+          {"port", server_port.port},
           {"model_name", arguments.model_name},
           {"server_pid", static_cast<int>(getpid())},
           {"startup_s", std::round(startup_seconds * 1000) / 1000}});
   } else {
-    std::cerr << "serving " << arguments.model_name << " on " << listening
+    std::cerr << "serving " << arguments.model_name << " on " << endpoint
               << " after " << startup_seconds << " s\n";
   }
 
