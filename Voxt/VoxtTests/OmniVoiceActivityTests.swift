@@ -37,7 +37,7 @@ final class OmniVoiceActivityTests: XCTestCase {
             .appendingPathComponent("voxt-vad-recovery-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
-        // Reports ready with its own pid, then exits: every server "dies" at once.
+        // Note (Jiaxin Deng): reports ready with its own pid, then exits, so every server "dies" at once.
         let server = scratch.appendingPathComponent("qwen3_asr_server")
         let script = #"""
         #!/bin/sh

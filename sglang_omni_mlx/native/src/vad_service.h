@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Silero VAD over the native server, for Voxt's two detectors:
-//
-//   POST /v1/vad/speech_timestamps   multipart: file (16 kHz WAV), optional
-//       threshold, min_speech_duration_ms, min_silence_duration_ms,
-//       speech_pad_ms -> {"sample_rate", "timestamps": [{"start","end"}]}
-//       in samples (Swift getSpeechTimestamps).
-//   WS /v1/vad/stream   one socket per audio stream. Binary messages carry
-//       16 kHz float32 little-endian samples; each whole 512-sample chunk
-//       advances the stream's state, and every message is answered with
-//       {"probability": p} for its last chunk, or null when none completed
-//       (Swift ASRSileroStreamingVoiceActivityDetector.probability).
+// Silero VAD for Voxt's detectors: POST /v1/vad/speech_timestamps (speech
+// ranges in samples) and WS /v1/vad/stream (16 kHz float32 LE samples in,
+// {"probability": p} of each message's last whole chunk or null out).
 #pragma once
 
 #include <filesystem>

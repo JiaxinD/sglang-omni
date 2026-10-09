@@ -17,11 +17,8 @@ namespace {
 
 using omni_server::Json;
 
-// The largest message a stream accepts: 30 s of audio.
 constexpr size_t kMaxMessageBytes = 30 * kSampleRate * sizeof(float);
 
-// One socket's stream: its model state, the samples of an unfinished chunk
-// and a partial (fragmented) message.
 struct SocketState {
   StreamState stream;
   std::vector<float> pending;
@@ -145,7 +142,7 @@ int SocketData(mg_connection *connection, int bits, char *data, size_t length,
     return 1;
   } else {
   }
-  // Audio comes in binary messages only, checked before it is buffered.
+  // Note (Jiaxin Deng): checked before buffering, so a stream holds <= 30 s.
   if (opcode == MG_WEBSOCKET_OPCODE_TEXT ||
       socket->fragments.size() + length > kMaxMessageBytes) {
     SendText(connection,
@@ -192,7 +189,7 @@ int SocketData(mg_connection *connection, int bits, char *data, size_t length,
                                             : Json(probabilities.back())}};
     return SendText(connection, reply.dump()) ? 1 : 0;
   } catch (const std::exception &error) {
-    // The socket closes; the type alone is logged, never audio.
+    // Note (Jiaxin Deng): only the exception type is logged, never audio.
     std::cerr << "voice activity stream failed: " << typeid(error).name()
               << "\n";
     return 0;

@@ -80,7 +80,7 @@ final class OmniVADBenchmarkTests: XCTestCase {
             settings.writer.write(["event": "clip", "run": settings.run, "id": clip.id,
                                    "audio_seconds": Double(samples.count) / 16_000,
                                    "ms": clipStart.duration(to: .now).msDouble, "call_ms": calls])
-            // One clip is one session: Voxt resets the detector between sessions.
+            // Note (Jiaxin Deng): one clip is one session; Voxt resets the detector between sessions.
             await detector.reset()
         }
         let done = sampler.snapshot()

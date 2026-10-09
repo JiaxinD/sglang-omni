@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Writes Silero VAD per-chunk probabilities for WAV files, for parity checks
-// against Voxt's Swift MLXAudioVAD.
-//
+// Writes Silero VAD probabilities (and speech ranges with --profiles) of WAV
+// files, for parity checks against Voxt's Swift MLXAudioVAD.
 //   silero_vad_probe --model-path DIR --out DIR [--profiles FILE] a.wav...
-// For each a.wav: <out>/a.stream.f32 (one feed per whole 512-sample chunk, as
-// Voxt's streaming detector) and <out>/a.batch.f32 (zero-padded tail, as
-// predictProba). With --profiles, a JSON object of named timestamp options
-// ({"name": {"threshold", "min_speech_duration_ms",
-// "min_silence_duration_ms", "speech_pad_ms"}}), also <out>/a.timestamps.json:
-// each profile's speech ranges in samples, as Swift getSpeechTimestamps.
 #include <filesystem>
 #include <fstream>
 #include <iostream>

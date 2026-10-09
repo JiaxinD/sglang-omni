@@ -389,11 +389,11 @@ actor ASRSileroStreamingVoiceActivityDetector {
             return probability
         } catch {
             guard omniStreams[streamID] === stream else {
-                // reset() or a sibling failure already dropped this stream; the server is not at fault.
+                // Note (Jiaxin Deng): reset() or a sibling failure already dropped this stream; the server is not at fault.
                 await stream.close()
                 return nil
             }
-            // A broken stream starts over on the next call, as after reset().
+            // Note (Jiaxin Deng): a broken stream starts over on the next call, as after reset().
             omniStreams[streamID] = nil
             await stream.close()
             await releaseOmniEndpoint(after: error, endpoint: endpoint)
@@ -401,12 +401,10 @@ actor ASRSileroStreamingVoiceActivityDetector {
         }
     }
 
-    /// After a transport failure the server may be gone: the next call
-    /// acquires again, which restarts a server that died. Every stream on the
-    /// old endpoint closes with it, so none of them later fails against, and
-    /// releases, the new one.
+    /// After a transport failure the next call acquires again, restarting a dead server; every
+    /// stream on the old endpoint closes so none later fails against, and releases, the new one.
     private func releaseOmniEndpoint(after error: Error, endpoint: OmniServerEndpoint) async {
-        // A call that started on an endpoint already replaced has nothing to release.
+        // Note (Jiaxin Deng): a call that started on an endpoint already replaced has nothing to release.
         guard omniEndpoint == endpoint, !(error is CancellationError), !(error is OmniVoiceActivityError) else { return }
         omniEndpoint = nil
         let streams = omniStreams.values
@@ -425,12 +423,12 @@ actor ASRSileroStreamingVoiceActivityDetector {
         let directory = try await SileroVADModelProvisioner.shared.ensureModelDirectory()
         let endpoint = try await OmniSileroVADRuntime.shared.acquire(modelDirectory: directory)
         if unloadGeneration != generation {
-            // unload() ran while this call waited, so it could not return this lease.
+            // Note (Jiaxin Deng): unload() ran while this call waited, so it could not return this lease.
             await OmniSileroVADRuntime.shared.release()
             throw CancellationError()
         }
         if let omniEndpoint {
-            // Another call acquired one while this one waited.
+            // Note (Jiaxin Deng): another call acquired one while this one waited.
             await OmniSileroVADRuntime.shared.release()
             return omniEndpoint
         }
@@ -552,12 +550,12 @@ actor ASRSileroOfflineVoiceActivityDetector: ASROfflineVoiceActivityBackend {
         let directory = try await SileroVADModelProvisioner.shared.ensureModelDirectory()
         let endpoint = try await OmniSileroVADRuntime.shared.acquire(modelDirectory: directory)
         if unloadGeneration != generation {
-            // unload() ran while this call waited, so it could not return this lease.
+            // Note (Jiaxin Deng): unload() ran while this call waited, so it could not return this lease.
             await OmniSileroVADRuntime.shared.release()
             throw CancellationError()
         }
         if let omniEndpoint {
-            // Another call acquired one while this one waited.
+            // Note (Jiaxin Deng): another call acquired one while this one waited.
             await OmniSileroVADRuntime.shared.release()
             return omniEndpoint
         }
@@ -568,7 +566,7 @@ actor ASRSileroOfflineVoiceActivityDetector: ASROfflineVoiceActivityBackend {
     /// After a transport failure the server may be gone: the next call
     /// acquires again, which restarts a server that died.
     private func releaseOmniEndpoint(after error: Error, endpoint: OmniServerEndpoint) async {
-        // A call that started on an endpoint already replaced has nothing to release.
+        // Note (Jiaxin Deng): a call that started on an endpoint already replaced has nothing to release.
         guard omniEndpoint == endpoint, !(error is CancellationError), !(error is OmniVoiceActivityError) else { return }
         omniEndpoint = nil
         await OmniSileroVADRuntime.shared.release()

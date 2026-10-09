@@ -1,21 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Silero VAD golden check, called by check_golden.py for golden files of kind
-silero_vad.
-
-The golden file holds the original Voxt's outputs (Swift MLXAudioVAD on an
-M5), not the native runtime's: Voxt runs MLX 0.31.1 and the runtime 0.32.3,
-whose kernels differ in the last bits, and other Apple GPUs differ a little
-more. The same C++ built on MLX 0.31.1 reproduces Swift bit for bit, so the
-checks allow for kernel differences and nothing more:
-
-- stream probabilities (one feed per 512-sample chunk, a 40-clip subset):
-  every chunk within the largest difference, a small mean difference over
-  all chunks, and almost no chunk on the other side of 0.5;
-- speech timestamps for every clip and Voxt sensitivity profile: nearly all
-  identical, and the speech each covers within a small share of the
-  original's. A probability on a threshold can split or merge a range by
-  one chunk; a wrong computation moves speech on many clips.
-"""
+"""Silero VAD golden check for check_golden.py, against the original Voxt's outputs
+(Swift on MLX 0.31.1). The runtime's MLX 0.32.3 kernels differ in the last bits, so
+the checks allow for kernel differences and nothing more."""
 
 from __future__ import annotations
 

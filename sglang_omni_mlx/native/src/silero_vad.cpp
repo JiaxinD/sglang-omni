@@ -54,7 +54,7 @@ SileroVAD::SileroVAD(const std::filesystem::path &model_directory) {
     }
     auto [loaded, metadata] = mx::load_safetensors(entry.path().string());
     for (auto &[name, array] : loaded) {
-      // val_* tensors are reference values from the conversion, not weights.
+      // Note (Jiaxin Deng): val_* are conversion reference values, not weights.
       if (name.rfind(kBranchPrefix, 0) == 0) {
         weights_.insert_or_assign(
             name.substr(std::string(kBranchPrefix).size()), array);
@@ -96,12 +96,11 @@ mx::array SileroVAD::Conv1d(const mx::array &x, const std::string &name,
 }
 
 float SileroVAD::Feed(const float *chunk, StreamState &state) const {
-  // Window: the previous 64 samples, then the chunk.
   std::vector<float> window(state.context);
   window.insert(window.end(), chunk, chunk + kChunkSamples);
   const int window_length = static_cast<int>(window.size());
   mx::array x(window.data(), {1, window_length}, mx::float32);
-  // Right-only reflect pad, as torch reflect: x[n-2], x[n-3], ...
+  // Note (Jiaxin Deng): right-only reflect pad as torch: x[n-2], x[n-3], ...
   std::vector<int32_t> reflected_indices;
   for (int i = window_length - 2; i > window_length - pad_ - 2; --i) {
     reflected_indices.push_back(i);
@@ -123,7 +122,8 @@ float SileroVAD::Feed(const float *chunk, StreamState &state) const {
   x = Relu(Conv1d(x, "conv3", 2, 1));
   x = Relu(Conv1d(x, "conv4", 1, 1));
 
-  // MLXNN LSTM over the remaining timesteps (one for a 512-sample chunk).
+  // Note (Jiaxin Deng): MLXNN's LSTM formulation, to match Swift (one timestep
+  // per 512-sample chunk).
   x = mx::addmm(Weight("lstm.bias"), x, mx::transpose(Weight("lstm.Wx")));
   std::optional<mx::array> hidden = state.hidden;
   std::optional<mx::array> cell = state.cell;

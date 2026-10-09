@@ -44,7 +44,7 @@ using qwen3_asr::TranscriptionWorker;
 constexpr auto kHeartbeatInterval = std::chrono::milliseconds(250);
 
 struct ServerState {
-  // Set for qwen3_asr only.
+  // Note (Jiaxin Deng): set for qwen3_asr only.
   TranscriptionWorker *worker = nullptr;
   std::string model_name;
   qwen3_asr::RealtimeSettings realtime;
@@ -483,9 +483,8 @@ int main(int argc, char **argv) {
   mg_init_library(0);
   const std::string listening =
       arguments.host + ":" + std::to_string(arguments.port);
-  // civetweb serves each connection on its own worker thread, and an open
-  // WebSocket keeps its thread: every VAD stream Voxt opens (one per stream
-  // ID, across all its detectors) holds one, so allow far more than it uses.
+  // Note (Jiaxin Deng): each open WebSocket keeps a civetweb worker thread
+  // and Voxt opens a VAD stream per stream ID: allow far more than it uses.
   const char *options[] = {"listening_ports",
                            listening.c_str(),
                            "num_threads",

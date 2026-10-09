@@ -34,7 +34,7 @@ GOLDEN = json.loads(
     (Path(__file__).resolve().parent / "golden" / "silero-vad-v6.json").read_text()
 )
 CHUNK = 512
-# Clips of the golden file's stream subset, so the original's probabilities are known.
+# Note (Jiaxin Deng): the golden file's stream subset, so the original's probabilities are known.
 STREAM_CLIP = "0000_en_short"
 OTHER_STREAM_CLIP = "0010_en_short"
 
@@ -150,7 +150,6 @@ def test_ready_event_and_routes(server: Server) -> None:
         "running": True,
         "request_states": {"running": 0, "streams": 0},
     }
-    # A VAD server serves no transcription routes.
     assert server.request("POST", "/v1/audio/transcriptions")[0] == 404
 
 
