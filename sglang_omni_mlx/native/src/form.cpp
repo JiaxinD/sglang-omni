@@ -115,7 +115,7 @@ ParseMultipartForm(const std::string &content_type, const std::string &body) {
       }
       line_start = line_end + 2;
     }
-    if (name.has_value() && fields.count(*name) == 0) {
+    if (name.has_value()) {
       fields[*name] = {body.substr(content_start, next - content_start),
                        filename};
     } else {

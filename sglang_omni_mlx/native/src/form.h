@@ -15,7 +15,8 @@ struct FormField {
 };
 
 // Parses a multipart/form-data body; nullopt when the content type or body
-// is not multipart. Repeated names keep the first part.
+// is not multipart. Repeated names keep the last part, as the Python server
+// does.
 std::optional<std::map<std::string, FormField>>
 ParseMultipartForm(const std::string &content_type, const std::string &body);
 
