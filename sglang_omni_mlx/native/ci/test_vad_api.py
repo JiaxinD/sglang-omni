@@ -179,9 +179,15 @@ def test_pcm16_wav_and_default_options_are_accepted(server: Server) -> None:
     [
         ({}, None),
         ({"threshold": "high"}, b""),
+        ({"threshold": "nan"}, b""),
+        ({"threshold": "inf"}, b""),
+        ({"threshold": "1.5"}, b""),
+        ({"threshold": "-0.1"}, b""),
         ({"min_speech_duration_ms": "-5"}, b""),
         ({"speech_pad_ms": "1.5"}, b""),
         ({}, b"RIFF"),
+        ({}, float32_wav(np.array([0.0, np.nan], dtype=np.float32))),
+        ({}, float32_wav(np.array([0.0, np.inf], dtype=np.float32))),
     ],
 )
 def test_invalid_requests_are_rejected(server: Server, fields: dict, wav) -> None:

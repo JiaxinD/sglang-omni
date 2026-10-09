@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "vad_service.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -42,16 +43,16 @@ int OptionalInt(const std::optional<std::string> &value, int fallback,
   return number;
 }
 
-float OptionalFloat(const std::optional<std::string> &value, float fallback,
-                    const std::string &name) {
+float OptionalProbability(const std::optional<std::string> &value,
+                          float fallback, const std::string &name) {
   if (!value.has_value() || value->empty()) {
     return fallback;
   } else {
   }
   size_t parsed = 0;
   const float number = std::stof(*value, &parsed);
-  if (parsed != value->size()) {
-    throw std::invalid_argument(name + " must be a number");
+  if (parsed != value->size() || !(number >= 0.0f && number <= 1.0f)) {
+    throw std::invalid_argument(name + " must be a number in [0, 1]");
   } else {
   }
   return number;
@@ -76,8 +77,13 @@ int HandleSpeechTimestamps(mg_connection *connection, void *data) {
   TimestampOptions options = service->defaults();
   try {
     samples = qwen3_asr::DecodeWav(form->at("file").value);
-    options.threshold = OptionalFloat(omni_server::Field(*form, "threshold"),
-                                      options.threshold, "threshold");
+    if (!std::all_of(samples.begin(), samples.end(),
+                     [](float sample) { return std::isfinite(sample); })) {
+      throw std::invalid_argument("Audio must be finite.");
+    } else {
+    }
+    options.threshold = OptionalProbability(
+        omni_server::Field(*form, "threshold"), options.threshold, "threshold");
     options.min_speech_ms =
         OptionalInt(omni_server::Field(*form, "min_speech_duration_ms"),
                     options.min_speech_ms, "min_speech_duration_ms");
