@@ -50,10 +50,8 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
         try script.write(to: runtimeExecutable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtimeExecutable.path)
         let modelDirectory = scratch.appendingPathComponent("model", isDirectory: true)
-        let derivedRoot = scratch.appendingPathComponent("derived", isDirectory: true)
         let configuration = OmniBackendConfiguration(
             runtimeExecutable: runtimeExecutable,
-            derivedRoot: derivedRoot,
             startupTimeoutSeconds: 42
         )
         let runtime = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: modelDirectory, configuration: configuration)
@@ -75,7 +73,6 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
             "--supervised",
             "--model-kind", "qwen3_asr",
             "--model-directory", modelDirectory.path,
-            "--derived-root", derivedRoot.path,
             "--startup-timeout-s", "42.0",
         ])
         let variables = try String(contentsOf: environment, encoding: .utf8)
@@ -98,7 +95,6 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtimeExecutable.path)
         let configuration = OmniBackendConfiguration(
             runtimeExecutable: runtimeExecutable,
-            derivedRoot: scratch,
             startupTimeoutSeconds: 0.5
         )
         let runtime = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: scratch, configuration: configuration)
@@ -178,8 +174,7 @@ final class OmniModelManagerRecoveryTests: XCTestCase {
     func testALoadedOmniRuntimeThatStoppedServingIsReplacedOnTheNextLoad() async throws {
         let scratch = FileManager.default.temporaryDirectory
         let configuration = OmniBackendConfiguration(
-            runtimeExecutable: URL(fileURLWithPath: "/usr/bin/false"),
-            derivedRoot: scratch
+            runtimeExecutable: URL(fileURLWithPath: "/usr/bin/false")
         )
         let loads = LoadCounter()
         let manager = MLXModelManager(modelRepo: "mlx-community/Qwen3-ASR-0.6B-4bit") { _ in

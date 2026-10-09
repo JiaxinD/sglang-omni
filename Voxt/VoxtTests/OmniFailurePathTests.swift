@@ -107,8 +107,7 @@ final class OmniFailurePathTests: XCTestCase {
     func testTheLedgerReleasesRuntimesNoLoadWillAdopt() async {
         let scratch = FileManager.default.temporaryDirectory
         let configuration = OmniBackendConfiguration(
-            runtimeExecutable: URL(fileURLWithPath: "/usr/bin/false"),
-            derivedRoot: scratch
+            runtimeExecutable: URL(fileURLWithPath: "/usr/bin/false")
         )
         let adopted = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: scratch, configuration: configuration)
         let orphan = OmniASRRuntime(kind: .qwen3ASR, modelDirectory: scratch, configuration: configuration)
@@ -142,7 +141,6 @@ final class OmniFailurePathTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let configuration = OmniBackendConfiguration(
             runtimeExecutable: script,
-            derivedRoot: scratch,
             startupTimeoutSeconds: 5
         )
 

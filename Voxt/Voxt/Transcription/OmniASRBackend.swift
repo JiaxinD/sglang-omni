@@ -47,12 +47,9 @@ nonisolated enum OmniASRBackend {
         return modelKindsByRepo[repo]
     }
 
-    static func configuration(derivedRoot: URL) -> OmniBackendConfiguration? {
+    static func configuration() -> OmniBackendConfiguration? {
         guard let launchSettings else { return nil }
-        return OmniBackendConfiguration(
-            runtimeExecutable: launchSettings.runtimeExecutable,
-            derivedRoot: derivedRoot
-        )
+        return OmniBackendConfiguration(runtimeExecutable: launchSettings.runtimeExecutable)
     }
 }
 

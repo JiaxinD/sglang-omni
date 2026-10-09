@@ -376,7 +376,7 @@ Arguments ParseArguments(int argc, char **argv) {
       arguments.supervised = true;
     } else if (flag == "--model-kind") {
       model_kind = value();
-    } else if (flag == "--derived-root" || flag == "--startup-timeout-s") {
+    } else if (flag == "--startup-timeout-s") {
       value(); // Accepted for the supervisor's command line; not needed here.
     } else {
       throw std::invalid_argument("unknown argument " + flag);

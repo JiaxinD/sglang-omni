@@ -3,7 +3,6 @@ import Foundation
 /// Which native server binary to run and how to start it.
 nonisolated struct OmniBackendConfiguration: Sendable, Equatable {
     var runtimeExecutable: URL
-    var derivedRoot: URL
     var startupTimeoutSeconds: Double = 180
 }
 
@@ -247,7 +246,6 @@ actor OmniASRRuntime {
             "--supervised",
             "--model-kind", kind.rawValue,
             "--model-directory", modelDirectory.path,
-            "--derived-root", configuration.derivedRoot.path,
             "--startup-timeout-s", String(configuration.startupTimeoutSeconds),
         ]
         process.environment = Self.runtimeEnvironment(inheriting: ProcessInfo.processInfo.environment)
