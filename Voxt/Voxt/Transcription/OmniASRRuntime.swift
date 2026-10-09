@@ -358,8 +358,8 @@ actor OmniASRRuntime {
 
     /// The server's stdout as JSON events. Read by the file handle's own
     /// dispatch source: a blocking read on the Swift concurrency pool would
-    /// hold one of its few threads for each live server, and with several
-    /// servers (Qwen3-ASR, Silero VAD, Sortformer) starve every other task.
+    /// hold one of its few threads for each live server and, with several
+    /// servers, starve every other task.
     nonisolated static func eventStream(
         _ handle: FileHandle
     ) -> AsyncThrowingStream<[String: Any], Error> {
