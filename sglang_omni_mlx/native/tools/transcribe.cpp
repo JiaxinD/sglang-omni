@@ -6,12 +6,14 @@
 //     [--stop-at-end-of-text] [--stop-on-token-loop] [--max-new-tokens N]
 //     a.wav...
 //   qwen3_asr_transcribe --model-path DIR --encode TEXT
-//   qwen3_asr_transcribe --model-path DIR --encode-lines FILE   (JSON string
-//   per line) qwen3_asr_transcribe --dump-mel-filters OUT.f32
+//   qwen3_asr_transcribe --model-path DIR --encode-lines FILE
+//     (FILE holds one JSON string per line)
+//   qwen3_asr_transcribe --dump-mel-filters OUT.f32
 #include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -33,7 +35,11 @@ int main(int argc, char **argv) {
   std::vector<std::string> files;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
-    const auto value = [&]() { return std::string(argv[++i]); };
+    const auto value = [&]() -> std::string {
+      if (i + 1 >= argc)
+        throw std::invalid_argument(argument + " needs a value");
+      return argv[++i];
+    };
     if (argument == "--model-path") {
       model_path = value();
     } else if (argument == "--layout") {
