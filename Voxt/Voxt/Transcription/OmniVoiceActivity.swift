@@ -14,7 +14,7 @@ actor OmniSileroVADRuntime {
 
     init(
         configuration: @escaping @Sendable () -> OmniBackendConfiguration? = {
-            OmniASRBackend.configuration(derivedRoot: ModelStorageDirectoryManager.resolvedDerivedRootURL())
+            OmniASRBackend.configuration()
         }
     ) {
         self.configuration = configuration
