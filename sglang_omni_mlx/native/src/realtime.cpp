@@ -110,9 +110,14 @@ std::optional<std::vector<uint8_t>> DecodeBase64(const std::string &text) {
     } else {
     }
   }
-  while (!clean.empty() && clean.back() == '=')
+  size_t padding = 0;
+  while (!clean.empty() && clean.back() == '=') {
     clean.pop_back();
-  if (clean.find('=') != std::string::npos || clean.size() % 4 == 1) {
+    ++padding;
+  }
+  const size_t remainder = clean.size() % 4;
+  if (clean.find('=') != std::string::npos || remainder == 1 ||
+      (remainder != 0 && padding < 4 - remainder)) {
     return std::nullopt;
   } else {
   }
