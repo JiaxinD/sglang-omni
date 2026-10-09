@@ -34,8 +34,7 @@ set(PCRE2_SUPPORT_JIT OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   pcre2
   GIT_REPOSITORY https://github.com/PCRE2Project/pcre2.git
-  GIT_TAG pcre2-10.44
-  GIT_SHALLOW TRUE
+  GIT_TAG 6ae58beca071f13ccfed31d03b3f479ab520639b # pcre2-10.44
   EXCLUDE_FROM_ALL)
 set(CIVETWEB_ENABLE_WEBSOCKETS ON CACHE BOOL "" FORCE)
 set(CIVETWEB_ENABLE_SSL OFF CACHE BOOL "" FORCE)
@@ -47,8 +46,7 @@ set(CIVETWEB_INSTALL_EXECUTABLE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   civetweb
   GIT_REPOSITORY https://github.com/civetweb/civetweb.git
-  GIT_TAG v1.16
-  GIT_SHALLOW TRUE
+  GIT_TAG d7ba35bbb649209c66e582d5a0244ba988a15159 # v1.16
   EXCLUDE_FROM_ALL)
 set(BUILD_SHARED_LIBS OFF)
 FetchContent_MakeAvailable(nlohmann_json pcre2 civetweb)
