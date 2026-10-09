@@ -111,9 +111,13 @@ def check(
     mean = float(np.concatenate(differences).mean()) if differences else 0.0
     if not chunks:
         failures.append("the golden file has no stream probabilities")
-    elif mean > tolerance["mean_abs_probability"]:
+    else:
+        pass
+    if mean > tolerance["mean_abs_probability"]:
         failures.append(f"mean stream probability difference {mean:.2e}")
-    elif flips > tolerance["max_flipped_decisions"] * chunks:
+    else:
+        pass
+    if flips > tolerance["max_flipped_decisions"] * chunks:
         failures.append(f"{flips} stream chunks fall on the other side of 0.5")
     else:
         pass
