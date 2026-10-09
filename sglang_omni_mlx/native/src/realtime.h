@@ -89,6 +89,7 @@ private:
   int next_segment_id_ = 0;
   std::vector<std::pair<int, std::string>> committed_;
   bool refreshing_ = false;
+  bool finalizing_ = false;
 
   // Event order and the socket's lifetime.
   std::mutex send_mutex_;

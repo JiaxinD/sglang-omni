@@ -360,7 +360,7 @@ void RealtimeSession::MaybeStartRefresh() {
   int segment_id = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (refreshing_ || !segment_.has_value() ||
+    if (refreshing_ || finalizing_ || !segment_.has_value() ||
         EndSample() < segment_->next_refresh_sample) {
       return;
     } else {
@@ -431,13 +431,16 @@ void RealtimeSession::FinalizeThrough(long end_sample) {
     {
       std::unique_lock<std::mutex> lock(mutex_);
       if (!segment_.has_value() || end_sample <= segment_->start_sample) {
+        finalizing_ = false;
         return;
       } else {
       }
-      // Wait out a preview decode in flight, as the Python server's decode lock
-      // does.
+      // Wait out a preview decode in flight and start no new one, as the Python
+      // server's first-in-first-out decode lock does.
+      finalizing_ = true;
       refresh_done_.wait(lock, [&] { return !refreshing_; });
       if (!segment_.has_value() || end_sample <= segment_->start_sample) {
+        finalizing_ = false;
         return;
       } else {
       }
