@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prepares a CI data root: pinned model checkpoints and the frozen corpus.
 
-    python provision.py <data_root> [--model REPO ...]
-
-Every file is checked against the SHA-256 recorded in this directory, so a
-runner's cache is reused only when it is exactly what the golden files were
-made from. Models land in <data_root>/models/<org>_<name>; the corpus is built
-from its public sources into <data_root>/corpus/v1 by corpus/build_corpus.py.
+Every file is checked against its recorded SHA-256, so a runner's cache is
+reused only when it matches what the golden files were made from.
 """
 
 from __future__ import annotations
@@ -126,8 +122,8 @@ def provision_corpus(data_root: Path) -> Path:
         raise SystemExit("the rebuilt corpus does not match corpus/v1.sha256")
     else:
         pass
-    # The clips are all later runs read: the archives and their extracted
-    # audio (about 2 GB) are only needed to rebuild them.
+    # Note (Jiaxin Deng): later runs read only the clips; the archives and their
+    # extracted audio (about 2 GB) are only needed to rebuild them.
     shutil.rmtree(corpus_root / "raw", ignore_errors=True)
     shutil.rmtree(extracted, ignore_errors=True)
     return corpus_directory

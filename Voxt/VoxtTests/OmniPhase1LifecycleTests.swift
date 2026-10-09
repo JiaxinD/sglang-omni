@@ -159,7 +159,7 @@ final class OmniPhase1LifecycleTests: XCTestCase {
         let load = Task { @MainActor in try await manager.loadModel() }
         let started = await ProcessTree.waitForDescendants(timeoutSeconds: 10)
         XCTAssertTrue(started, "the cold start never spawned the server")
-        // The native server is ready about 150 ms after its process starts;
+        // Note (Jiaxin Deng): the native server is ready about 150 ms after its process starts;
         // give up as soon as the process appears, inside that window.
         manager.cancelPendingModelLoadForApplicationTermination()
         load.cancel()

@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Native Qwen3-ASR server: transcriptions over HTTP (JSON or SSE), realtime
-// over a WebSocket. The same API as sglang_omni_mlx.qwen3_asr.server.
-//
-//   qwen3_asr_server --model-path DIR --model-name NAME [--host H] --port P
-//   qwen3_asr_server --supervised --model-kind qwen3_asr --model-directory DIR
-//
-// --supervised speaks Voxt's supervisor protocol on stdin/stdout: a JSON
-// "ready" event once serving (or "failed"), "stopped" after a shutdown
-// command; end of stdin or a termination signal stops the server.
+// Native Qwen3-ASR server with the API of sglang_omni_mlx.qwen3_asr.server.
+// --supervised speaks Voxt's supervisor protocol: "ready" or "failed" once
+// serving, "stopped" after a shutdown command; end of stdin also stops it.
 #include <signal.h>
 #include <unistd.h>
 
@@ -169,7 +163,7 @@ int HandleTranscriptions(mg_connection *connection, void *data) {
       try {
         options.max_new_tokens = std::stoi(*max_new_tokens, &parsed);
       } catch (const std::invalid_argument &) {
-        // parsed stays 0, so the check below names the field.
+        // Note (Jiaxin Deng): parsed stays 0, so the check below rejects it.
       }
       if (parsed != max_new_tokens->size()) {
         throw std::invalid_argument("max_new_tokens must be an integer");
@@ -226,8 +220,8 @@ int HandleTranscriptions(mg_connection *connection, void *data) {
   mg_printf(connection, "HTTP/1.1 200 OK\r\nContent-Type: "
                         "text/event-stream\r\nCache-Control: no-cache\r\n"
                         "Connection: close\r\n\r\n");
-  // A client that disconnects stops the decode it was waiting for: SSE
-  // comment lines fail to write once the peer is gone.
+  // Note (Jiaxin Deng): SSE comment heartbeats fail to write once the peer is
+  // gone, which cancels the decode it was waiting for.
   while (future.wait_for(kHeartbeatInterval) != std::future_status::ready) {
     if (mg_write(connection, ":\n\n", 3) <= 0) {
       cancel->store(true);
@@ -247,7 +241,6 @@ int HandleTranscriptions(mg_connection *connection, void *data) {
   return 200;
 }
 
-// One socket's realtime session and its partial (fragmented) message.
 struct SocketState {
   std::shared_ptr<qwen3_asr::RealtimeSession> session;
   std::string fragments;
@@ -305,7 +298,7 @@ int SocketData(mg_connection *connection, int bits, char *data, size_t length,
   try {
     return socket->session->Handle(event) ? 1 : 0;
   } catch (const std::exception &error) {
-    // The socket closes; the type alone is logged, never audio or text.
+    // Note (Jiaxin Deng): log the type alone, never audio or text.
     std::cerr << "realtime session failed: " << typeid(error).name() << "\n";
     return 0;
   }
@@ -330,7 +323,6 @@ std::string RandomHex(int length) {
   return text;
 }
 
-// Emits one supervisor event line on stdout.
 void Emit(const Json &event) {
   static std::mutex emit_mutex;
   std::lock_guard<std::mutex> lock(emit_mutex);
@@ -377,7 +369,7 @@ Arguments ParseArguments(int argc, char **argv) {
     } else if (flag == "--model-kind") {
       model_kind = value();
     } else if (flag == "--startup-timeout-s") {
-      value(); // Accepted for the supervisor's command line; not needed here.
+      value(); // Note (Jiaxin Deng): Voxt passes it; unused here.
     } else {
       throw std::invalid_argument("unknown argument " + flag);
     }
@@ -405,7 +397,6 @@ Arguments ParseArguments(int argc, char **argv) {
   return arguments;
 }
 
-// Why the server stops: a shutdown command, end of stdin, or a signal.
 class StopSignal {
 public:
   void Set(const std::string &reason) {
@@ -434,7 +425,8 @@ private:
 
 int main(int argc, char **argv) {
   const auto started = std::chrono::steady_clock::now();
-  // Stop signals go to one waiting thread, not to whichever thread runs.
+  // Note (Jiaxin Deng): stop signals go to one waiting thread, not to
+  // whichever thread happens to run.
   sigset_t stop_signals;
   sigemptyset(&stop_signals);
   for (const int signal_number : {SIGTERM, SIGINT, SIGHUP, SIGQUIT})
@@ -466,7 +458,7 @@ int main(int argc, char **argv) {
           } else {
           }
         } catch (const nlohmann::json::exception &) {
-          // Malformed control lines are ignored.
+          // Note (Jiaxin Deng): malformed control lines are ignored.
         }
       }
       stop.Set("closed");
@@ -474,8 +466,8 @@ int main(int argc, char **argv) {
   } else {
   }
 
-  // Freed MLX buffers go back to the system: an idle server holds only the
-  // model.
+  // Note (Jiaxin Deng): freed MLX buffers go back to the system, so an idle
+  // server holds only the model.
   mx::set_cache_limit(0);
   std::unique_ptr<TranscriptionWorker> worker;
   std::atomic<bool> loaded(false);
@@ -493,7 +485,8 @@ int main(int argc, char **argv) {
       std::_Exit(1);
     }
   });
-  // A stop before the model is ready ends the process at once.
+  // Note (Jiaxin Deng): a stop before the model is ready ends the process at
+  // once.
   while (true) {
     if (loaded.load()) {
       break;
@@ -537,7 +530,7 @@ int main(int argc, char **argv) {
     return 1;
   } else {
   }
-  // Port 0 lets the system pick a free port when the socket binds.
+  // Note (Jiaxin Deng): port 0 lets the system pick a free port at bind time.
   mg_server_port server_port{};
   mg_get_server_ports(context, 1, &server_port);
   const std::string endpoint =
@@ -564,9 +557,8 @@ int main(int argc, char **argv) {
   }
 
   const std::string reason = stop.Wait();
-  // Every decode in flight is cancelled and the process exits at once:
-  // civetweb's own stop waits out its 2 s poll quantum, and an owner stopping
-  // the server has no use for the open responses.
+  // Note (Jiaxin Deng): cancel and exit at once; civetweb's own stop waits out
+  // its 2 s poll quantum, and the owner has no use for the open responses.
   worker->CancelAll();
   if (reason == "shutdown") {
     Emit({{"event", "stopped"}});

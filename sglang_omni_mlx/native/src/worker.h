@@ -43,7 +43,6 @@ public:
 
   void Submit(std::vector<float> samples, TranscriptionOptions options,
               CancelFlag cancel, Completion completion);
-  // Submits and waits.
   TranscriptionResult Transcribe(std::vector<float> samples,
                                  TranscriptionOptions options,
                                  CancelFlag cancel);

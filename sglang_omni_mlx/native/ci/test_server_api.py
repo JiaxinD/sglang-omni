@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """API tests for the native qwen3_asr_server, run against the real model.
 
-    NATIVE_RUNTIME_BIN=<dir with qwen3_asr_server> CI_DATA_ROOT=<provisioned root> \
-        python -m pytest sglang_omni_mlx/native/ci/test_server_api.py
+Needs NATIVE_RUNTIME_BIN (the server's directory) and CI_DATA_ROOT (a provisioned root).
 """
 
 from __future__ import annotations
@@ -228,14 +227,15 @@ def test_a_disconnected_stream_stops_its_decode(server: Server) -> None:
     )
     response = connection.getresponse()
     assert response.status == 200
-    # Cancellation is checked between generated tokens, so leave the request time
-    # to get past encoding and prefill (a few seconds for 300 s of audio).
+    # Note (Jiaxin Deng): cancellation is checked between generated tokens, so
+    # give the request time to get past encoding and prefill.
     time.sleep(4.0)
     assert json.loads(server.request("GET", "/health")[1])["request_states"] == {
         "running": 1
     }
     closed_at = time.monotonic()
-    # http.client keeps the socket open while the response object is.
+    # Note (Jiaxin Deng): http.client keeps the socket open while the response
+    # object lives.
     response.close()
     connection.close()
     while json.loads(server.request("GET", "/health")[1])["request_states"] != {}:

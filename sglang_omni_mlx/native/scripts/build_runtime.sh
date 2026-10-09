@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 # Builds the native Qwen3-ASR runtime into a self-contained directory.
-#
-#   build_runtime.sh <output-directory> [<work-directory>]
-#
-# The output's bin/ holds qwen3_asr_server, qwen3_asr_transcribe, libmlx.dylib
-# and mlx.metallib. MLX comes from the pinned mlx wheel (the same build the
-# Python reference server uses), installed with CMake and Ninja into a
-# throwaway virtual environment under the work directory. Needs uv and Xcode's
-# command line tools; nothing outside the two directories changes.
+# Note (Jiaxin Deng): MLX comes from the pinned mlx wheel, the same build the
+# Python reference server uses.
 set -euo pipefail
 
 output="${1:?usage: build_runtime.sh <output-directory> [<work-directory>]}"

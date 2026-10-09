@@ -1,12 +1,7 @@
 """Builds the frozen Qwen A/A/B corpus from public, human-transcribed test sets.
 
-    python build_corpus.py <work_root>
-
-Sources (hashes in corpus/raw.sha256):
-  LibriSpeech test-clean (CC BY 4.0), FLEURS cmn_hans_cn test (CC BY 4.0),
-  ASCEND test (CC BY-SA 4.0, zh/en code-switching).
-Output: corpus/v1/clips/*.wav (16 kHz mono PCM16) and corpus/v1/manifest.jsonl.
-Selection is deterministic (fixed seed, sorted inputs).
+Sources are LibriSpeech test-clean, FLEURS cmn_hans_cn and ASCEND (hashes in
+raw.sha256); selection is deterministic.
 """
 
 from __future__ import annotations
@@ -32,8 +27,8 @@ def resample(audio: np.ndarray, rate: int) -> np.ndarray:
         audio = audio.mean(axis=1)
     if rate == RATE:
         return audio.astype(np.float32)
-    # Polyphase-free linear resampling is enough for 48k/16k sources here, but the
-    # sources are already 16 kHz; keep the path for safety.
+    # Note (Jiaxin Deng): the sources are already 16 kHz; linear resampling is
+    # only a fallback.
     duration = len(audio) / rate
     target = int(round(duration * RATE))
     x_old = np.linspace(0, duration, num=len(audio), endpoint=False)
@@ -222,7 +217,6 @@ def main() -> None:
             }
         )
 
-    # Silence and noise: the expected transcript is empty.
     noise_rng = np.random.default_rng(SEED)
     for index in range(4):
         clip_id = f"{len(records):04d}_silence"
@@ -258,7 +252,6 @@ def main() -> None:
                 "reference": "",
             }
         )
-    # Speech in white noise at 10 dB SNR, drawn from the selected mid clips.
     mids = [r for r in records if r["stratum"] in ("en_mid", "zh_mid")]
     for base in rng.sample(mids, 8):
         audio, _ = sf.read(clips / f"{base['id']}.wav", dtype="float32")

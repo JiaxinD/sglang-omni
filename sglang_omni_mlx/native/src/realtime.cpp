@@ -11,8 +11,8 @@ namespace qwen3_asr {
 
 namespace {
 
-// A refresh re-decodes the whole segment; after two refreshes it continues
-// from the shown text, minus its last tokens, which may still change.
+// Note (Jiaxin Deng): after two full re-decodes a refresh continues from the
+// shown text minus its last tokens, which may still change.
 constexpr int kPrefixAfterRefreshCount = 2;
 constexpr int kPrefixRollbackTokenCount = 5;
 constexpr float kSilentPeak = 1e-3f;
@@ -33,7 +33,7 @@ bool IsUnicodeSpace(uint32_t code_point) {
          code_point == 0x205F || code_point == 0x3000;
 }
 
-// Code points of valid UTF-8 (the tokenizer only produces valid UTF-8).
+// Note (Jiaxin Deng): assumes valid UTF-8, the only kind the tokenizer emits.
 std::vector<uint32_t> CodePoints(const std::string &text) {
   std::vector<uint32_t> code_points;
   size_t i = 0;
@@ -69,7 +69,6 @@ std::string StripUnicode(const std::string &text) {
     ++begin_cp;
   while (end_cp > begin_cp && IsUnicodeSpace(code_points[end_cp - 1]))
     --end_cp;
-  // Map code point positions back to byte offsets.
   size_t byte = 0;
   size_t begin_byte = 0;
   size_t end_byte = 0;
@@ -101,8 +100,8 @@ bool IsSpacedScript(uint32_t code_point) {
 }
 
 std::optional<std::vector<uint8_t>> DecodeBase64(const std::string &text) {
-  // Like Python's b64decode(validate=False): characters outside the alphabet
-  // are discarded, then the padding must be right.
+  // Note (Jiaxin Deng): matches Python's b64decode(validate=False), which
+  // drops characters outside the alphabet but still checks the padding.
   std::string clean;
   for (const char c : text) {
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -346,7 +345,7 @@ void RealtimeSession::ReportDecodeFailure(std::exception_ptr error) {
   } catch (const TranscriptionCancelled &) {
     return;
   } catch (const std::exception &failure) {
-    // The type alone is logged, never the audio or text.
+    // Note (Jiaxin Deng): log the type alone, never the audio or text.
     std::cerr << "realtime decode failed: " << typeid(failure).name() << "\n";
   } catch (...) {
     std::cerr << "realtime decode failed\n";
@@ -370,7 +369,8 @@ void RealtimeSession::MaybeStartRefresh() {
     samples = SegmentSamples(segment, end_sample);
     const bool silent =
         PeakIsSilent(samples.data(), samples.size(), kSilentPeak);
-    // Leading silence keeps the early first decode for the first audible audio.
+    // Note (Jiaxin Deng): leading silence keeps the early first decode for the
+    // first audible audio.
     if (!(silent && segment.decode_count == 0)) {
       segment.next_refresh_sample =
           end_sample + settings_.decode_interval_samples;
@@ -435,8 +435,8 @@ void RealtimeSession::FinalizeThrough(long end_sample) {
         return;
       } else {
       }
-      // Wait out a preview decode in flight and start no new one, as the Python
-      // server's first-in-first-out decode lock does.
+      // Note (Jiaxin Deng): wait out an in-flight preview and start no new one,
+      // as the Python server's FIFO decode lock does.
       finalizing_ = true;
       refresh_done_.wait(lock, [&] { return !refreshing_; });
       if (!segment_.has_value() || end_sample <= segment_->start_sample) {
@@ -468,7 +468,7 @@ void RealtimeSession::FinalizeThrough(long end_sample) {
         ReportDecodeFailure(std::current_exception());
       }
     }
-    // A failed or cancelled decode has been reported (or the client left);
+    // Note (Jiaxin Deng): a failed or cancelled decode was already reported, so
     // its segment is dropped rather than committed empty.
     if (text.has_value()) {
       {

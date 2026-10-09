@@ -97,7 +97,7 @@ std::vector<float> BuildMelFilterBank() {
 std::vector<float> BuildPeriodicHannWindow() {
   std::vector<float> window(kFftSize);
   const float denominator = static_cast<float>(kFftSize);
-  // Swift's Float.pi: pi rounded toward zero, one step below (float)M_PI.
+  // Note (Jiaxin Deng): Swift's Float.pi, one float step below (float)M_PI.
   const float pi = std::nextafter(static_cast<float>(M_PI), 0.0f);
   for (int n = 0; n < kFftSize; ++n) {
     window[n] =
@@ -177,15 +177,14 @@ const std::vector<float> &PeriodicHannWindow() {
 mx::array LogMel(const std::vector<float> &samples, AudioLayout layout) {
   std::vector<float> padded_samples = samples;
   if (padded_samples.size() < static_cast<size_t>(kFftSize)) {
-    // Reflect padding needs more samples than half a window; a tail this short
-    // (a realtime cut or a stop right after one) is zero-filled to one window.
+    // Note (Jiaxin Deng): reflect padding needs more than half a window, so a
+    // tail this short (a realtime cut) is zero-filled to one window.
     padded_samples.resize(kFftSize, 0.0f);
   } else {
   }
   const int sample_count = static_cast<int>(padded_samples.size());
   const mx::array audio(padded_samples.data(), {sample_count}, mx::float32);
   constexpr int padding = kFftSize / 2;
-  // audio[1:padding+1][::-1], audio, audio[-padding-1:-1][::-1]
   const mx::array head = mx::slice(audio, {padding}, {0}, {-1});
   const mx::array tail =
       mx::slice(audio, {sample_count - 2}, {sample_count - padding - 2}, {-1});
@@ -220,7 +219,8 @@ int ConvOutputFrames(int frame_count) {
 
 namespace {
 
-// Python floor division for the remainder formula (operands may be negative).
+// Note (Jiaxin Deng): Python floor division; the remainder formula can pass
+// negative operands.
 int FloorDivide(int numerator, int denominator) {
   const int quotient = numerator / denominator;
   return (numerator % denominator != 0 &&

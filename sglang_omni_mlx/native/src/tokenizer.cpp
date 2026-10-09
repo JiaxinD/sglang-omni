@@ -18,7 +18,8 @@ namespace qwen3_asr {
 
 namespace {
 
-// Qwen2's pre-tokenization split, as the checkpoint's tokenizer defines it.
+// Note (Jiaxin Deng): Qwen2's pre-tokenization split, verbatim from the
+// checkpoint's tokenizer.
 constexpr const char *kQwen2SplitPattern =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N})"
     R"(| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
@@ -52,8 +53,8 @@ void AppendUtf8(uint32_t code_point, std::string &out) {
   }
 }
 
-// GPT-2 byte-to-unicode table: printable bytes map to themselves, the rest to
-// code points from 256 upward.
+// Note (Jiaxin Deng): GPT-2's byte-to-unicode table; printable bytes map to
+// themselves, the rest to code points from 256 upward.
 struct ByteLevelTables {
   std::array<std::string, 256> byte_to_text;
   std::unordered_map<uint32_t, uint8_t> code_point_to_byte;
@@ -83,7 +84,7 @@ const ByteLevelTables &Tables() {
   return tables;
 }
 
-// Next code point of valid UTF-8 at offset; advances offset.
+// Note (Jiaxin Deng): assumes valid UTF-8; advances offset.
 uint32_t NextCodePoint(const std::string &text, size_t &offset) {
   const auto byte = [&](size_t i) { return static_cast<uint8_t>(text[i]); };
   const uint8_t lead = byte(offset);
@@ -109,7 +110,8 @@ uint32_t NextCodePoint(const std::string &text, size_t &offset) {
   }
 }
 
-// Unicode NFC, as the tokenizer's normalizer applies to ordinary text.
+// Note (Jiaxin Deng): NFC, as the tokenizer's normalizer applies to ordinary
+// text.
 std::string NormalizeNfc(const std::string &text) {
   if (std::all_of(text.begin(), text.end(),
                   [](char c) { return static_cast<uint8_t>(c) < 0x80; })) {
@@ -139,7 +141,8 @@ std::string NormalizeNfc(const std::string &text) {
   return out;
 }
 
-// Rust's String::from_utf8_lossy: each maximal invalid subpart becomes U+FFFD.
+// Note (Jiaxin Deng): matches Rust's String::from_utf8_lossy, one U+FFFD per
+// maximal invalid subpart.
 std::string FromUtf8Lossy(const std::string &bytes) {
   std::string out;
   out.reserve(bytes.size());
@@ -270,8 +273,8 @@ int Tokenizer::AddedTokenId(const std::string &content) const {
 }
 
 std::vector<int> Tokenizer::Encode(const std::string &text) const {
-  // Added tokens are matched on the raw text first (leftmost, longest); the
-  // text between them is normalized, split and BPE-encoded.
+  // Note (Jiaxin Deng): added tokens match on the raw text first (leftmost,
+  // longest); only the text between them is normalized and BPE-encoded.
   std::vector<int> ids;
   size_t ordinary_start = 0;
   size_t position = 0;
@@ -328,7 +331,8 @@ void Tokenizer::EncodeOrdinary(const std::string &raw_text,
     const size_t match_begin = ovector[0];
     const size_t match_end = ovector[1];
     if (match_end == match_begin) {
-      // The pattern never matches empty text; guard against a stall anyway.
+      // Note (Jiaxin Deng): the pattern never matches empty text; guard
+      // against a stall anyway.
       offset = match_end + 1;
       continue;
     } else {
@@ -372,7 +376,6 @@ void Tokenizer::EncodeWord(const std::string &byte_level_word,
       break;
     } else {
     }
-    // Merge every occurrence of the best pair, left to right.
     const std::string left = symbols[best_index];
     const std::string right = symbols[best_index + 1];
     std::vector<std::string> merged;
@@ -415,8 +418,8 @@ std::string Tokenizer::Decode(const std::vector<int> &ids,
     } else {
       continue;
     }
-    // Byte-level decoding per token: all characters map back to bytes, or
-    // the token's own UTF-8 is kept.
+    // Note (Jiaxin Deng): a token whose characters do not all map back to
+    // bytes keeps its own UTF-8.
     std::string token_bytes;
     bool all_mapped = true;
     size_t offset = 0;

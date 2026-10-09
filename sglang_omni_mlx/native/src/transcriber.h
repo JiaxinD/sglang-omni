@@ -38,7 +38,6 @@ struct TranscriptionResult {
   FinishReason finish_reason = FinishReason::kLength;
 };
 
-// The caller gave up on the transcription.
 class TranscriptionCancelled : public std::runtime_error {
 public:
   TranscriptionCancelled() : std::runtime_error("transcription cancelled") {}

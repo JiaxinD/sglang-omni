@@ -135,7 +135,7 @@ final class OmniFailurePathTests: XCTestCase {
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(token, isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         let script = scratch.appendingPathComponent("qwen3_asr_server")
-        // Stands in for the runtime: exits once Voxt writes or closes its control pipe.
+        // Note (Jiaxin Deng): stands in for the runtime; exits once Voxt writes or closes its control pipe.
         try "#!/bin/sh\nexec /bin/sh -c 'read line' \(token)\n".write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         defer { try? FileManager.default.removeItem(at: scratch) }
@@ -152,7 +152,7 @@ final class OmniFailurePathTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(500))
         let leftover = Self.processes(matching: token)
-        // A server started after retirement would wait on its control pipe forever.
+        // Note (Jiaxin Deng): a server started after retirement would wait on its control pipe forever.
         Self.kill(matching: token)
         preparations.forEach { $0.cancel() }
 

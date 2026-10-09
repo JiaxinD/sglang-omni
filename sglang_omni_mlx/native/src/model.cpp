@@ -20,7 +20,7 @@ namespace {
 constexpr int kKvCacheStepTokens = 256;
 
 std::vector<mx::array> GeluGraph(const std::vector<mx::array> &inputs) {
-  // x * (1 + erf(x / sqrt(2))) / 2, as mlx.nn.gelu.
+  // Note (Jiaxin Deng): mlx.nn.gelu's op order, kept for bit identity.
   const mx::array &x = inputs[0];
   return {mx::divide(
       mx::multiply(x, mx::add(mx::array(1.0f),
@@ -33,8 +33,8 @@ std::vector<mx::array> SiluGraph(const std::vector<mx::array> &inputs) {
   return {mx::multiply(inputs[0], mx::sigmoid(inputs[0]))};
 }
 
-// Compiled shapeless, as mlx.nn compiles gelu and silu: one fused kernel
-// instead of one per elementwise op.
+// Note (Jiaxin Deng): compiled shapeless as mlx.nn does, so each activation
+// is one fused kernel instead of one per elementwise op.
 mx::array Gelu(const mx::array &x) {
   static const auto compiled = mx::compile(GeluGraph, true);
   return compiled({x})[0];
@@ -266,8 +266,8 @@ mx::array Qwen3ASR::EncodeAudio(const mx::array &mel,
                                    ? ConvOutputFrames(length)
                                    : SwiftTokenCount(length));
   }
-  // The Swift port credits each chunk by its own length formula and keeps
-  // that many rows of the padded conv output.
+  // Note (Jiaxin Deng): the Swift port credits each chunk by its own length
+  // formula and keeps that many rows of the padded conv output.
   std::vector<mx::array> kept_rows;
   for (int i = 0; i < chunk_count; ++i) {
     const int kept = std::min(credited_lengths[i], conv_frames);
@@ -277,8 +277,8 @@ mx::array Qwen3ASR::EncodeAudio(const mx::array &mel,
   }
   mx::array hidden_states = mx::concatenate(kept_rows, 0);
 
-  // Attention stays within windows of chunks; each window runs on its own,
-  // windows of one length batched together, as in the Swift encoder.
+  // Note (Jiaxin Deng): attention stays within windows of chunks, equal-length
+  // windows batched together, as in the Swift encoder.
   const int chunks_per_window =
       std::max(1, audio_.n_window_infer / chunk_frame_count);
   std::vector<int> window_lengths;
@@ -412,7 +412,8 @@ mx::array Qwen3ASR::Decode(const mx::array &embeddings,
       RmsNorm(mx::slice(hidden, {0, length - 1, 0},
                         {hidden.shape(0), length, hidden.shape(2)}),
               "model.norm");
-  // Tied output projection: the embedding table used as a linear layer.
+  // Note (Jiaxin Deng): tied output projection; the embedding table is the
+  // linear layer.
   const std::string prefix = "model.embed_tokens";
   mx::array logits = [&]() {
     if (Has(prefix + ".scales")) {

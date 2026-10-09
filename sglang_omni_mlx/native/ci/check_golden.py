@@ -1,25 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checks the native runtime against a model's golden outputs on the frozen corpus.
 
-    python check_golden.py --runtime-bin DIR --data-root DIR --golden FILE
-        [--write] [--outputs DIR]
-    python check_golden.py --golden FILE --import OUTPUTS
-
-Runs qwen3_asr_transcribe once over every corpus clip with the golden file's
-request (Voxt's Final request). Greedy decoding follows the GPU's arithmetic,
-which differs between Apple chips, so a golden file keeps one set of outputs
-per chip ("devices"):
-
-- on a chip with its own outputs, each clip's text, language, token count
-  and finish reason must equal them;
-- on another chip, the word, character and mixed error rates must stay
-  within the golden file's tolerance of a recorded chip's, and most clips
-  must still be identical.
-
-Error rates are reported next to the original Voxt backend's (Swift on MLX
-Audio). --write records this chip's outputs in the golden file; --outputs
-saves them to DIR (the Mac CI uploads them), and --import adds such a file to
-the golden file.
+Greedy decoding follows each Apple chip's GPU arithmetic, so a golden file keeps
+exact outputs per chip; other chips are gated on error rates within tolerance.
 """
 
 from __future__ import annotations

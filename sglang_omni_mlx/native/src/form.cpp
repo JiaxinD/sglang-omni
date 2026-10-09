@@ -25,7 +25,6 @@ std::string Trim(const std::string &text) {
   return text.substr(begin, end - begin);
 }
 
-// The value of a header parameter such as name="file" (quoted or not).
 std::optional<std::string> HeaderParameter(const std::string &header,
                                            const std::string &parameter) {
   const std::string lowered = Lowercase(header);

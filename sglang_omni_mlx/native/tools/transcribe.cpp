@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Transcribes WAV files with the native runtime and prints one JSON line each,
 // for parity checks against the Python reference server.
-//
-//   qwen3_asr_transcribe --model-path DIR [--layout voxt_swift] [--language L]
-//     [--stop-at-end-of-text] [--stop-on-token-loop] [--max-new-tokens N]
-//     a.wav...
-//   qwen3_asr_transcribe --model-path DIR --encode TEXT
-//   qwen3_asr_transcribe --model-path DIR --encode-lines FILE
-//     (FILE holds one JSON string per line)
-//   qwen3_asr_transcribe --dump-mel-filters OUT.f32
 #include <chrono>
 #include <fstream>
 #include <iostream>

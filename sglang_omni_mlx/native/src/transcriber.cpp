@@ -15,7 +15,6 @@ namespace {
 
 constexpr const char *kAsrTextMarker = "<asr_text>";
 constexpr const char *kAudioPad = "<|audio_pad|>";
-// Greedy loop guard: stop once the last 24 tokens use at most 3 distinct ids.
 constexpr size_t kTokenLoopWindow = 24;
 constexpr size_t kTokenLoopMaxDistinct = 3;
 constexpr int kOutputTokensPerAudioSecond = 10;
@@ -180,8 +179,8 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
   const int audio_start = static_cast<int>(
       std::find(prompt_ids.begin(), prompt_ids.end(), audio_pad_id_) -
       prompt_ids.begin());
-  // The Swift layout can reserve more placeholders than encoder rows; those
-  // keep the audio_pad embedding, and surplus rows are dropped.
+  // Note (Jiaxin Deng): the Swift layout can reserve more placeholders than
+  // encoder rows; those keep the audio_pad embedding, surplus rows are dropped.
   const int filled = std::min(audio_token_count, audio_features.shape(0));
   const int hidden = embeddings.shape(2);
   embeddings = mx::slice_update(
@@ -192,7 +191,7 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
                       0),
       {0, audio_start, 0}, {1, audio_start + filled, hidden});
 
-  // An unset or zero budget means the default: ten tokens per audio second.
+  // Note (Jiaxin Deng): an unset or zero budget means the default.
   const int max_new_tokens =
       options.max_new_tokens.value_or(0) != 0
           ? *options.max_new_tokens
@@ -215,8 +214,8 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
     } else {
     }
     const mx::array token = next_token;
-    // Queue the following step before reading this token, so the GPU decodes
-    // while the stop rules are checked.
+    // Note (Jiaxin Deng): queue the next step before reading this token, so
+    // the GPU decodes while the stop rules are checked.
     next_token = mx::argmax(
         model_.Decode(model_.EmbedTokens(mx::reshape(token, {1, 1})), caches));
     mx::async_eval({next_token});

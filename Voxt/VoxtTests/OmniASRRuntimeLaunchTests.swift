@@ -40,7 +40,6 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
         let runtimeExecutable = scratch.appendingPathComponent("qwen3_asr_server")
         let arguments = scratch.appendingPathComponent("arguments")
         let environment = scratch.appendingPathComponent("environment")
-        // Records how it was started, then reports a failed start.
         let script = """
         #!/bin/sh
         printf '%s\\n' "$0" "$@" > '\(arguments.path)'
@@ -83,8 +82,6 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
         XCTAssertEqual(variables.filter { $0.hasPrefix("DYLD_") || $0.hasPrefix("__XPC_DYLD_") }, [])
     }
 
-    /// A server that never reports is stopped at the startup deadline, and the
-    /// launch fails instead of waiting forever.
     func testAServerThatNeverReportsFailsAtTheStartupDeadline() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("voxt-omni-deadline-\(UUID().uuidString)", isDirectory: true)
@@ -139,7 +136,7 @@ final class OmniASRRuntimeLaunchTests: XCTestCase {
                 return try await iterator.next()?["event"] as? String
             }
         }
-        // Let every reader start waiting for output first.
+        // Note (Jiaxin Deng): let every reader block on its pipe before the probe task runs.
         Thread.sleep(forTimeInterval: 0.5)
         let unrelated = expectation(description: "an unrelated task runs")
         Task.detached { unrelated.fulfill() }

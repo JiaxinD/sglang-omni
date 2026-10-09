@@ -252,7 +252,7 @@ actor OmniASRRuntime {
         let control = Pipe()
         let events = Pipe()
         let diagnostics = Pipe()
-        // Writing shutdown to a server that just exited must not raise SIGPIPE in Voxt.
+        // Note (Jiaxin Deng): writing shutdown to a server that just exited must not raise SIGPIPE in Voxt.
         _ = fcntl(control.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         process.standardInput = control
         process.standardOutput = events
@@ -281,8 +281,8 @@ actor OmniASRRuntime {
         }
         serverProcess = process
         controlPipe = control
-        // A server that never reports (a stalled model load) is killed at the
-        // startup deadline: its stdout then ends and the launch fails.
+        // Note (Jiaxin Deng): a server that never reports (a stalled model load) is killed at the
+        // startup deadline; its stdout then ends and the launch fails.
         let timedOut = OmniStartupDeadline()
         let serverPID = process.processIdentifier
         let seconds = configuration.startupTimeoutSeconds
@@ -354,10 +354,8 @@ actor OmniASRRuntime {
         return true
     }
 
-    /// The server's stdout as JSON events. Read by the file handle's own
-    /// dispatch source: a blocking read on the Swift concurrency pool would
-    /// hold one of its few threads for each live server and, with several
-    /// servers, starve every other task.
+    /// The server's stdout as JSON events, read on the file handle's own dispatch
+    /// source: a blocking read per live server would starve the concurrency pool.
     nonisolated static func eventStream(
         _ handle: FileHandle
     ) -> AsyncThrowingStream<[String: Any], Error> {
