@@ -46,7 +46,7 @@ final class OmniVoiceActivityTests: XCTestCase {
         """#
         try script.write(to: server, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: server.path)
-        let configuration = OmniBackendConfiguration(runtimeExecutable: server, derivedRoot: scratch)
+        let configuration = OmniBackendConfiguration(runtimeExecutable: server)
         let shared = OmniSileroVADRuntime(configuration: { configuration })
 
         _ = try await shared.acquire(modelDirectory: scratch)
