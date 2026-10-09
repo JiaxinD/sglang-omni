@@ -183,6 +183,7 @@ def test_plain_request_returns_json_text(server: Server) -> None:
         ({"include_generation_metadata": "true"}, "wav"),
         ({"audio_layout": "sideways"}, "wav"),
         ({"max_new_tokens": "many"}, "wav"),
+        ({"max_new_tokens": "-1"}, "wav"),
     ],
 )
 def test_invalid_requests_are_rejected(server: Server, fields: dict, wav) -> None:
@@ -260,6 +261,10 @@ def test_realtime_manual_session(server: Server) -> None:
         socket.send("{not json")
         assert json.loads(socket.recv())["error"]["code"] == "invalid_json"
         socket.send(json.dumps({"type": "input_audio_buffer.append", "audio": "***"}))
+        assert json.loads(socket.recv())["error"]["code"] == "invalid_audio"
+        socket.send(
+            json.dumps({"type": "input_audio_buffer.append", "audio": "AAAAAA"})
+        )
         assert json.loads(socket.recv())["error"]["code"] == "invalid_audio"
         socket.send(
             json.dumps(

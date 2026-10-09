@@ -167,6 +167,8 @@ int HandleTranscriptions(mg_connection *connection, void *data) {
       }
       if (parsed != max_new_tokens->size()) {
         throw std::invalid_argument("max_new_tokens must be an integer");
+      } else if (*options.max_new_tokens < 0) {
+        throw std::invalid_argument("max_new_tokens must not be negative");
       } else {
       }
     } else {
