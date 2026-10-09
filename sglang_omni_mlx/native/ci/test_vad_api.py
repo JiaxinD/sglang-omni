@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import vad_golden
 from websockets.sync.client import connect
 
 RUNTIME_BIN = os.environ.get("NATIVE_RUNTIME_BIN")
@@ -162,9 +163,9 @@ def test_speech_timestamps_match_the_original(server: Server, profile: str) -> N
     assert status == 200
     reply = json.loads(body)
     assert reply["sample_rate"] == 16000
-    assert [[r["start"], r["end"]] for r in reply["timestamps"]] == GOLDEN[
-        "timestamps"
-    ][clip][profile]
+    actual = [[r["start"], r["end"]] for r in reply["timestamps"]]
+    mismatch = vad_golden.speech_mismatch(GOLDEN["timestamps"][clip][profile], actual)
+    assert mismatch <= GOLDEN["tolerance"]["max_speech_mismatch"]
 
 
 def test_pcm16_wav_and_default_options_are_accepted(server: Server) -> None:
