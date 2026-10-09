@@ -109,6 +109,21 @@ final class OmniVoiceActivityIntegrationTests: XCTestCase {
         await detector.unload()
     }
 
+    /// A reset() during a pending exchange is not a server failure: the call
+    /// returns quietly and the next one reuses the same server.
+    func testStreamingDetectorResetDuringAnExchangeDoesNotFail() async throws {
+        let samples = try clip()
+        let detector = ASRSileroStreamingVoiceActivityDetector()
+        _ = try await detector.probability(samples: Array(samples.prefix(512)), sampleRate: 16_000, streamID: "reset")
+        async let pending = detector.probability(samples: samples, sampleRate: 16_000, streamID: "reset")
+        try await Task.sleep(for: .milliseconds(20))
+        await detector.reset()
+        _ = try await pending
+        let next = try await detector.probability(samples: Array(samples.prefix(512)), sampleRate: 16_000, streamID: "reset")
+        XCTAssertNotNil(next)
+        await detector.unload()
+    }
+
     /// The offline detector finds the same speech ranges as getSpeechTimestamps
     /// with the stored meeting profile, to within one chunk.
     func testOfflineDetectorMatchesMLXAudioVAD() async throws {

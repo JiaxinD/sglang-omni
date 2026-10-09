@@ -388,10 +388,13 @@ actor ASRSileroStreamingVoiceActivityDetector {
             }
             return probability
         } catch {
-            // A broken stream starts over on the next call, as after reset().
-            if omniStreams[streamID] === stream {
-                omniStreams[streamID] = nil
+            guard omniStreams[streamID] === stream else {
+                // reset() or a sibling failure already dropped this stream; the server is not at fault.
+                await stream.close()
+                return nil
             }
+            // A broken stream starts over on the next call, as after reset().
+            omniStreams[streamID] = nil
             await stream.close()
             await releaseOmniEndpoint(after: error, endpoint: endpoint)
             throw error
