@@ -5,14 +5,18 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import Field
+
 from sglang_omni.config import (
     EngineStageConfig,
     FactoryArgs,
     PipelineConfig,
+    PlacementConfig,
     StageConfig,
 )
 
 _PKG = "sglang_omni.models.fishaudio_s2_pro"
+PREPROCESSING_TOTAL_RESERVE_BYTES = "6GiB"
 
 
 class S2ProPipelineConfig(PipelineConfig):
@@ -26,11 +30,20 @@ class S2ProPipelineConfig(PipelineConfig):
     }
 
     model_path: str
+    # Note (Jiaxin Deng): the engine sizes its KV pool from mem_fraction_static and
+    # free memory, so the reference codec's reserve comes out of that headroom.
+    placement: PlacementConfig = Field(
+        default_factory=lambda: PlacementConfig(
+            require_memory_fraction_for_colocation=False
+        )
+    )
     stages: list[StageConfig] = [
         StageConfig(
             name="preprocessing",
             process="preprocessing",
             factory_path=f"{_PKG}.stages.create_preprocessing_executor",
+            gpu=0,
+            total_reserve_bytes=PREPROCESSING_TOTAL_RESERVE_BYTES,
             next="tts_engine",
         ),
         EngineStageConfig(

@@ -366,10 +366,13 @@ class FishReferenceEncodeHook(TensorReferenceEncodeHook[FishReferenceInput]):
 def create_preprocessing_executor(
     model_path: str,
     *,
+    device: str | None = None,
+    gpu_id: int | None = None,
     max_concurrency: int = 8,
 ):
-    """Returns a threaded scheduler for CPU-heavy preprocessing."""
+    """Returns a threaded scheduler that tokenizes and encodes reference audio."""
     from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+    from sglang_omni.utils.device import resolve_concrete_device
 
     worker_count = max(int(max_concurrency), 1)
     intraop_threads = configure_preprocessing_threads(worker_count)
@@ -389,9 +392,22 @@ def create_preprocessing_executor(
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(checkpoint_dir)
     adapter = S2ProTokenizerAdapter(tokenizer)
-    codec = load_codec(checkpoint_dir, "cpu")
+    device = str(resolve_concrete_device(device, gpu_id))
+    codec = load_codec(checkpoint_dir, device)
+    reference_encode_hook = FishReferenceEncodeHook(
+        codec=codec, checkpoint_id=checkpoint_dir, device=device
+    )
+    if torch.device(device).type != "cpu":
+        # Note (Jiaxin Deng): TF32 convolutions flip ~3% of reference codes versus
+        # the CPU encode; full fp32 keeps them identical at the same speed.
+        torch.backends.cudnn.allow_tf32 = False
+        reference_encode_hook.encode_reference_waveform(
+            torch.zeros((1, int(codec.sample_rate))), int(codec.sample_rate)
+        )
+    else:
+        pass
     reference_encode_service = ReferenceEncodeService(
-        FishReferenceEncodeHook(codec=codec, checkpoint_id=checkpoint_dir),
+        reference_encode_hook,
         max_items=256,
         max_bytes=64 * 1024 * 1024,
         timeout_s=130.0,
