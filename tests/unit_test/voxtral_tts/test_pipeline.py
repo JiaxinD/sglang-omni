@@ -367,6 +367,7 @@ def test_voxtral_streamed_chunks_match_full_decode(
     scheduler.chunk_frames = 2
     whole = scheduler.decode_utterance(list(codes.unbind(0)))
     assert whole.tolist() == pytest.approx(full.tolist())
+    scheduler.chunk_frames = 3
 
     for request_id, rows in (("a", codes[:6]), ("b", codes[:4]), ("c", codes[:1])):
         scheduler.ingest(
@@ -379,6 +380,43 @@ def test_voxtral_streamed_chunks_match_full_decode(
     )
     assert coalesced["a"].tolist() == pytest.approx(full[:18].tolist())
     assert coalesced["b"].tolist() == pytest.approx(full[:12].tolist())
+
+
+def test_voxtral_stream_backlog_decodes_in_bounded_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stages, "_resolve_checkpoint", lambda model_path: model_path)
+    monkeypatch.setattr(
+        stages,
+        "load_audio_tokenizer",
+        lambda *args, **kwargs: CausalFakeAudioTokenizer(),
+    )
+    scheduler = stages.create_vocoder_executor("model", device="cpu")
+    scheduler.initial_chunk_frames = 2
+    scheduler.chunk_frames = 3
+    scheduler.left_context_frames = 2
+    codes = torch.stack([torch.arange(3, 23), torch.zeros(20, dtype=torch.long)], 1)
+    full = scheduler.decode_utterance(list(codes.unbind(0)))
+    window_frames = []
+    decode_windows = scheduler.decode_windows
+
+    def record_windows(windows):
+        window_frames.extend(window.codes.shape[0] for window in windows)
+        return decode_windows(windows)
+
+    scheduler.decode_windows = record_windows
+    state = scheduler.get_or_create_stream_state("backlog")
+    scheduler.ingest("backlog", state, codes[:10])
+    chunks = []
+    while participants := scheduler.select_step_participants():
+        plan = scheduler.build_step_plan(participants)
+        chunks.append(scheduler.run_step(participants, plan)["backlog"])
+    scheduler.ingest("backlog", state, codes[10:])
+    chunks.append(scheduler.decode_delta("backlog", state, is_final=True))
+
+    assert window_frames == [8, 6, 8, 6]
+    assert len(chunks) == 3
+    assert torch.cat(chunks).tolist() == pytest.approx(full.tolist())
 
 
 def test_voxtral_stream_output_batches_rows_and_flushes_tail() -> None:

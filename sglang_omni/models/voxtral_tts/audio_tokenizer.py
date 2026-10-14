@@ -768,13 +768,18 @@ class VoxtralCodecGraphs:
         )
 
     def fits(self, windows: list[torch.Tensor]) -> bool:
-        return len(windows) <= max(self.graphs) and all(
-            int(window.shape[0]) <= self.max_frames for window in windows
-        )
+        return all(int(window.shape[0]) <= self.max_frames for window in windows)
 
     def decode(self, windows: list[torch.Tensor]) -> list[torch.Tensor]:
         """Decode ``[T_i, K]`` code windows (special-token offset included) on the
         current stream; returns CPU float waveforms of ``T_i`` frames each."""
+        max_batch = max(self.graphs)
+        audios = []
+        for start in range(0, len(windows), max_batch):
+            audios.extend(self.decode_batch(windows[start : start + max_batch]))
+        return audios
+
+    def decode_batch(self, windows: list[torch.Tensor]) -> list[torch.Tensor]:
         bucket = min(bs for bs in self.graphs if bs >= len(windows))
         graph, codes, audio = self.graphs[bucket]
         staged = torch.zeros(codes.shape, dtype=torch.long)

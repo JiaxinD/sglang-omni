@@ -478,13 +478,17 @@ class VoxtralStreamingVocoder(
 
     def decode_utterance(self, frames: list[torch.Tensor]) -> torch.Tensor:
         """Whole-utterance decode through the same left-context windows."""
-        state = VoxtralStreamState(frames=frames)
+        return self.decode_pending(VoxtralStreamState(frames=frames))
+
+    def decode_pending(self, state: VoxtralStreamState) -> torch.Tensor:
+        """Decode every pending frame as one batch of bounded windows."""
+        emitted_frames = state.emitted_frames
         windows = []
-        while state.emitted_frames < len(frames):
-            window = self.build_window(state, max_new_frames=2 * self.chunk_frames)
+        while state.emitted_frames < len(state.frames):
+            window = self.build_window(state)
             windows.append(window)
             state.emitted_frames += window.new_frames
-        state.emitted_frames = 0
+        state.emitted_frames = emitted_frames
         audios = self.decode_windows(windows)
         return torch.cat(
             [
@@ -532,17 +536,11 @@ class VoxtralStreamingVocoder(
         )
         return new_frames > 0 and (is_final or new_frames >= threshold)
 
-    def build_window(
-        self, state: VoxtralStreamState, *, max_new_frames: int | None = None
-    ) -> VoxtralStreamWindow:
+    def build_window(self, state: VoxtralStreamState) -> VoxtralStreamWindow:
         # Note (Jiaxin Deng): the codec is causal, so enough left context reproduces
         # the full decode within its bf16 noise floor (measured: 12+ frames).
         n_warmup = self.vocoder.N_WARMUP
-        total = len(state.frames)
-        if max_new_frames is not None:
-            total = min(total, state.emitted_frames + max_new_frames)
-        else:
-            pass
+        total = min(len(state.frames), state.emitted_frames + 2 * self.chunk_frames)
         sequence = [state.frames[0]] * n_warmup + state.frames[:total]
         start = max(0, state.emitted_frames + n_warmup - self.left_context_frames)
         return VoxtralStreamWindow(
@@ -568,6 +566,7 @@ class VoxtralStreamingVocoder(
         state.emitted_frames += window.new_frames
         return delta
 
+    @torch.no_grad()
     def decode_windows(self, windows: list[VoxtralStreamWindow]) -> list[torch.Tensor]:
         codes = [window.codes for window in windows]
         if self.decode_stream is None:
@@ -589,8 +588,7 @@ class VoxtralStreamingVocoder(
             return None
         else:
             pass
-        window = self.build_window(state)
-        return self.commit_window(state, window, self.decode_windows([window])[0])
+        return self.decode_pending(state)
 
     def select_step_participants(self) -> list[tuple[str, VoxtralStreamState]]:
         return [
