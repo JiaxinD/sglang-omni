@@ -6,6 +6,7 @@ import contextlib
 import threading
 from types import SimpleNamespace
 
+import pytest
 import torch
 from transformers import HiggsAudioV2TokenizerConfig, HiggsAudioV2TokenizerModel
 
@@ -259,3 +260,52 @@ def test_reference_encode_keeps_cudnn_out_on_cuda_only() -> None:
     codec.device = torch.device("cpu")
     with codec.encode_kernel_context():
         assert torch.backends.cudnn.enabled == cudnn_before
+
+
+def test_overlapping_reference_encodes_restore_cudnn() -> None:
+    codec = object.__new__(audio_codec.HiggsAudioCodec)
+    codec.device = torch.device("cuda", 0)
+    cudnn_before = torch.backends.cudnn.enabled
+    first_inside = threading.Event()
+    second_inside = threading.Event()
+    first_done = threading.Event()
+
+    def second() -> None:
+        first_inside.wait()
+        with codec.encode_kernel_context():
+            second_inside.set()
+            first_done.wait(timeout=1.0)
+
+    thread = threading.Thread(target=second)
+    thread.start()
+    with codec.encode_kernel_context():
+        first_inside.set()
+        second_inside.wait(timeout=0.2)
+    first_done.set()
+    thread.join()
+
+    assert torch.backends.cudnn.enabled == cudnn_before
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_reference_encodes_run_without_cudnn() -> None:
+    seen: list[bool] = []
+
+    class FakeModel:
+        def encode(self, wav: torch.Tensor) -> SimpleNamespace:
+            seen.append(torch.backends.cudnn.enabled)
+            return SimpleNamespace(
+                audio_codes=torch.zeros(wav.shape[0], 8, 3, device=wav.device)
+            )
+
+    codec = object.__new__(audio_codec.HiggsAudioCodec)
+    codec.model = FakeModel()
+    codec.device = torch.device("cuda", torch.cuda.current_device())
+    codec.dtype = torch.float32
+    one_second = torch.zeros(codec.SAMPLE_RATE)
+
+    codec.encode_reference(one_second)
+    codec.encode_batch([one_second, one_second])
+
+    assert seen == [False, False]
+    assert torch.backends.cudnn.enabled

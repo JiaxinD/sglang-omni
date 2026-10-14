@@ -155,6 +155,9 @@ class HiggsAudioCodec:
     """Frozen encode/decode wrapper around :class:`HiggsAudioV2TokenizerModel`."""
 
     SAMPLE_RATE: int = 24_000
+    # Note (Jiaxin Deng): cuDNN/SDPA backend flags are process-global, so overlapping
+    # encodes would restore them out of order and leave cuDNN off for good.
+    encode_kernel_lock = threading.Lock()
 
     def __init__(
         self, model: HiggsAudioV2TokenizerModel, *, device: torch.device
@@ -359,7 +362,11 @@ class HiggsAudioCodec:
             SDPBackend.EFFICIENT_ATTENTION,
             SDPBackend.MATH,
         ]
-        with torch.backends.cudnn.flags(enabled=False), sdpa_kernel(backends):
+        with (
+            self.encode_kernel_lock,
+            torch.backends.cudnn.flags(enabled=False),
+            sdpa_kernel(backends),
+        ):
             yield
 
     def bucketed_batch(
