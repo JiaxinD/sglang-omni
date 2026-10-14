@@ -172,7 +172,8 @@ def test_fish_preprocessing_encodes_references_on_the_placement_device(
         lambda path: FakeFishTokenizer(),
     )
     monkeypatch.setattr(
-        "sglang_omni.utils.device.resolve_concrete_device",
+        s2pro_stages,
+        "resolve_concrete_device",
         lambda device, index: torch.device(device or "cuda", index),
     )
     monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", True)
