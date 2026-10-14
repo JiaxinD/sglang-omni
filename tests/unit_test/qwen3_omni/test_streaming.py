@@ -317,6 +317,43 @@ def test_qwen_talker_conditions_on_streamed_token_ids():
     )
 
 
+def test_qwen_talker_projects_each_streamed_token_id_once():
+    projected_rows = []
+
+    def text_projection(tensor):
+        projected_rows.append(tensor.shape[0])
+        return tensor * 2.0
+
+    prefill_builder = object.__new__(TalkerPrefillBuilder)
+    prefill_builder.model = SimpleNamespace(text_projection=text_projection)
+    prefill_builder.device = torch.device("cpu")
+    prefill_builder.dtype = torch.float32
+    prefill_builder.load_prompt_token_embeddings = lambda token_ids: (
+        token_ids.to(torch.float32).unsqueeze(-1).expand(-1, 2)
+    )
+    prefill_builder.projected_chunk_cache = {}
+
+    def token_chunk(token_id: int) -> StreamItem:
+        return StreamItem(0, None, "thinker", {"token_id": token_id})
+
+    first = prefill_builder.project_assistant_chunk(token_chunk(7))
+    again = prefill_builder.project_assistant_chunk(token_chunk(7))
+    other = prefill_builder.project_assistant_chunk(token_chunk(8))
+    hidden = prefill_builder.project_assistant_chunk(
+        StreamItem(0, torch.tensor([5.0, 5.0]), "thinker")
+    )
+    prefill_builder.project_assistant_chunk(
+        StreamItem(0, torch.tensor([5.0, 5.0]), "thinker")
+    )
+
+    assert torch.equal(first, torch.tensor([14.0, 14.0]))
+    assert again is first
+    assert torch.equal(other, torch.tensor([16.0, 16.0]))
+    assert torch.equal(hidden, torch.tensor([10.0, 10.0]))
+    assert projected_rows == [1, 1, 1, 1]
+    assert set(prefill_builder.projected_chunk_cache) == {7, 8}
+
+
 def test_qwen_hidden_states_skip_only_explicit_text_output_requests():
     output_processor = SGLangOutputProcessor(
         capture_hidden=True,

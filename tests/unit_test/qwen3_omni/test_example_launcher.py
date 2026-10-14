@@ -424,14 +424,14 @@ def test_partial_start_colocated_defaults_on(mock_launch_server):
     assert talker.factory.enable_partial_start is True
 
 
-def test_partial_start_colocated_can_be_enabled(mock_launch_server):
-    args = make_args(colocated=True, enable_partial_start=True)
+def test_partial_start_colocated_can_be_disabled(mock_launch_server):
+    args = make_args(colocated=True, enable_partial_start=False)
     _launch_speech_server(args)
 
     config = mock_launch_server.call_args[0][0]
     talker = make_stage(config, "talker_ar")
 
-    assert talker.factory.enable_partial_start is True
+    assert talker.factory.enable_partial_start is False
 
 
 def test_partial_start_can_be_disabled(mock_launch_server):
