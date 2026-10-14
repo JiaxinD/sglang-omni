@@ -324,7 +324,8 @@ def test_overlapping_reference_encodes_restore_cudnn(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_reference_encodes_run_without_cudnn() -> None:
+@pytest.mark.parametrize("is_cudnn_enabled", [False, True])
+def test_reference_encodes_run_without_cudnn(is_cudnn_enabled: bool) -> None:
     seen: list[bool] = []
 
     class FakeModel:
@@ -340,8 +341,10 @@ def test_reference_encodes_run_without_cudnn() -> None:
     codec.dtype = torch.float32
     one_second = torch.zeros(codec.SAMPLE_RATE)
 
-    codec.encode_reference(one_second)
-    codec.encode_batch([one_second, one_second])
+    with torch.backends.cudnn.flags(enabled=is_cudnn_enabled):
+        codec.encode_reference(one_second)
+        assert torch.backends.cudnn.enabled == is_cudnn_enabled
+        codec.encode_batch([one_second, one_second])
+        assert torch.backends.cudnn.enabled == is_cudnn_enabled
 
     assert seen == [False, False]
-    assert torch.backends.cudnn.enabled
