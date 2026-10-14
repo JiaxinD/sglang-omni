@@ -25,7 +25,6 @@ from sglang_omni.models.moss_tts.hf_loading import (
     moss_transformers_processor_compat,
 )
 from sglang_omni.models.moss_tts.reference_encoder import MossReferenceEncoder
-from sglang_omni.models.moss_tts_local.config import resolve_vocoder_cuda_graph
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -41,6 +40,7 @@ from sglang_omni.models.moss_tts_local.streaming_vocoder import (
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.utils.cpu import bounded_intraop_threads
+from sglang_omni.utils.moss_vocoder_graph import resolve_vocoder_cuda_graph
 
 if TYPE_CHECKING:
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler

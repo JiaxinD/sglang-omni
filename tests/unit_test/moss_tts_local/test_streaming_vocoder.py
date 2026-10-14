@@ -27,12 +27,12 @@ from sglang_omni.models.moss_tts_local.request_builders import (
     build_moss_tts_local_stream_metadata,
 )
 from sglang_omni.models.moss_tts_local.streaming_vocoder import (
-    CodecStreamSession,
     MossTTSLocalStreamingVocoderScheduler,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.scheduling.moss_codec import CodecStreamSession
 from sglang_omni.scheduling.streaming_vocoder import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 
 N_VQ = 4
@@ -457,9 +457,7 @@ def test_compact_native_session_replays_graph_and_slices_bucket() -> None:
 
 
 def test_compact_runner_requires_scratch_rows() -> None:
-    from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
-        MossVocoderCudaGraphRunner,
-    )
+    from sglang_omni.scheduling.moss_codec_cuda_graph import MossVocoderCudaGraphRunner
 
     with pytest.raises(ValueError, match="scratch_capacity"):
         MossVocoderCudaGraphRunner(
@@ -473,9 +471,7 @@ def test_compact_runner_requires_scratch_rows() -> None:
 
 
 def test_runner_skips_capture_on_cpu() -> None:
-    from sglang_omni.models.moss_tts_local.vocoder_cuda_graph import (
-        MossVocoderCudaGraphRunner,
-    )
+    from sglang_omni.scheduling.moss_codec_cuda_graph import MossVocoderCudaGraphRunner
 
     runner = MossVocoderCudaGraphRunner(
         FakeCodec(),

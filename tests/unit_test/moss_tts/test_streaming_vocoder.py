@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import queue
 from types import SimpleNamespace
 
@@ -9,20 +10,20 @@ import numpy as np
 import torch
 from torch import nn
 
-from sglang_omni.models.moss_tts.attention import MossAudioTokenizerStreamingModule
-from sglang_omni.models.moss_tts.audio_tokenizer import MossAudioTokenizerVocoder
+from sglang_omni.models.moss_tts.audio_tokenizer import (
+    MossAudioTokenizerVocoder,
+    MossAudioVocoder,
+)
 from sglang_omni.models.moss_tts.payload_types import MossTTSState
 from sglang_omni.models.moss_tts.request_builders import (
     MossTTSSGLangRequestData,
     make_moss_tts_stream_output_builder,
 )
-from sglang_omni.models.moss_tts.streaming_vocoder import (
-    MossStreamingVocoderScheduler,
-    streaming_codec_view,
-)
+from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderScheduler
 from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.moss_codec import CodecStreamSession
 from sglang_omni.scheduling.types import RequestOutput
 from tests.unit_test.moss_tts.test_encoder import tiny_moss_audio_tokenizer_v1_config
 
@@ -114,6 +115,9 @@ def make_scheduler(**kwargs) -> tuple[MossStreamingVocoderScheduler, FakeCodec]:
     kwargs.setdefault("coalesce_floor_frames", 1)
     kwargs.setdefault("vocoder_cuda_graph", False)
     scheduler = MossStreamingVocoderScheduler(vocoder, **kwargs)
+    scheduler.session = CodecStreamSession(
+        audio_vocoder.model, stream_slots=scheduler.stream_slots, n_vq=N_VQ
+    )
     return scheduler, audio_vocoder.model
 
 
@@ -379,23 +383,50 @@ def test_pad_closed_short_segment_streams_before_done() -> None:
 
 
 def test_streaming_codec_view_keeps_native_decoder_stateless() -> None:
+    """Offline dispatch must preserve both its PCM and the live v1 continuation."""
+    torch.manual_seed(2805)
     codec = MossAudioTokenizerVocoder(
-        tiny_moss_audio_tokenizer_v1_config(), parameter_device="cpu"
+        tiny_moss_audio_tokenizer_v1_config(),
+        parameter_device="cpu",
+        decoder_dtype=torch.float32,
+        compute_dtype=torch.float32,
+        attention_backend="sdpa",
     )
-    view = streaming_codec_view(codec)
-    view.initialize_decoder_state_pool(2)
+    codec.eval()
+    processor = SimpleNamespace(model_config=SimpleNamespace(n_vq=2, audio_pad_code=4))
+    vocoder = MossTTSVocoder(processor, MossAudioVocoder(codec, device="cpu"), "cpu")
+    scheduler = MossStreamingVocoderScheduler(
+        vocoder, stream_slots=2, vocoder_cuda_graph=False
+    )
+    offline_codes = torch.tensor([[0, 1], [1, 2], [3, 0], [2, 3]])
 
-    def streaming_states(decoder):
-        return [
-            module.streaming_state
-            for module in decoder.modules()
-            if isinstance(module, MossAudioTokenizerStreamingModule)
-        ]
+    def decode_offline() -> bytes:
+        payload = StagePayload(
+            request_id="offline",
+            request=OmniRequest(inputs="hello", params={"stream": False}),
+            data=MossTTSState(
+                delayed_audio_codes=apply_delay_pattern(offline_codes)
+            ).to_dict(),
+        )
+        return asyncio.run(scheduler.vocode_payload(payload)).data["audio_waveform"]
 
-    assert all(state is not None for state in streaming_states(view.decoder))
-    assert all(state is None for state in streaming_states(codec.decoder))
-    assert view.quantizer is codec.quantizer
-    assert {id(p) for p in view.decoder.parameters()} == {
-        id(p) for p in codec.decoder.parameters()
-    }
-    view.close_decoder_state_pool()
+    before = decode_offline()
+    session = scheduler.ensure_session()
+    slot = session.acquire()
+    first_codes = torch.tensor([[1, 3, 0], [2, 0, 1]])
+    next_codes = torch.tensor([[2, 1], [3, 2]])
+    try:
+        session.step({slot: first_codes})
+        expected_continuation = session.step({slot: next_codes})[slot]
+        session.reset_slots([slot])
+        session.step({slot: first_codes})
+        during = decode_offline()
+        actual_continuation = session.step({slot: next_codes})[slot]
+        assert during == before
+        torch.testing.assert_close(
+            actual_continuation, expected_continuation, rtol=0, atol=0
+        )
+    finally:
+        scheduler.on_serving_stop()
+    after = decode_offline()
+    assert after == before

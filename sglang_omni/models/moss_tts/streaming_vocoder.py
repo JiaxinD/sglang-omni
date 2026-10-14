@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Mapping
+from typing import Literal
 
 import torch
 
@@ -23,35 +24,24 @@ from sglang_omni.models.moss_tts.payload_types import (
     load_moss_tts_state,
     resolve_moss_audio_pad_code,
 )
-from sglang_omni.models.moss_tts_local.streaming_vocoder import (
-    CoalescedStepPlan,
-    CodecStreamSession,
-)
+from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
 from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.moss_codec import CoalescedStepPlan, CodecStreamSession
 from sglang_omni.scheduling.pipeline_state import build_usage
 from sglang_omni.scheduling.streaming_vocoder import (
     StreamingVocoderBase,
     resolve_initial_codec_chunk_frames,
 )
 
-if TYPE_CHECKING:
-    from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
-else:
-    pass
-
 logger = logging.getLogger(__name__)
 
 
-def streaming_codec_view(codec: torch.nn.Module) -> torch.nn.Module:
+def streaming_codec_view(codec: MossAudioTokenizerVocoder) -> MossAudioTokenizerVocoder:
     """Weight-sharing codec whose decoder owns the streaming state.
 
     The native decoder also serves the non-streaming batched and standalone
     decodes, which must never see live streaming offsets or KV.
     """
-    if not isinstance(codec, MossAudioTokenizerVocoder):
-        return codec
-    else:
-        pass
     view = MossAudioTokenizerVocoder(
         vars(codec.config),
         parameter_device="meta",
@@ -68,6 +58,27 @@ def streaming_codec_view(codec: torch.nn.Module) -> torch.nn.Module:
         attention_backend=codec.attention_backend,
     )
     return view.eval()
+
+
+def stream_contract_integer(
+    request_id: str,
+    field_name: Literal["n_vq", "audio_pad_code", "sample_rate"],
+    value: object,
+    previous: int | None,
+) -> int:
+    """Read a positive wire integer without changing the stream contract."""
+    resolved_value = int(value)
+    if resolved_value <= 0:
+        raise ValueError(
+            f"MOSS-TTS stream {field_name} for {request_id!r} must be > 0, got {value}"
+        )
+    elif previous is not None and previous != resolved_value:
+        raise ValueError(
+            f"MOSS-TTS stream {field_name} changed for {request_id!r}: "
+            f"{previous} -> {value}"
+        )
+    else:
+        return resolved_value
 
 
 @dataclass
@@ -159,27 +170,25 @@ class MossStreamingVocoderScheduler(
             return
         else:
             pass
-        for name in ("n_vq", "audio_pad_code", "sample_rate"):
-            value = source.get(name)
-            if value is None:
-                continue
-            else:
-                pass
-            if int(value) <= 0:
-                raise ValueError(
-                    f"MOSS-TTS stream {name} for {request_id!r} must be > 0, got {value}"
-                )
-            else:
-                pass
-            previous = getattr(state, name)
-            if previous is not None and int(previous) != int(value):
-                raise ValueError(
-                    f"MOSS-TTS stream {name} changed for {request_id!r}: "
-                    f"{previous} -> {value}"
-                )
-            else:
-                pass
-            setattr(state, name, int(value))
+        n_vq = source.get("n_vq")
+        if n_vq is not None:
+            state.n_vq = stream_contract_integer(request_id, "n_vq", n_vq, state.n_vq)
+        else:
+            pass
+        audio_pad_code = source.get("audio_pad_code")
+        if audio_pad_code is not None:
+            state.audio_pad_code = stream_contract_integer(
+                request_id, "audio_pad_code", audio_pad_code, state.audio_pad_code
+            )
+        else:
+            pass
+        sample_rate = source.get("sample_rate")
+        if sample_rate is not None:
+            state.sample_rate = stream_contract_integer(
+                request_id, "sample_rate", sample_rate, state.sample_rate
+            )
+        else:
+            pass
         if state.threshold == 0:
             self.latch_threshold(request_id, state, source)
         else:
@@ -412,11 +421,7 @@ class MossStreamingVocoderScheduler(
     def warmup_now(self) -> None:
         """Capture the session's decode graphs before the stage is marked ready;
         best-effort, serving falls back to eager decode."""
-        model = getattr(self.audio_vocoder, "model", None)
-        try:
-            on_cuda = next(model.parameters()).device.type == "cuda"
-        except (AttributeError, StopIteration):
-            on_cuda = False
+        on_cuda = next(self.audio_vocoder.model.parameters()).device.type == "cuda"
         if not self.vocoder_cuda_graph or not on_cuda:
             return
         else:

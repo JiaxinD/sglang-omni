@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import torch
 
+from sglang_omni.models.moss_tts.audio_tokenizer import MossAudioTokenizerVocoder
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,16 +32,15 @@ class CapturedVocoderGraph:
 
 
 class MossVocoderCudaGraphRunner:
-    """Replay native streaming decode graphs keyed by ``(B, T)``.
+    """Replay native streaming decode graphs keyed by batch and frame count.
 
-    ``B`` is the smallest graph bucket covering the active rows, and batch
-    padding uses scratch state slots.  ``T`` is always exact because frame
+    Batch padding uses scratch state slots. Frame count is exact because frame
     padding would advance causal decoder state and change the waveform.
     """
 
     def __init__(
         self,
-        codec,
+        codec: MossAudioTokenizerVocoder,
         *,
         real_state_capacity: int,
         scratch_capacity: int,
@@ -49,7 +50,7 @@ class MossVocoderCudaGraphRunner:
         warmup_iters: int = 3,
         min_free_gb: float = 3.0,
     ) -> None:
-        self.codec = codec
+        self.codec: MossAudioTokenizerVocoder = codec
         self.real_state_capacity = int(real_state_capacity)
         self._scratch_capacity = int(
             scratch_capacity
@@ -69,7 +70,7 @@ class MossVocoderCudaGraphRunner:
             {int(size) for size in frame_sizes if int(size) > 0}
         )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
         self.graphs: dict[tuple[int, int], CapturedVocoderGraph] = {}
-        self.pool = None
+        self.pool: tuple[int, int] | None = None
         self.sealed = False
 
         if self.real_state_capacity <= 0:
@@ -250,10 +251,9 @@ class MossVocoderCudaGraphRunner:
                 enough, free = self.enough_free_vram()
                 if not enough:
                     logger.warning(
-                        "MOSS-Audio-Tokenizer vocoder CUDA graphs: free VRAM %.1fGB < %.1fGB; "
-                        "skipping remaining captures",
-                        free / 1024**3,
-                        self.min_free_bytes / 1024**3,
+                        f"MOSS-Audio-Tokenizer vocoder CUDA graphs: free VRAM "
+                        f"{free / 1024**3:.1f}GB < {self.min_free_bytes / 1024**3:.1f}GB; "
+                        "skipping remaining captures"
                     )
                     break
                 else:
@@ -273,21 +273,17 @@ class MossVocoderCudaGraphRunner:
                         )
                     except Exception:
                         logger.exception(
-                            "failed to reset vocoder graph state slots after "
-                            "capture failure for (B,T)=%s",
-                            key,
+                            f"failed to reset vocoder graph state slots after "
+                            f"capture failure for (B,T)={key}"
                         )
                     logger.warning(
-                        "MOSS-Audio-Tokenizer vocoder CUDA graph capture failed for (B,T)=%s; "
+                        f"MOSS-Audio-Tokenizer vocoder CUDA graph capture failed for (B,T)={key}; "
                         "using eager",
-                        key,
                         exc_info=True,
                     )
         logger.info(
-            "MOSS-Audio-Tokenizer vocoder CUDA graphs sealed: %d/%d captured %s",
-            len(self.graphs),
-            len(keys),
-            self.capture_sizes,
+            f"MOSS-Audio-Tokenizer vocoder CUDA graphs sealed: "
+            f"{len(self.graphs)}/{len(keys)} captured {self.capture_sizes}"
         )
         return self.capture_sizes
 
@@ -301,7 +297,7 @@ class MossVocoderCudaGraphRunner:
         state_slot_ids: torch.Tensor,
         valid_rows: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Replay a captured native decode shape, or return ``None`` for eager."""
+        """Replay a captured native decode shape, or return None for eager."""
         if not codes.is_cuda or torch.cuda.is_current_stream_capturing():
             return None
         else:

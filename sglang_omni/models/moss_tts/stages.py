@@ -35,9 +35,9 @@ from sglang_omni.models.moss_tts.request_builders import (
 )
 from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderScheduler
 from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
-from sglang_omni.models.moss_tts_local.config import resolve_vocoder_cuda_graph
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.utils.moss_vocoder_graph import resolve_vocoder_cuda_graph
 
 if TYPE_CHECKING:
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
