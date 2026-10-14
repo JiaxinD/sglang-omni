@@ -99,7 +99,7 @@ def test_voxtral_stage_factories_preserve_generation_placement_and_resolve_vocod
         stages,
         "load_audio_tokenizer",
         lambda _checkpoint, config, device: (
-            seen_devices.append(device) or SimpleNamespace()
+            seen_devices.append(device) or SimpleNamespace(sampling_rate=24000)
         ),
     )
 
@@ -289,7 +289,7 @@ def test_voxtral_vocoder_preserves_warmup_trim_and_fade(
         ).to_dict(),
     )
 
-    result = asyncio.run(scheduler.fn(payload))
+    result = asyncio.run(scheduler.compute_fn(payload))
 
     assert scheduler.max_batch_size == 1
     assert scheduler.max_batch_wait_s == 0
@@ -309,6 +309,96 @@ def test_voxtral_vocoder_preserves_warmup_trim_and_fade(
     }
 
 
+class CausalFakeAudioTokenizer:
+    """Each frame decodes to 3 samples depending on itself and the previous frame."""
+
+    sampling_rate = 1000
+    downsample_factor = 3
+    num_codebooks = 2
+
+    def decode_helper_batch_async(self, codes_list):
+        outputs = []
+        for codes in codes_list:
+            values = codes[:, 0].to(torch.float32)
+            previous = torch.cat([values[:1], values[:-1]])
+            outputs.append((values * 10 + previous).repeat_interleave(3))
+        return outputs
+
+
+def test_voxtral_streamed_chunks_match_full_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stages, "_resolve_checkpoint", lambda model_path: model_path)
+    monkeypatch.setattr(
+        stages,
+        "load_audio_tokenizer",
+        lambda *args, **kwargs: CausalFakeAudioTokenizer(),
+    )
+    scheduler = stages.create_vocoder_executor("model", device="cpu")
+    scheduler.initial_chunk_frames = 2
+    scheduler.chunk_frames = 3
+    scheduler.left_context_frames = 2
+    codes = torch.stack([torch.arange(3, 13), torch.zeros(10, dtype=torch.long)], 1)
+    payload = StagePayload(
+        request_id="voxtral-stream",
+        request=OmniRequest(inputs="hello", params={}),
+        data=VoxtralTTSState(audio_codes=codes).to_dict(),
+    )
+    full = np.frombuffer(
+        asyncio.run(scheduler.compute_fn(payload)).data["audio_waveform"],
+        dtype=np.float32,
+    )
+
+    state = scheduler.create_stream_state("voxtral-stream")
+    end_audio = torch.tensor([[1, 0]], dtype=torch.long)
+    chunks = []
+    for rows in (codes[:1], codes[1:4], codes[4:9], torch.cat([codes[9:], end_audio])):
+        scheduler.ingest("voxtral-stream", state, rows)
+        chunk = scheduler.decode_delta("voxtral-stream", state, is_final=False)
+        if chunk is not None:
+            chunks.append(chunk)
+        else:
+            pass
+    scheduler.ingest("voxtral-stream", state, codes[:1])
+    chunks.append(scheduler.decode_delta("voxtral-stream", state, is_final=True))
+
+    assert [len(chunk) for chunk in chunks] == [12, 15, 3]
+    assert torch.cat(chunks).tolist() == pytest.approx(full.tolist())
+    scheduler.chunk_frames = 2
+    whole = scheduler.decode_utterance(list(codes.unbind(0)))
+    assert whole.tolist() == pytest.approx(full.tolist())
+
+    for request_id, rows in (("a", codes[:6]), ("b", codes[:4]), ("c", codes[:1])):
+        scheduler.ingest(
+            request_id, scheduler.get_or_create_stream_state(request_id), rows
+        )
+    participants = scheduler.select_step_participants()
+    assert [request_id for request_id, _ in participants] == ["a", "b"]
+    coalesced = scheduler.run_step(
+        participants, scheduler.build_step_plan(participants)
+    )
+    assert coalesced["a"].tolist() == pytest.approx(full[:18].tolist())
+    assert coalesced["b"].tolist() == pytest.approx(full[:12].tolist())
+
+
+def test_voxtral_stream_output_batches_rows_and_flushes_tail() -> None:
+    from sglang_omni.models.voxtral_tts.request_builders import VoxtralStreamOutput
+
+    builder = VoxtralStreamOutput()
+    data = SimpleNamespace(stream_pending_rows=[torch.tensor([i, 0]) for i in range(4)])
+    assert list(builder("req", data)) == []
+    data.stream_pending_rows.append(torch.tensor([4, 0]))
+    (message,) = builder("req", data)
+    assert message.target == "vocoder"
+    assert message.metadata == {"modality": "audio_codes", "stream": True}
+    assert message.data[:, 0].tolist() == [0, 1, 2, 3, 4]
+    assert data.stream_pending_rows == []
+    data.stream_pending_rows.extend([torch.tensor([5, 0]), torch.tensor([6, 0])])
+    (tail,) = builder.flush("req", data)
+    assert tail.data[:, 0].tolist() == [5, 6]
+    assert list(builder.flush("req", data)) == []
+
+
 def test_voxtral_collect_audio_step_reuses_output_tokens_for_eos_filter() -> None:
     from sglang_omni.models.voxtral_tts.acoustic_transformer import AudioSpecialTokens
     from sglang_omni.models.voxtral_tts.model_runner import VoxtralTTSModelRunner
@@ -318,7 +408,7 @@ def test_voxtral_collect_audio_step_reuses_output_tokens_for_eos_filter() -> Non
     runner.pending_audio_codes = None
     runner.pending_audio_embeds = None
     runner.model = SimpleNamespace(
-        acoustic_transformer=lambda hidden: torch.tensor(
+        run_acoustic_transformer=lambda hidden: torch.tensor(
             [[11, 12, 13], [eos_id, 21, 22]], dtype=torch.long
         ),
         audio_token_embedding=lambda codes: codes.to(torch.float32).unsqueeze(-1),
@@ -334,6 +424,8 @@ def test_voxtral_collect_audio_step_reuses_output_tokens_for_eos_filter() -> Non
             data=SimpleNamespace(
                 output_codes=[],
                 pending_feedback_queue=[],
+                stream=True,
+                stream_pending_rows=[],
             ),
         ),
         SimpleNamespace(
@@ -341,6 +433,8 @@ def test_voxtral_collect_audio_step_reuses_output_tokens_for_eos_filter() -> Non
             data=SimpleNamespace(
                 output_codes=[],
                 pending_feedback_queue=[],
+                stream=False,
+                stream_pending_rows=[],
             ),
         ),
     ]
@@ -361,6 +455,10 @@ def test_voxtral_collect_audio_step_reuses_output_tokens_for_eos_filter() -> Non
     )
 
     assert [chunk.tolist() for chunk in requests[0].data.output_codes] == [[11, 12, 13]]
+    assert [row.tolist() for row in requests[0].data.stream_pending_rows] == [
+        [11, 12, 13]
+    ]
+    assert requests[1].data.stream_pending_rows == []
     assert len(requests[0].data.pending_feedback_queue) == 1
     assert requests[1].data.output_codes == []
     assert requests[1].data.pending_feedback_queue == []
@@ -444,7 +542,7 @@ def test_voxtral_steady_decode_reports_cuda_graph_ready(
         def __init__(self) -> None:
             self.decode_input_embed_buffer = torch.zeros(1, 3)
 
-        def acoustic_transformer(self, hidden):
+        def run_acoustic_transformer(self, hidden):
             assert hidden.shape == (1, 3)
             return torch.tensor([[5]])
 
@@ -484,6 +582,7 @@ def test_voxtral_steady_decode_reports_cuda_graph_ready(
     data = SimpleNamespace(
         pending_feedback_queue=collections.deque([torch.tensor([1.0, 2.0, 3.0])]),
         output_codes=[],
+        stream=False,
         generation_steps=0,
         extra_model_outputs={},
     )
@@ -550,8 +649,11 @@ def test_voxtral_generation_reenables_cuda_graph_after_bootstrap(
     infrastructure_saw_deferred_capture: list[bool] = []
     init_graph_calls: list[bool] = []
 
+    acoustic_graph_sizes: list[list[int]] = []
+
     class FakeModel:
-        pass
+        def init_acoustic_graphs(self, batch_sizes) -> None:
+            acoustic_graph_sizes.append(batch_sizes)
 
     class FakeSGLangRunner:
         def __init__(self, server_args) -> None:
@@ -662,6 +764,7 @@ def test_voxtral_generation_reenables_cuda_graph_after_bootstrap(
     assert build_kwargs["torch_compile_max_bs"] == 16
     assert infrastructure_saw_deferred_capture == [True]
     assert init_graph_calls == [True]
+    assert acoustic_graph_sizes == [[1, 2, 4, 8, 12, 16]]
     assert scheduler.server_args.cuda_graph_bs == [1, 2, 4, 8, 12, 16]
     assert scheduler.server_args.cuda_graph_max_bs == 16
     assert scheduler.server_args.disable_cuda_graph is False
