@@ -11,10 +11,21 @@ import pytest
 import torch
 
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.voxtral_tts.acoustic_transformer import (
+    FlowMatchingAudioTransformer,
+)
+from sglang_omni.models.voxtral_tts.audio_tokenizer import VoxtralTTSAudioTokenizer
 from sglang_omni.models.voxtral_tts.config import VoxtralTTSPipelineConfig
 from sglang_omni.models.voxtral_tts.io import VoxtralTTSState
 from sglang_omni.models.voxtral_tts.pipeline import stages
 from sglang_omni.models.voxtral_tts.request_builders import build_sglang_voxtral_request
+from sglang_omni.models.voxtral_tts.sglang_model import VoxtralSGLangTTSModel
+from sglang_omni.models.voxtral_tts.vocoder import (
+    VoxtralStreamingVocoder,
+    VoxtralStreamWindow,
+    VoxtralTTSVocoder,
+    ensure_non_empty_audio_codes,
+)
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.types import RequestOutput
 from sglang_omni.utils.audio_payload import audio_waveform_payload
@@ -85,10 +96,8 @@ def test_voxtral_stage_factories_preserve_generation_placement_and_resolve_vocod
 
     seen_devices: list[str] = []
     resolved_devices: list[tuple[str | None, int | None]] = []
-    import sglang_omni.utils.device as device_mod
-
     monkeypatch.setattr(
-        device_mod,
+        stages,
         "resolve_concrete_device",
         lambda device, gpu_id: (
             resolved_devices.append((device, gpu_id)) or f"npu:{gpu_id}"
@@ -207,7 +216,7 @@ def test_voxtral_speech_validation_rejects_ignored_fields(
 @pytest.mark.parametrize("audio_codes", [None, torch.empty((0, 0), dtype=torch.long)])
 def test_voxtral_vocoder_rejects_empty_audio_codes(audio_codes) -> None:
     with pytest.raises(ValueError, match="generated no audio codes"):
-        stages.ensure_non_empty_audio_codes(audio_codes)
+        ensure_non_empty_audio_codes(audio_codes)
 
 
 def test_voxtral_audio_waveform_payload_is_compact() -> None:
@@ -824,3 +833,141 @@ def test_enable_inductor_gemm_autotune_sets_per_shape_autotuning() -> None:
     finally:
         inductor_config.max_autotune_gemm = saved_gemm
         inductor_config.max_autotune_gemm_backends = saved_backends
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA graphs")
+def test_voxtral_codec_graphs_refresh_mixed_windows_and_keep_delivered_audio() -> None:
+    """Graph padding and overflow must preserve every window and earlier CPU audio."""
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        torch.manual_seed(2801)
+        tokenizer = VoxtralTTSAudioTokenizer(
+            {
+                "semantic_codebook_size": 16,
+                "semantic_dim": 8,
+                "acoustic_dim": 4,
+                "dim": 64,
+                "hidden_dim": 128,
+                "n_heads": 2,
+                "n_kv_heads": 2,
+                "head_dim": 32,
+                "pretransform_patch_size": 8,
+            },
+            {"audio_model_args": {}},
+        ).to(device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            tokenizer.quantizer.semantic_codebook.embedding_sum.normal_()
+        tokenizer.eval()
+        scheduler = VoxtralStreamingVocoder(VoxtralTTSVocoder(tokenizer), device="cuda")
+        windows = []
+        for index in range(35):
+            frame_count = (1, 5, 24, 25, 50, 74, 75)[index % 7]
+            codes = torch.randint(2, 23, (frame_count, tokenizer.num_codebooks))
+            codes[:, 0] = torch.randint(2, 18, (frame_count,))
+            windows.append(codes)
+
+        retained_audio = []
+        retained_snapshots = []
+        for group_start, window_count in ((0, 16), (16, 3), (0, 35), (19, 3)):
+            group_windows = windows[group_start : group_start + window_count]
+            actual = scheduler.decode_windows(
+                [
+                    VoxtralStreamWindow(
+                        codes=codes, offset_frames=0, new_frames=len(codes)
+                    )
+                    for codes in group_windows
+                ]
+            )
+            expected_audio = []
+            with torch.no_grad(), torch.cuda.stream(scheduler.decode_stream):
+                for start in range(0, window_count, 16):
+                    replay_windows = group_windows[start : start + 16]
+                    bucket = next(
+                        size for size in (1, 2, 4, 8, 16) if size >= len(replay_windows)
+                    )
+                    padded = torch.zeros(
+                        bucket,
+                        tokenizer.num_codebooks,
+                        75,
+                        device="cuda",
+                        dtype=torch.long,
+                    )
+                    for index, codes in enumerate(replay_windows):
+                        padded[index, :, : len(codes)] = (codes.t() - 2).to("cuda")
+                    decoded = (
+                        tokenizer.decode(padded, dtype=torch.bfloat16).float().cpu()
+                    )
+                    expected_audio.extend(
+                        decoded[index, 0, : len(codes) * tokenizer.downsample_factor]
+                        for index, codes in enumerate(replay_windows)
+                    )
+            assert len(actual) == len(expected_audio) == window_count
+            for waveform, expected in zip(actual, expected_audio, strict=True):
+                torch.testing.assert_close(waveform, expected, rtol=0, atol=0)
+            for waveform, snapshot in zip(
+                retained_audio, retained_snapshots, strict=True
+            ):
+                torch.testing.assert_close(waveform, snapshot, rtol=0, atol=0)
+            retained_audio.extend(actual)
+            retained_snapshots.extend(waveform.clone() for waveform in actual)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA graphs")
+def test_voxtral_acoustic_graphs_refresh_inputs_and_advance_rng() -> None:
+    """Successive padded replays must match the same seeded eager draw sequence."""
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        torch.manual_seed(2801)
+        acoustic = (
+            FlowMatchingAudioTransformer(
+                {
+                    "semantic_codebook_size": 16,
+                    "acoustic_codebook_size": 21,
+                    "n_acoustic_codebook": 4,
+                    "acoustic_transformer_args": {
+                        "input_dim": 16,
+                        "dim": 16,
+                        "n_layers": 1,
+                        "head_dim": 8,
+                        "hidden_dim": 32,
+                        "n_heads": 2,
+                        "n_kv_heads": 1,
+                    },
+                }
+            )
+            .to(device="cuda", dtype=torch.bfloat16)
+            .eval()
+        )
+        with torch.no_grad():
+            acoustic.semantic_codebook_output.weight.zero_()
+            acoustic.semantic_codebook_output.weight[2].fill_(1)
+            acoustic.semantic_codebook_output.weight[3].fill_(-1)
+            acoustic.acoustic_codebook_output.weight.zero_()
+        model = VoxtralSGLangTTSModel.__new__(VoxtralSGLangTTSModel)
+        torch.nn.Module.__init__(model)
+        model.acoustic_transformer = acoustic
+        model.hidden_size = 16
+        model.decode_input_embed_buffer = torch.zeros(
+            4, 16, device="cuda", dtype=torch.bfloat16
+        )
+        model.acoustic_graphs = {}
+        model.init_acoustic_graphs([1, 4])
+        first_hidden = torch.ones(3, 16, device="cuda", dtype=torch.bfloat16)
+        second_hidden = -first_hidden
+        first_padded = torch.zeros(4, 16, device="cuda", dtype=torch.bfloat16)
+        first_padded[:3] = first_hidden
+        second_padded = -first_padded
+        with torch.no_grad():
+            torch.manual_seed(2888)
+            expected_first = acoustic(first_padded)[:3]
+            expected_second = acoustic(second_padded)[:3]
+            expected_overflow = acoustic(first_padded.repeat(2, 1)[:5])
+            torch.manual_seed(2888)
+            actual_first = model.run_acoustic_transformer(first_hidden)
+            actual_second = model.run_acoustic_transformer(second_hidden)
+            actual_overflow = model.run_acoustic_transformer(
+                first_padded.repeat(2, 1)[:5]
+            )
+        torch.testing.assert_close(actual_first, expected_first, rtol=0, atol=0)
+        torch.testing.assert_close(actual_second, expected_second, rtol=0, atol=0)
+        torch.testing.assert_close(actual_overflow, expected_overflow, rtol=0, atol=0)

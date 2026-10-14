@@ -21,6 +21,7 @@ from sglang_omni.scheduling.engine_factory import (
     SchedulerExtras,
     TtsEngineBuilder,
 )
+from sglang_omni.scheduling.generation_batch_policy import get_decode_cuda_graph_bs
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 if TYPE_CHECKING:
@@ -86,10 +87,6 @@ class VoxtralTtsEngineBuilder(TtsEngineBuilder[VoxtralSGLangRequestData]):
     def post_cuda_graph_setup(
         self, model: VoxtralSGLangTTSModel, server_args: ServerArgs
     ) -> None:
-        from sglang_omni.scheduling.generation_batch_policy import (
-            get_decode_cuda_graph_bs,
-        )
-
         # Note (Jiaxin Deng): eager, the 7-step flow-matching loop is launch bound
         # (~10 ms per decode step at any batch size); replay takes ~3.6 ms on H200.
         batch_sizes = get_decode_cuda_graph_bs(server_args)
