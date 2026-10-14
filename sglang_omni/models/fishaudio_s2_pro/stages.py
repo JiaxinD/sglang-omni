@@ -34,6 +34,7 @@ from sglang_omni.scheduling.reference_encoder import (
 )
 from sglang_omni.utils.audio import load_audio
 from sglang_omni.utils.checkpoint import resolve_checkpoint as _resolve_checkpoint
+from sglang_omni.utils.device import resolve_concrete_device
 
 if TYPE_CHECKING:
     from sglang_omni.models.fishaudio_s2_pro.fish_speech.models.dac.modded_dac import (
@@ -372,7 +373,6 @@ def create_preprocessing_executor(
 ):
     """Returns a threaded scheduler that tokenizes and encodes reference audio."""
     from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
-    from sglang_omni.utils.device import resolve_concrete_device
 
     worker_count = max(int(max_concurrency), 1)
     intraop_threads = configure_preprocessing_threads(worker_count)
