@@ -172,7 +172,6 @@ class TalkerPrefillBuilder:
         self.device = model.model.codec_embedding.weight.device
         self.dtype = model.activation_dtype
         self.thinker_embed_cache: dict[int, torch.Tensor] = {}
-        self.projected_chunk_cache: dict[int, torch.Tensor] = {}
         self.tts_special_cache: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
@@ -300,7 +299,8 @@ class TalkerPrefillBuilder:
         if token_id is not None:
             # Note (Jiaxin Deng): a streamed token projects alone, so its row depends
             # only on the id; caching it keeps per-token launches off the talker loop.
-            cached = self.projected_chunk_cache.get(int(token_id))
+            cache = self.model.projected_text_rows
+            cached = cache.get(int(token_id))
             if cached is not None:
                 return cached
             else:
@@ -309,7 +309,7 @@ class TalkerPrefillBuilder:
                 torch.tensor([int(token_id)], dtype=torch.long)
             )
             projected = self.model.text_projection(chunk_tensor)[0].detach()
-            self.projected_chunk_cache[int(token_id)] = projected
+            cache[int(token_id)] = projected
             return projected
         else:
             chunk_tensor = chunk.data.to(

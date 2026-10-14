@@ -237,6 +237,7 @@ def test_qwen_talker_conditions_on_streamed_token_ids():
     prefill_builder.model = SimpleNamespace(
         text_projection=lambda tensor: tensor * 2.0,
         hidden_projection=lambda tensor: tensor + 100.0,
+        projected_text_rows={},
         get_input_embeddings=lambda: (
             lambda token_ids: torch.zeros((token_ids.numel(), 2))
         ),
@@ -266,7 +267,6 @@ def test_qwen_talker_conditions_on_streamed_token_ids():
         {},
     )
     prefill_builder.load_prompt_token_embeddings = token_embedding_rows
-    prefill_builder.projected_chunk_cache = {}
     tts_bos = torch.tensor([[1000.0, 1000.0]])
     tts_eos = torch.tensor([[2000.0, 2000.0]])
     tts_pad = torch.tensor([[3000.0, 3000.0]])
@@ -325,13 +325,14 @@ def test_qwen_talker_projects_each_streamed_token_id_once():
         return tensor * 2.0
 
     prefill_builder = object.__new__(TalkerPrefillBuilder)
-    prefill_builder.model = SimpleNamespace(text_projection=text_projection)
+    prefill_builder.model = SimpleNamespace(
+        text_projection=text_projection, projected_text_rows={}
+    )
     prefill_builder.device = torch.device("cpu")
     prefill_builder.dtype = torch.float32
     prefill_builder.load_prompt_token_embeddings = lambda token_ids: (
         token_ids.to(torch.float32).unsqueeze(-1).expand(-1, 2)
     )
-    prefill_builder.projected_chunk_cache = {}
 
     def token_chunk(token_id: int) -> StreamItem:
         return StreamItem(0, None, "thinker", {"token_id": token_id})
@@ -351,7 +352,7 @@ def test_qwen_talker_projects_each_streamed_token_id_once():
     assert torch.equal(other, torch.tensor([16.0, 16.0]))
     assert torch.equal(hidden, torch.tensor([10.0, 10.0]))
     assert projected_rows == [1, 1, 1, 1]
-    assert set(prefill_builder.projected_chunk_cache) == {7, 8}
+    assert set(prefill_builder.model.projected_text_rows) == {7, 8}
 
 
 def test_qwen_hidden_states_skip_only_explicit_text_output_requests():
