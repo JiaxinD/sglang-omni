@@ -287,9 +287,7 @@ def _build_qwen_speech_server_parser() -> argparse.ArgumentParser:
         "--enable-partial-start",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help=(
-            "Enable partial-prefix talker startup. Defaults to on."
-        ),
+        help="Enable partial-prefix talker startup. Defaults to on.",
     )
     target.add_argument(
         "--partial-start-min-chunks",
