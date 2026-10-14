@@ -311,6 +311,73 @@ def test_abort_drops_state_and_late_chunks() -> None:
     assert drain(scheduler) == []
 
 
+def test_abort_releases_advanced_slot_for_next_stream() -> None:
+    scheduler, _ = make_scheduler(stream_slots=1)
+    first = apply_delay_pattern(torch.randint(0, PAD, (3, N_VQ)))
+    scheduler.handle_streaming_new_request("a", make_payload("a", first))
+    for index in range(N_VQ + 1):
+        scheduler.handle_stream_chunk("a", item(first[index], index))
+    assert scheduler.session.stream_slots_in_use == {0}
+    assert len(drain(scheduler)) == 1
+
+    scheduler.abort("a")
+
+    assert scheduler.session.stream_slots_in_use == set()
+    raw = torch.randint(0, PAD, (4, N_VQ))
+    delayed = apply_delay_pattern(raw)
+    scheduler.handle_streaming_new_request("b", make_payload("b", delayed))
+    for index in range(int(delayed.shape[0])):
+        scheduler.handle_stream_chunk("b", item(delayed[index], index))
+    scheduler.handle_stream_done("b")
+    np.testing.assert_array_equal(
+        streamed_audio(drain(scheduler), "b"), reference_waveform(raw).numpy()
+    )
+
+
+def test_slot_starved_stream_uses_standalone_segment_decode(monkeypatch) -> None:
+    scheduler, _ = make_scheduler(stream_slots=1)
+    calls = []
+    standalone = scheduler.vocoder.decode_segments
+    monkeypatch.setattr(
+        scheduler.vocoder,
+        "decode_segments",
+        lambda segments: calls.append(len(segments)) or standalone(segments),
+    )
+    raw = {rid: torch.randint(0, PAD, (4, N_VQ)) for rid in ("a", "b")}
+    delayed = {rid: apply_delay_pattern(codes) for rid, codes in raw.items()}
+    for rid in raw:
+        scheduler.handle_streaming_new_request(rid, make_payload(rid, delayed[rid]))
+    for index in range(int(delayed["a"].shape[0])):
+        scheduler.on_stream_chunk_batch(
+            [(rid, item(delayed[rid][index], index)) for rid in raw]
+        )
+    for rid in raw:
+        scheduler.handle_stream_done(rid)
+
+    messages = drain(scheduler)
+    assert calls == [1]
+    for rid, codes in raw.items():
+        np.testing.assert_array_equal(
+            streamed_audio(messages, rid), reference_waveform(codes).numpy()
+        )
+
+
+def test_pad_closed_short_segment_streams_before_done() -> None:
+    raw_codes = torch.tensor(
+        [[1, 2, 3], [PAD, PAD, PAD], [PAD, PAD, PAD]], dtype=torch.long
+    )
+    delayed = apply_delay_pattern(raw_codes)
+    scheduler, _ = make_scheduler()
+
+    scheduler.handle_streaming_new_request("req", make_payload("req", delayed))
+    for index in range(int(delayed.shape[0])):
+        scheduler.handle_stream_chunk("req", item(delayed[index], index))
+
+    np.testing.assert_array_equal(
+        streamed_audio(drain(scheduler)), reference_waveform(raw_codes[:1]).numpy()
+    )
+
+
 def test_streaming_codec_view_keeps_native_decoder_stateless() -> None:
     codec = MossAudioTokenizerVocoder(
         tiny_moss_audio_tokenizer_v1_config(), parameter_device="cpu"

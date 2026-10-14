@@ -165,6 +165,12 @@ class MossStreamingVocoderScheduler(
                 continue
             else:
                 pass
+            if int(value) <= 0:
+                raise ValueError(
+                    f"MOSS-TTS stream {name} for {request_id!r} must be > 0, got {value}"
+                )
+            else:
+                pass
             previous = getattr(state, name)
             if previous is not None and int(previous) != int(value):
                 raise ValueError(
@@ -280,9 +286,8 @@ class MossStreamingVocoderScheduler(
         codes = torch.stack(state.pending, dim=0)
         state.pending = []
         if state.slot is None:
-            # Slot-starved: one full-sequence decode of the buffered segment.
             state.ready_audio.append(
-                self.audio_vocoder.decode_codes([codes])[0].reshape(-1)
+                self.vocoder.decode_segments([codes])[0].reshape(-1)
             )
             return
         else:
@@ -311,6 +316,20 @@ class MossStreamingVocoderScheduler(
         else:
             pass
         return self.take_ready_audio(state)
+
+    def pump_one_step(self) -> list[str] | None:
+        # Note (Jiaxin Deng): a pad-closed segment drains into ready_audio outside
+        # any step; emit it now instead of holding it until the next step or done.
+        for request_id, state in self.stream_state_items():
+            if not state.ready_audio or self.is_aborted(request_id):
+                continue
+            else:
+                pass
+            self.mark_stream_emitted(request_id)
+            self.outbox.put(
+                self.stream_chunk_message(request_id, self.take_ready_audio(state))
+            )
+        return super().pump_one_step()
 
     def select_step_participants(self) -> list[tuple[str, MossStreamState]]:
         """Streams whose buffer crossed their threshold are due; already-emitting
