@@ -56,7 +56,7 @@ def test_qwen_speech_help_preserves_topology_contract():
     help_text = " ".join(result.stdout.decode().split())
     assert "Tensor-parallel size for the thinker stage" in help_text
     assert "exactly that many GPU ids" in help_text
-    assert "Defaults to on for the disaggregated topology" in help_text
+    assert "partial-prefix talker startup. Defaults to on." in help_text
     assert "must be >= MIN_PARTIAL_START_CHUNKS (3)" in help_text
     assert "All GPU stage flags must point to the same device" in help_text
 
@@ -414,14 +414,14 @@ def test_partial_start_defaults_on(mock_launch_server):
     assert talker.factory.enable_partial_start is True
 
 
-def test_partial_start_colocated_defaults_off(mock_launch_server):
+def test_partial_start_colocated_defaults_on(mock_launch_server):
     args = make_args(colocated=True)
     _launch_speech_server(args)
 
     config = mock_launch_server.call_args[0][0]
     talker = make_stage(config, "talker_ar")
 
-    assert talker.factory.enable_partial_start is False
+    assert talker.factory.enable_partial_start is True
 
 
 def test_partial_start_colocated_can_be_enabled(mock_launch_server):

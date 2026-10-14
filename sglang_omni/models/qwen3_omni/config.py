@@ -503,7 +503,7 @@ class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):
             thinker_gpu=0,
             talker_gpu=0,
             process_by_stage=COLOCATED_SPEECH_PROCESSES,
-            enable_partial_start=False,
+            enable_partial_start=True,
         )
     )
 

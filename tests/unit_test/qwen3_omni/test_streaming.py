@@ -266,6 +266,7 @@ def test_qwen_talker_conditions_on_streamed_token_ids():
         {},
     )
     prefill_builder.load_prompt_token_embeddings = token_embedding_rows
+    prefill_builder.projected_chunk_cache = {}
     tts_bos = torch.tensor([[1000.0, 1000.0]])
     tts_eos = torch.tensor([[2000.0, 2000.0]])
     tts_pad = torch.tensor([[3000.0, 3000.0]])
