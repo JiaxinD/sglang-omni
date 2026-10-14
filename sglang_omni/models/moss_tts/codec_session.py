@@ -10,7 +10,8 @@ from dataclasses import dataclass
 import torch
 
 from sglang_omni.models.moss_tts.audio_tokenizer import MossAudioTokenizerVocoder
-from sglang_omni.scheduling.moss_codec_cuda_graph import MossVocoderCudaGraphRunner
+from sglang_omni.models.moss_tts.vocoder_cuda_graph import MossVocoderCudaGraphRunner
+from sglang_omni.scheduling.generation_batch_policy import build_default_cuda_graph_bs
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,7 @@ class CodecStreamSession:
 
     def graph_batch_sizes(self) -> list[int]:
         """Return batch buckets shared by eager and CUDA graph execution."""
-        buckets = [1, 2, 4, *range(8, self.stream_slots, 4), self.stream_slots]
-        return sorted(
-            {bucket for bucket in buckets if 0 < int(bucket) <= self.stream_slots}
-        )
+        return build_default_cuda_graph_bs(self.stream_slots)
 
     def acquire(self) -> int | None:
         if not self.free_stream_slots:

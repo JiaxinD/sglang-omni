@@ -9,8 +9,8 @@ import pytest
 import torch
 
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.models.moss_tts import config as graph_policy
 from sglang_omni.models.moss_tts_local import config as config_module
-from sglang_omni.utils import moss_vocoder_graph as graph_policy
 
 
 @pytest.mark.parametrize(

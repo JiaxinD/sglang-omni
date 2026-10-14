@@ -19,10 +19,13 @@ from sglang_omni.models.moss_tts.audio_tokenizer import (
     MossAudioTokenizerVocoder,
     MossAudioTokenizerVocoderDecoder,
 )
+from sglang_omni.models.moss_tts.codec_session import (
+    CoalescedStepPlan,
+    CodecStreamSession,
+)
 from sglang_omni.models.moss_tts.vocoder import decode_codes_batch
 from sglang_omni.models.moss_tts_local.payload_types import MossTTSLocalState
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.moss_codec import CoalescedStepPlan, CodecStreamSession
 from sglang_omni.scheduling.pipeline_state import build_usage
 from sglang_omni.scheduling.streaming_vocoder import (
     StreamingVocoderBase,

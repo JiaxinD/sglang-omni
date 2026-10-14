@@ -14,8 +14,8 @@ from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
 )
+from sglang_omni.models.moss_tts.config import resolve_vocoder_cuda_graph
 from sglang_omni.utils.cpu import bounded_intraop_threads
-from sglang_omni.utils.moss_vocoder_graph import resolve_vocoder_cuda_graph
 
 _PKG = "sglang_omni.models.moss_tts_local"
 _COLOCATED_PREPROCESSING_GPU_MEMORY_FRACTION = 0.15

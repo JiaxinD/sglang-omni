@@ -14,6 +14,7 @@ from sglang_omni.models.moss_tts.audio_tokenizer import (
     MossAudioTokenizerVocoder,
     MossAudioVocoder,
 )
+from sglang_omni.models.moss_tts.codec_session import CodecStreamSession
 from sglang_omni.models.moss_tts.payload_types import MossTTSState
 from sglang_omni.models.moss_tts.request_builders import (
     MossTTSSGLangRequestData,
@@ -23,7 +24,6 @@ from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderSc
 from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
-from sglang_omni.scheduling.moss_codec import CodecStreamSession
 from sglang_omni.scheduling.types import RequestOutput
 from tests.unit_test.moss_tts.test_encoder import tiny_moss_audio_tokenizer_v1_config
 
