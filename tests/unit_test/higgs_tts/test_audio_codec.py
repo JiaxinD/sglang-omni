@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from types import SimpleNamespace
+from types import SimpleNamespace, TracebackType
 
 import pytest
 import torch
@@ -262,29 +262,65 @@ def test_reference_encode_keeps_cudnn_out_on_cuda_only() -> None:
         assert torch.backends.cudnn.enabled == cudnn_before
 
 
-def test_overlapping_reference_encodes_restore_cudnn() -> None:
-    codec = object.__new__(audio_codec.HiggsAudioCodec)
-    codec.device = torch.device("cuda", 0)
+def test_overlapping_reference_encodes_restore_cudnn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiting encode cannot save another encode's disabled backend state."""
+    first_codec = object.__new__(audio_codec.HiggsAudioCodec)
+    second_codec = object.__new__(audio_codec.HiggsAudioCodec)
+    first_codec.device = torch.device("cuda", 0)
+    second_codec.device = torch.device("cuda", 1)
     cudnn_before = torch.backends.cudnn.enabled
-    first_inside = threading.Event()
+    cudnn_sdp_before = torch.backends.cuda.cudnn_sdp_enabled()
+    encode_lock = audio_codec.HiggsAudioCodec.encode_kernel_lock
+    second_attempted = threading.Event()
     second_inside = threading.Event()
-    first_done = threading.Event()
+    failures: list[BaseException] = []
+
+    class ObservedLock:
+        def __enter__(self) -> None:
+            if threading.current_thread() is second_thread:
+                second_attempted.set()
+            else:
+                pass
+            encode_lock.acquire()
+
+        def __exit__(
+            self,
+            exception_type: type[BaseException] | None,
+            exception: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            encode_lock.release()
 
     def second() -> None:
-        first_inside.wait()
-        with codec.encode_kernel_context():
-            second_inside.set()
-            first_done.wait(timeout=1.0)
+        try:
+            with second_codec.encode_kernel_context():
+                second_inside.set()
+                assert not torch.backends.cudnn.enabled
+                assert not torch.backends.cuda.cudnn_sdp_enabled()
+        except BaseException as exception:
+            failures.append(exception)
 
-    thread = threading.Thread(target=second)
-    thread.start()
-    with codec.encode_kernel_context():
-        first_inside.set()
-        second_inside.wait(timeout=0.2)
-    first_done.set()
-    thread.join()
+    second_thread = threading.Thread(target=second)
+    monkeypatch.setattr(
+        audio_codec.HiggsAudioCodec, "encode_kernel_lock", ObservedLock()
+    )
+    try:
+        with first_codec.encode_kernel_context():
+            second_thread.start()
+            assert second_attempted.wait(timeout=5)
+            assert not second_inside.is_set()
+            assert not torch.backends.cudnn.enabled
+            assert not torch.backends.cuda.cudnn_sdp_enabled()
+    finally:
+        second_thread.join(timeout=5)
 
+    assert not second_thread.is_alive()
+    assert second_inside.is_set()
+    assert failures == []
     assert torch.backends.cudnn.enabled == cudnn_before
+    assert torch.backends.cuda.cudnn_sdp_enabled() == cudnn_sdp_before
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
