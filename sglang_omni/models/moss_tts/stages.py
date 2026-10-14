@@ -35,6 +35,7 @@ from sglang_omni.models.moss_tts.request_builders import (
 )
 from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderScheduler
 from sglang_omni.models.moss_tts.vocoder import MossTTSVocoder
+from sglang_omni.models.moss_tts_local.config import resolve_vocoder_cuda_graph
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
@@ -261,11 +262,11 @@ def create_vocoder_executor(
     codec_model_path: str | None = None,
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
-    stream_stride: int = 8,
-    stream_followup_stride: int = 8,
-    stream_overlap_tokens: int = 8,
-    stream_holdback_tokens: int = 1,
-    initial_chunk_frames: int = 0,
+    stream_chunk_frames: int = 16,
+    initial_chunk_frames: int = 4,
+    coalesce_floor_frames: int = 4,
+    stream_slots: int = 32,
+    vocoder_cuda_graph: bool | None = None,
     compute_dtype: str | torch.dtype | None = "bfloat16",
     attention_backend: str = "auto",
 ) -> MossStreamingVocoderScheduler:
@@ -296,13 +297,15 @@ def create_vocoder_executor(
         compute_dtype=resolved_compute_dtype,
         max_segment_batch_size=max_batch_size,
     )
-    return MossStreamingVocoderScheduler(
+    scheduler = MossStreamingVocoderScheduler(
         vocoder,
-        stream_stride=stream_stride,
-        stream_followup_stride=stream_followup_stride,
-        stream_overlap_tokens=stream_overlap_tokens,
-        stream_holdback_tokens=stream_holdback_tokens,
+        stream_chunk_frames=stream_chunk_frames,
         initial_chunk_frames=initial_chunk_frames,
+        coalesce_floor_frames=coalesce_floor_frames,
+        stream_slots=stream_slots,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
+        vocoder_cuda_graph=resolve_vocoder_cuda_graph(vocoder_cuda_graph),
     )
+    scheduler.warmup_now()
+    return scheduler
