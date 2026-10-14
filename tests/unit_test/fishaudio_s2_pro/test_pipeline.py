@@ -143,12 +143,19 @@ def test_fish_config_state_and_tokenizer_prompt_contracts() -> None:
     assert any("<|speaker:alice|>target" in text for text in tokenizer.encoded_texts)
 
 
+@pytest.mark.parametrize(
+    "gpu_id,expected_device,expected_tf32",
+    [(0, "cuda:0", False), (1, "cuda:1", False), (None, "cpu", True)],
+)
 def test_fish_preprocessing_encodes_references_on_the_placement_device(
     monkeypatch: pytest.MonkeyPatch,
+    gpu_id: int | None,
+    expected_device: str,
+    expected_tf32: bool,
 ) -> None:
     codec = SimpleNamespace(sample_rate=44100)
     loaded_on: list[str] = []
-    warmups: list[tuple[int, ...]] = []
+    warmups: list[tuple[str, int]] = []
     monkeypatch.setattr(s2pro_stages, "_resolve_checkpoint", lambda path: path)
     monkeypatch.setattr(
         s2pro_stages,
@@ -166,15 +173,31 @@ def test_fish_preprocessing_encodes_references_on_the_placement_device(
     )
     monkeypatch.setattr(
         "sglang_omni.utils.device.resolve_concrete_device",
-        lambda device, index: torch.device("cuda", index),
+        lambda device, index: torch.device(device or "cuda", index),
     )
     monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", True)
 
-    s2pro_stages.create_preprocessing_executor("ckpt", gpu_id=0, max_concurrency=1)
+    s2pro_stages.create_preprocessing_executor("ckpt", gpu_id=gpu_id, max_concurrency=1)
 
-    assert loaded_on == ["cuda:0"]
-    assert warmups == [("cuda:0", 44100)]
-    assert torch.backends.cudnn.allow_tf32 is False
+    assert loaded_on == [expected_device]
+    assert warmups == ([] if expected_device == "cpu" else [(expected_device, 44100)])
+    assert torch.backends.cudnn.allow_tf32 is expected_tf32
+
+
+def test_fish_gpu_preprocessing_rejects_a_shared_process() -> None:
+    stages = [
+        (
+            stage.model_copy(update={"process": "pipeline"})
+            if stage.name == "preprocessing"
+            else stage
+        )
+        for stage in S2ProPipelineConfig(model_path="model").stages
+    ]
+    with pytest.raises(ValueError, match="GPU preprocessing needs its own process"):
+        S2ProPipelineConfig(model_path="model", stages=stages)
+
+    stages[0] = stages[0].model_copy(update={"gpu": None, "total_reserve_bytes": None})
+    S2ProPipelineConfig(model_path="model", stages=stages)
 
 
 @pytest.mark.parametrize(

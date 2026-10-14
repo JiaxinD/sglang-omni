@@ -14,6 +14,7 @@ from sglang_omni.config import (
     PlacementConfig,
     StageConfig,
 )
+from sglang_omni.config.schema import stage_process_name
 
 _PKG = "sglang_omni.models.fishaudio_s2_pro"
 PREPROCESSING_TOTAL_RESERVE_BYTES = "6GiB"
@@ -67,6 +68,28 @@ class S2ProPipelineConfig(PipelineConfig):
 
     def supports_uploaded_voice_references(self) -> bool:
         return True
+
+    def validate_processes(self) -> None:
+        super().validate_processes()
+        preprocessing = self.stage_named("preprocessing")
+        if preprocessing.gpu is None:
+            return
+        else:
+            pass
+        process_name = stage_process_name(preprocessing)
+        if any(
+            stage.name != preprocessing.name
+            and stage_process_name(stage) == process_name
+            for stage in self.stages
+        ):
+            # Note (Jiaxin Deng): the allocator reserve cap and TF32 off apply to
+            # the whole process, so co-tenant stages would inherit both.
+            raise ValueError(
+                "GPU preprocessing needs its own process; give "
+                "stages.preprocessing a dedicated process or set its gpu to null"
+            )
+        else:
+            pass
 
 
 EntryClass = S2ProPipelineConfig

@@ -392,6 +392,10 @@ def create_preprocessing_executor(
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(checkpoint_dir)
     adapter = S2ProTokenizerAdapter(tokenizer)
+    if device is None and gpu_id is None:
+        device = "cpu"
+    else:
+        pass
     device = str(resolve_concrete_device(device, gpu_id))
     codec = load_codec(checkpoint_dir, device)
     reference_encode_hook = FishReferenceEncodeHook(
