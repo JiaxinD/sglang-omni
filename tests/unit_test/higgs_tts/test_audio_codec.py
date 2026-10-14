@@ -241,3 +241,21 @@ def test_codec_capture_records_through_the_platform_backend(monkeypatch) -> None
         for frame_count, graph in codec.decode_cuda_graphs.items()
     } == {2: backend.captures[0][2], 1: backend.captures[1][2]}
     assert codec.model.quantizer.decode is quantizer_decode
+
+
+def test_reference_encode_keeps_cudnn_out_on_cuda_only() -> None:
+    codec = object.__new__(audio_codec.HiggsAudioCodec)
+    cudnn_before = torch.backends.cudnn.enabled
+    cudnn_sdp_before = torch.backends.cuda.cudnn_sdp_enabled()
+
+    codec.device = torch.device("cuda", 0)
+    with codec.encode_kernel_context():
+        assert not torch.backends.cudnn.enabled
+        assert not torch.backends.cuda.cudnn_sdp_enabled()
+        assert torch.backends.cuda.flash_sdp_enabled()
+    assert torch.backends.cudnn.enabled == cudnn_before
+    assert torch.backends.cuda.cudnn_sdp_enabled() == cudnn_sdp_before
+
+    codec.device = torch.device("cpu")
+    with codec.encode_kernel_context():
+        assert torch.backends.cudnn.enabled == cudnn_before
