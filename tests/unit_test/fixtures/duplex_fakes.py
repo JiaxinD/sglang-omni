@@ -248,12 +248,21 @@ PeerMode = Literal[
     "nonfinite",
     "linger",
     "close_without_update",
+    "deadline_after_rejection",
+    "unfinished",
 ]
 
 
 class DuplexPeer:
-    def __init__(self, mode: PeerMode = "healthy") -> None:
+    def __init__(
+        self,
+        mode: PeerMode = "healthy",
+        rejected_updates: int = 0,
+        rejection_code: str = "admission_rejected",
+    ) -> None:
         self.mode = mode
+        self.rejected_updates = rejected_updates
+        self.rejection_code = rejection_code
         self.received: list[dict[str, JsonValue]] = []
         self.sent: list[dict[str, JsonValue]] = []
         self.pcm = bytearray()
@@ -276,6 +285,12 @@ class DuplexPeer:
                 websocket,
                 {
                     "type": "response.created",
+                    "sglang": {
+                        "media_time": {
+                            "t_start_ms": self.frames * PACKET_MS,
+                            "duration_ms": PACKET_MS,
+                        },
+                    },
                     "response": {
                         "id": "response_0",
                         "object": "realtime.response",
@@ -311,7 +326,12 @@ class DuplexPeer:
         self.chunk_seq += 1
 
     async def emit_error(
-        self, websocket: ServerConnection, event_id: str, *, fatal: bool
+        self,
+        websocket: ServerConnection,
+        event_id: str | None,
+        *,
+        fatal: bool,
+        code: str = "fixture_failure",
     ) -> None:
         await self.send(
             websocket,
@@ -320,7 +340,7 @@ class DuplexPeer:
                 "sglang": {"fatal": fatal},
                 "error": {
                     "type": "server_error" if fatal else "invalid_request_error",
-                    "code": "fixture_failure",
+                    "code": code,
                     "message": "deliberate peer failure",
                     "event_id": event_id,
                     "param": None,
@@ -421,6 +441,24 @@ class DuplexPeer:
             self.received.append(event)
             kind = event["type"]
             if kind == "session.update":
+                if self.rejected_updates:
+                    self.rejected_updates -= 1
+                    await self.emit_error(
+                        websocket,
+                        event["event_id"],
+                        fatal=False,
+                        code=self.rejection_code,
+                    )
+                    if self.mode == "deadline_after_rejection":
+                        await self.emit_error(
+                            websocket, None, fatal=True, code="session_update_timeout"
+                        )
+                        await self.close_session(websocket, "server_error", None)
+                        return
+                    else:
+                        continue
+                else:
+                    pass
                 if self.mode == "close_without_update":
                     await self.close_session(
                         websocket, "client_closed", event["event_id"]
@@ -437,6 +475,9 @@ class DuplexPeer:
                             "type": "realtime",
                             "model": "fixture",
                             "output_modalities": ["audio"],
+                            "audio": {
+                                "output": {"format": GRANTED["output_audio_format"]}
+                            },
                             "sglang": {"granted": GRANTED},
                         },
                     },
@@ -502,6 +543,10 @@ class DuplexPeer:
                         "client_event_id": event["event_id"],
                     },
                 )
+                if self.mode == "unfinished":
+                    continue
+                else:
+                    pass
                 await self.open_response(websocket)
                 tail_unit = self.frames if units > self.frames else units
                 await self.emit_audio(
@@ -523,6 +568,10 @@ class DuplexPeer:
                     },
                 )
             elif kind == "session.close":
+                if self.response_open:
+                    await self.finish_response(websocket, "cancelled", "client_closed")
+                else:
+                    pass
                 await self.close_session(websocket, "client_closed", event["event_id"])
                 if self.mode == "linger":
                     await self.release.wait()

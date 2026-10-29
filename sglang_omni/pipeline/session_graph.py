@@ -586,7 +586,8 @@ class SessionGraphRunner(CoordinatorSessions):
         node without one gets its published turn.done back once published.
         A control is fenced at its targets at once and reaches their owners
         in the background: until it has, the node's input confirmations and
-        the outputs only the client hears go on, and every other output waits.
+        the outputs only the client hears go on, a turn.interrupted reaches
+        the client and waits only for its readers, and every other output waits.
         """
         delivery: asyncio.Task[None] | None = None
         async for output in self.session_outputs(graph.nodes[name]):
@@ -623,13 +624,18 @@ class SessionGraphRunner(CoordinatorSessions):
             control_targets = graph.graph.control_targets(name, edge_event(chunk))
             pacer = graph.pacers.get(name)
             readers = graph.graph.reading_nodes(name, output.format)
-            if delivery is None or (
+            # Note (wenyao): The client's reply stops at turn.interrupted, so it leaves before the interrupt behind it reaches the owners; readers such as the cascade's aligner hear it after them.
+            is_client_first = (
                 is_published
                 and not control_targets
-                and not readers
                 and pacer is None
                 and control_type(chunk) != TURN_DONE
-            ):
+                and (not readers or control_type(chunk) == TURN_INTERRUPTED)
+            )
+            is_stop_ahead_of_readers = (
+                delivery is not None and is_client_first and bool(readers)
+            )
+            if delivery is None or is_client_first:
                 pass
             else:
                 await delivery
@@ -658,6 +664,15 @@ class SessionGraphRunner(CoordinatorSessions):
                 chunk = output_chunk(output)
             else:
                 pass
+            if is_stop_ahead_of_readers:
+                assert delivery is not None
+                await self.publish_graph_output(
+                    graph, name, output, self.reserve_graph_output(graph, name, output)
+                )
+                await delivery
+                delivery = None
+            else:
+                pass
             if not holds_turn_end(chunk, pacer is not None, is_published):
                 for reader in readers:
                     await self.put_graph_inbox(graph, reader, name, chunk)
@@ -681,7 +696,7 @@ class SessionGraphRunner(CoordinatorSessions):
             if is_published and pacer is not None:
                 size = self.reserve_graph_output(graph, name, output)
                 graph.output_bytes -= pacer.offer(output, size)
-            elif is_published:
+            elif is_published and not is_stop_ahead_of_readers:
                 await self.publish_graph_output(
                     graph, name, output, self.reserve_graph_output(graph, name, output)
                 )
@@ -975,3 +990,4 @@ class SessionGraphRunner(CoordinatorSessions):
         graph.output_bytes = 0
         graph.outputs.put_nowait(None)
         self.graphs.pop(graph.session_identity.id, None)
+        self.notify_session_closed()

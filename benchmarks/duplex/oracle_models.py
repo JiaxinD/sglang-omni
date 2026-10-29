@@ -14,7 +14,7 @@ Nonnegative = Annotated[float, Field(ge=0)]
 
 class TraceRecord(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
-    direction: Literal["send", "receive", "error", "admission"]
+    direction: Literal["send", "receive", "error", "admission", "end_wait"]
     time_s: Nonnegative
     event: dict[str, JsonValue]
 
@@ -26,6 +26,16 @@ class AdmissionEvent(BaseModel):
     type: Literal["connection_denied"]
     http_status: Literal[503]
     attempt: Annotated[int, Field(ge=1)]
+
+
+class EndWaitEvent(BaseModel):
+    """The client's end wait expired before the drain receipt, so it closed the
+    session; open_response_ids are the replies still open then, left unfinished."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+    type: Literal["expired"]
+    end_wait_s: Annotated[float, Field(gt=0)]
+    open_response_ids: list[Identifier]
 
 
 class MediaTime(BaseModel):
@@ -77,6 +87,17 @@ class WireEvent(BaseModel):
     padding_ms: Nonnegative | None = None
     reason: str | None = None
     error: dict[str, JsonValue] | None = None
+
+
+def is_admission_rejection(event: dict[str, JsonValue]) -> bool:
+    """A non-fatal admission_rejected error: the server could not admit a session.update and keeps the session open for another one."""
+    sglang_metadata, error = event.get("sglang"), event.get("error")
+    return (
+        isinstance(error, dict)
+        and error.get("code") == "admission_rejected"
+        and isinstance(sglang_metadata, dict)
+        and sglang_metadata.get("fatal") is False
+    )
 
 
 def turn_detection_type(session: JsonValue, protocol: Protocol) -> JsonValue:

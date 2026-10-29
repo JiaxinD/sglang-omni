@@ -13,7 +13,12 @@ import numpy as np
 from pydantic import JsonValue
 
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, SEND_RECEIPTS_FILE
-from benchmarks.duplex.oracle_models import MediaTime, TraceRecord, WireEvent
+from benchmarks.duplex.oracle_models import (
+    MediaTime,
+    TraceRecord,
+    WireEvent,
+    is_admission_rejection,
+)
 from benchmarks.duplex.profiles import PROFILES, ProfileName
 from benchmarks.duplex.run_artifacts import load_run
 from benchmarks.duplex.v15_audio import AUDIO_DELTA, LEGACY_AUDIO_DELTA
@@ -96,12 +101,15 @@ def score_session(
     reply_created_s: dict[str, float] = {}
     reply_opening_unit: dict[str, MediaTime] = {}
     reply_first_audio_unit: dict[str, MediaTime] = {}
-    reply_chunks: dict[str, list[tuple[float, float]]] = {}
+    reply_chunks: dict[str, list[tuple[float, float, float]]] = {}
+    # note (luojiaxuan): units of tail silence streamed after the input are not the
+    # input's, so they are neither expected nor timed.
+    input_ms = (variant_dir / "input.pcm").stat().st_size / INPUT_BYTES_PER_MS
     for record in (record for record in records if record.direction == "receive"):
         event = WireEvent.model_validate(record.event)
         if event.type == "sglang.unit.done" and is_native:
             media_time = unit_media_time(event)
-            if media_time.duration_ms > 0:
+            if media_time.duration_ms > 0 and media_time.t_start_ms < input_ms:
                 unit_lags_s.append(record.time_s - ready_s(media_time))
             else:
                 pass
@@ -120,10 +128,13 @@ def score_session(
                 )
             else:
                 pass
+            samples = np.frombuffer(base64.b64decode(event.delta), dtype="<i2")
+            audible = np.flatnonzero(samples)
             reply_chunks.setdefault(event.response_id, []).append(
                 (
                     record.time_s,
-                    len(base64.b64decode(event.delta)) / 2 / output_sample_rate,
+                    samples.size / output_sample_rate,
+                    (audible[0] if audible.size else samples.size) / output_sample_rate,
                 )
             )
         else:
@@ -137,16 +148,27 @@ def score_session(
         underrun_s = 0.0
         unbuffered_start_s = chunks[0][0]
         startup_buffer_needed_s = 0.0
-        for arrival_s, audio_s in chunks:
+        for arrival_s, audio_s, _ in chunks:
             underrun_s += max(0.0, arrival_s - playback_s)
             playback_s = max(playback_s, arrival_s) + audio_s
             startup_buffer_needed_s = max(
                 startup_buffer_needed_s, arrival_s - unbuffered_start_s
             )
             unbuffered_start_s += audio_s
+        # Note (wenyao): leading zero samples are silence, so a reply's audio starts at
+        # its first nonzero sample on a player that starts at the first arrival.
+        audible_s = None
+        heard_s = chunks[0][0]
+        for arrival_s, audio_s, silent_s in chunks:
+            heard_s = max(heard_s, arrival_s)
+            if silent_s < audio_s:
+                audible_s = heard_s + silent_s
+                break
+            else:
+                heard_s += audio_s
         # note (jeffro): the last chunk's own playback is not part of the generation
         # time, so the factor covers the audio that arrived before it.
-        streamed_audio_s = sum(audio_s for _, audio_s in chunks[:-1])
+        streamed_audio_s = sum(audio_s for _, audio_s, _ in chunks[:-1])
         if is_native:
             first_audio_unit = reply_first_audio_unit[response_id]
             # note (jeffro): a reply's first text can come one unit before its first audio,
@@ -167,9 +189,11 @@ def score_session(
         replies.append(
             {
                 "response_id": response_id,
-                "first_audio_latency_s": chunks[0][0] - reply_ready_s,
+                "first_audio_latency_s": (
+                    None if audible_s is None else audible_s - reply_ready_s
+                ),
                 "units_before_first_audio": units_before_first_audio,
-                "audio_s": sum(audio_s for _, audio_s in chunks),
+                "audio_s": sum(audio_s for _, audio_s, _ in chunks),
                 "underrun_s": underrun_s,
                 "startup_buffer_needed_s": startup_buffer_needed_s,
                 "real_time_factor": (
@@ -226,23 +250,54 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         if variant_state["status"] in FAILED_STATUSES
     )
     trace_spans_s: list[tuple[float, float]] = []
+    sessions_with_admission_events = 0
+    sessions_with_http_denials = 0
+    sessions_with_admission_rejections = 0
+    http_admission_denial_events = session_admission_rejection_events = 0
     for variant_state in attempted:
         variant_dir = run_dir / variant_state["directory"]
-        trace_lines = (variant_dir / "continuous.jsonl").read_text().splitlines()
-        if trace_lines:
-            trace_spans_s.append(
-                (
-                    json.loads(trace_lines[0])["time_s"],
-                    json.loads(trace_lines[-1])["time_s"],
-                )
-            )
+        trace_start_s: float | None = None
+        trace_end_s: float | None = None
+        http_denials = session_rejections = 0
+        with (variant_dir / "continuous.jsonl").open(encoding="utf-8") as trace_file:
+            for line in trace_file:
+                record = json.loads(line)
+                if trace_start_s is None:
+                    trace_start_s = record["time_s"]
+                else:
+                    pass
+                trace_end_s = record["time_s"]
+                http_denials += record["direction"] == "admission"
+                session_rejections += record[
+                    "direction"
+                ] == "receive" and is_admission_rejection(record["event"])
+        if trace_start_s is not None:
+            assert trace_end_s is not None
+            trace_spans_s.append((trace_start_s, trace_end_s))
         else:
             pass
+        http_admission_denial_events += http_denials
+        session_admission_rejection_events += session_rejections
+        sessions_with_admission_events += bool(http_denials or session_rejections)
+        sessions_with_http_denials += bool(http_denials)
+        sessions_with_admission_rejections += bool(session_rejections)
     replies = [reply for session in sessions for reply in session["replies"]]
     load = run["load"]
     sessions_failed = sum(
-        variant_state["status"] in FAILED_STATUSES for variant_state in attempted
+        variant_state["status"] in FAILED_STATUSES
+        and variant_state.get("failure_kind") != "admission_rejected"
+        for variant_state in attempted
     )
+    sessions_rejected = sum(
+        variant_state.get("failure_kind") == "admission_rejected"
+        for variant_state in attempted
+    )
+    # note (wenyao): Recordings made before the end-wait close carry no end_wait state.
+    end_wait_closes = [
+        variant_state["end_wait"]
+        for variant_state in attempted
+        if variant_state.get("end_wait") is not None
+    ]
     # note (jeffro): a native reply comes out one unit per input unit, so its
     # real-time factor tracks the input pace.
     real_time_factor = (
@@ -288,7 +343,18 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         ),
         "sessions": len(attempted),
         "sessions_failed": sessions_failed,
-        "admission_denials": load["variants_with_admission_denials"],
+        "sessions_closed_at_end_wait": len(end_wait_closes),
+        "replies_open_at_end_wait": sum(
+            len(end_wait["open_response_ids"]) for end_wait in end_wait_closes
+        ),
+        "admission_denials": sessions_with_http_denials,
+        "sessions_rejected": sessions_rejected,
+        "sessions_with_admission_events": sessions_with_admission_events,
+        "sessions_with_admission_rejections": sessions_with_admission_rejections,
+        "http_admission_denial_events": http_admission_denial_events,
+        "session_admission_rejection_events": session_admission_rejection_events,
+        "admission_denial_events": http_admission_denial_events
+        + session_admission_rejection_events,
         "input_pacing_violations": load["input_pacing_violations"],
         "units_expected": units_expected,
         "units_missed": units_missed,
@@ -303,7 +369,11 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
             else None
         ),
         "first_audio_latency_s": quantiles(
-            [reply["first_audio_latency_s"] for reply in replies]
+            [
+                reply["first_audio_latency_s"]
+                for reply in replies
+                if reply["first_audio_latency_s"] is not None
+            ]
         ),
         "startup_buffer_needed_s": quantiles(
             [reply["startup_buffer_needed_s"] for reply in replies]
@@ -316,7 +386,8 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
             target
             for target, is_unmet in (
                 ("no failed sessions", sessions_failed > 0),
-                ("no admission denials", load["variants_with_admission_denials"] > 0),
+                ("no admission denials", sessions_with_http_denials > 0),
+                ("no admission rejections", sessions_with_admission_rejections > 0),
                 ("no input pacing violations", load["input_pacing_violations"] > 0),
                 pacing_target,
             )

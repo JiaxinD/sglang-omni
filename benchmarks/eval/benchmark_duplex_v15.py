@@ -40,6 +40,9 @@ def record(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
             turn_detection=args.turn_detection,
             legacy_tail_s=args.legacy_tail,
+            report_playback=args.report_playback,
+            tail_silence_s=args.tail_silence,
+            end_wait_s=args.end_wait,
         )
     )
     manifest, _, _ = load_run(args.output)
@@ -72,8 +75,9 @@ def main(argv: list[str] | None = None) -> int:
         "--concurrency",
         type=int,
         default=1,
-        help="Maximum concurrent variants; excess connections may receive "
-        "HTTP 503 and fail if admission retries are exhausted",
+        help="Maximum concurrent variants; excess sessions may be denied with "
+        "HTTP 503 or rejected at session.update, and fail if admission retries "
+        "are exhausted",
     )
     selection = record_parser.add_mutually_exclusive_group()
     selection.add_argument(

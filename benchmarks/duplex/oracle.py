@@ -9,6 +9,7 @@ from pydantic import JsonValue, ValidationError
 
 from benchmarks.duplex.oracle_models import (
     AdmissionEvent,
+    EndWaitEvent,
     Identifier,
     MediaTime,
     Metadata,
@@ -19,6 +20,7 @@ from benchmarks.duplex.oracle_models import (
     StatusDetails,
     TraceRecord,
     WireEvent,
+    is_admission_rejection,
     turn_detection_type,
 )
 from benchmarks.duplex.profiles import (
@@ -30,6 +32,7 @@ from benchmarks.duplex.profiles import (
 
 __all__ = [
     "AdmissionEvent",
+    "EndWaitEvent",
     "Identifier",
     "MediaTime",
     "Metadata",
@@ -66,6 +69,10 @@ TERMINAL_REASONS = {
     "stop": ("completed", "sglang.input_audio.end"),
     "client_closed": ("cancelled", "session.close"),
 }
+# note (wenyao): The session.close after an end-wait expiry ends each reply still open this way; such a reply is unfinished, not a failure.
+CLOSE_TERMINAL = ("cancelled", "client_closed")
+# note (wenyao): The expiry is timed on the loop clock and the trace on perf_counter, which can differ by their resolution.
+END_WAIT_CLOCK_TOLERANCE_S = 0.001
 # note (luojiaxuan): A native reply whose turn ended before its talker spoke all of its text ends incomplete, where it would end completed/stop; no client command causes it.
 NATIVE_CUT_TERMINAL = ("incomplete", "max_output_tokens")
 NATIVE_ENDED_TERMINALS = {("completed", "stop"), NATIVE_CUT_TERMINAL}
@@ -127,6 +134,24 @@ def pcm_bytes(value: str | None) -> bytes:
             return pcm_data
 
 
+def admission_rejection_result(
+    admission_denials: int, admission_rejections: int
+) -> dict[str, JsonValue]:
+    """A recording rejected before audio input, without a separate runtime failure."""
+    return {
+        "status": "fail",
+        "failure_kind": "admission_rejected",
+        "violations": ["session admission rejected before audio input"],
+        "coverage": {"input_output_overlap": False},
+        "metrics": {
+            "input_audio_s": 0.0,
+            "output_audio_s": 0.0,
+            "admission_denials": admission_denials,
+            "admission_rejections": admission_rejections,
+        },
+    }
+
+
 def evaluate_trace(
     records: list[dict[str, JsonValue]],
     *,
@@ -135,8 +160,8 @@ def evaluate_trace(
 ) -> dict[str, JsonValue]:
     """Report protocol failures separately from an unexercised duplex scenario.
 
-    max_admission_attempts is the retry limit the recording client used, read from
-    its manifest; None checks only that denials count up from one.
+    max_admission_attempts is the shared retry limit from the recording manifest;
+    the initial attempt is additional. None leaves the budget unchecked.
     """
     profile_contract = PROFILES[profile]
     if profile_contract.protocol == "legacy":
@@ -175,11 +200,13 @@ def evaluate_trace(
     audio_times: list[float] = []
     units: list[tuple[int, float]] = []
     input_byte_count = output_byte_count = next_sequence = admissions = 0
-    speech_starts = interruptions = 0
+    admission_rejections = speech_starts = interruptions = 0
     session_id = requested_type = None
     updated = ended = drained = closed = False
     previous_time = -math.inf
-    drain_after_eos_s = close_ack_s = None
+    drain_after_eos_s = close_ack_s = end_of_input_s = None
+    end_wait: EndWaitEvent | None = None
+    cancelled_items: set[str] = set()
     acknowledgments = {
         "session.updated": "session.update",
         "sglang.input_audio.accepted": "input_audio_buffer.append",
@@ -205,7 +232,7 @@ def evaluate_trace(
                 )
                 check(
                     max_admission_attempts is None
-                    or admission.attempt <= max_admission_attempts,
+                    or admission.attempt <= max_admission_attempts + 1,
                     f"admission attempt {admission.attempt} exceeds the recorded "
                     f"limit {max_admission_attempts}",
                 )
@@ -215,6 +242,31 @@ def evaluate_trace(
                 pass
             if record.direction == "error":
                 violations.append(f"client error: {record.event.get('message')}")
+                continue
+            elif record.direction == "end_wait":
+                expiry = EndWaitEvent.model_validate(record.event)
+                check(end_wait is None, "duplicate end wait expiry")
+                check(
+                    end_of_input_s is not None
+                    and record.time_s - end_of_input_s
+                    >= expiry.end_wait_s - END_WAIT_CLOCK_TOLERANCE_S,
+                    "end wait expired before end_wait_s after EOS",
+                )
+                check(not drained, "end wait expired after input drained")
+                check(
+                    not counts["send", "session.close"],
+                    "end wait expired after session.close",
+                )
+                check(
+                    expiry.open_response_ids
+                    == [
+                        response_id
+                        for response_id, response_state in response_states.items()
+                        if response_state.terminal is None
+                    ],
+                    "end wait open responses differ from the trace",
+                )
+                end_wait = expiry
                 continue
             else:
                 pass
@@ -233,6 +285,11 @@ def evaluate_trace(
             check(not closed, f"{event_type} after session.closed")
             if direction == "send":
                 if event_type == "session.update":
+                    check(
+                        max_admission_attempts is None
+                        or admissions + admission_rejections <= max_admission_attempts,
+                        f"admission retry exceeds the recorded limit {max_admission_attempts}",
+                    )
                     check(
                         session_id is not None, "session.update before session.created"
                     )
@@ -270,8 +327,19 @@ def evaluate_trace(
                     input_times.append(event_time_s)
                 elif event_type == "sglang.input_audio.end":
                     check(updated, "EOS before session.updated")
+                    end_of_input_s = event_time_s
                 elif event_type == "session.close":
-                    check(drained, "session.close before input drained")
+                    check(
+                        drained
+                        or end_wait is not None
+                        or (not updated and admission_rejections > 0),
+                        "session.close before input drained",
+                    )
+                elif turn_based and event_type == "conversation.item.truncate":
+                    check(
+                        event.item_id in cancelled_items,
+                        "truncate of an item no cancelled response carried",
+                    )
                 else:
                     violations.append(
                         f"client command outside this scenario: {event_type}"
@@ -498,7 +566,12 @@ def evaluate_trace(
                             interruptions += 1
                         elif turn_based:
                             check(
-                                (status, reason) in TURN_BASED_TERMINALS,
+                                (status, reason) in TURN_BASED_TERMINALS
+                                or (
+                                    (status, reason) == CLOSE_TERMINAL
+                                    and end_wait is not None
+                                    and bool(counts["send", "session.close"])
+                                ),
                                 f"unsupported response terminal {status}/{reason}",
                             )
                         else:
@@ -535,6 +608,10 @@ def evaluate_trace(
                             "missing output_audio.done",
                         )
                         response_state.terminal, response_state.reason = status, reason
+                        if status == "cancelled" and response_state.item_id is not None:
+                            cancelled_items.add(response_state.item_id)
+                        else:
+                            pass
                     elif event_type == "response.output_audio.delta":
                         check(
                             not response_state.audio_done,
@@ -574,7 +651,12 @@ def evaluate_trace(
                 else:
                     pass
             elif event_type == "session.closed":
-                check(drained, "session.closed before input drained")
+                check(
+                    drained
+                    or end_wait is not None
+                    or (not updated and admission_rejections > 0),
+                    "session.closed before input drained",
+                )
                 check(
                     event.reason == "client_closed", "unexpected session close reason"
                 )
@@ -585,14 +667,47 @@ def evaluate_trace(
                     pass
             elif event_type == "error":
                 error = event.error or {}
-                violations.append(
-                    f"server error: code={error.get('code')} "
-                    f"fatal={event.sglang.fatal}: {error.get('message')}"
-                )
+                rejected_command = sent_commands.get(error.get("event_id"))
+                if (
+                    is_admission_rejection(record.event)
+                    and not updated
+                    and rejected_command is not None
+                    and rejected_command.event.type == "session.update"
+                ):
+                    admission_rejections += 1
+                    # note (Yucheng Hu): The client re-sends a rejected update, so only the admitted one counts as the session's update and may be acknowledged.
+                    counts["send", "session.update"] -= 1
+                    sent_commands.pop(rejected_command.event.event_id)
+                else:
+                    violations.append(
+                        f"server error: code={error.get('code')} "
+                        f"fatal={event.sglang.fatal}: {error.get('message')}"
+                    )
             else:
                 violations.append(f"unsupported server event: {event_type}")
         except (ValidationError, ValueError, binascii.Error) as exc:
             violations.append(f"record {index}: {exc}")
+
+    if (
+        not updated
+        and admissions + admission_rejections > 0
+        and not violations
+        and (
+            max_admission_attempts is None
+            or admissions + admission_rejections == max_admission_attempts + 1
+        )
+        and (closed or not event_ids["receive"])
+        and counts["send", "session.update"] == 0
+        and (
+            not closed
+            or counts["send", "session.close"]
+            == counts["receive", "session.closed"]
+            == 1
+        )
+    ):
+        return admission_rejection_result(admissions, admission_rejections)
+    else:
+        pass
 
     for direction, event_type in (
         ("receive", "session.created"),
@@ -600,7 +715,6 @@ def evaluate_trace(
         ("receive", "session.updated"),
         ("send", "sglang.input_audio.end"),
         ("receive", "sglang.input_audio.ended"),
-        ("receive", "sglang.input_audio.drained"),
         ("send", "session.close"),
         ("receive", "session.closed"),
     ):
@@ -608,9 +722,16 @@ def evaluate_trace(
             counts[direction, event_type] == 1,
             f"expected exactly one {direction} {event_type}",
         )
+    check(
+        counts["receive", "sglang.input_audio.drained"] == 1
+        or (end_wait is not None and not drained),
+        "expected exactly one receive sglang.input_audio.drained",
+    )
     check(bool(input_times), "missing audio input")
     input_ms = input_byte_count / INPUT_BYTES_PER_MS
     expected_units = math.ceil(input_byte_count / input_bytes_per_unit)
+    # note (wenyao): A session closed at its end wait can leave the last units undecided; the serving report counts them missed.
+    is_cut_at_end_wait = end_wait is not None and not drained
     # note (wenyao): Only unit-aligned input produces an extra empty EOS unit.
     nonempty_unit_durations = [duration for _, duration in units if duration]
     check(
@@ -618,7 +739,8 @@ def evaluate_trace(
         "native unit receipts are not contiguous from zero",
     )
     check(
-        len(nonempty_unit_durations) == expected_units,
+        len(nonempty_unit_durations) == expected_units
+        or (is_cut_at_end_wait and len(nonempty_unit_durations) < expected_units),
         f"expected {expected_units} nonempty native units, "
         f"observed {len(nonempty_unit_durations)}",
     )
@@ -632,7 +754,8 @@ def evaluate_trace(
         "an empty EOS unit requires exactly unit-aligned input",
     )
     check(
-        sum(duration for _, duration in units) == input_ms,
+        sum(duration for _, duration in units) == input_ms
+        or (is_cut_at_end_wait and sum(duration for _, duration in units) < input_ms),
         "native unit durations do not account for the accepted input",
     )
     if profile_contract.continuous_output:
@@ -644,7 +767,8 @@ def evaluate_trace(
             * 2
         )
         check(
-            output_byte_count == expected_output,
+            output_byte_count == expected_output
+            or (is_cut_at_end_wait and output_byte_count < expected_output),
             f"output audio is not conserved: {output_byte_count} of "
             f"{expected_output} bytes for {expected_units} units",
         )
@@ -667,7 +791,12 @@ def evaluate_trace(
         else:
             check(
                 (response_state.terminal, response_state.reason)
-                in NATIVE_ENDED_TERMINALS,
+                in NATIVE_ENDED_TERMINALS
+                or (
+                    end_wait is not None
+                    and (response_state.terminal, response_state.reason)
+                    == CLOSE_TERMINAL
+                ),
                 f"response {response_id} ended {response_state.terminal}/"
                 f"{response_state.reason}, expected completed/stop or "
                 "incomplete/max_output_tokens",
@@ -683,6 +812,7 @@ def evaluate_trace(
         "input_audio_s": input_byte_count / INPUT_BYTES_PER_S,
         "output_audio_s": output_byte_count / (profile_contract.output_sample_rate * 2),
         "admission_denials": admissions,
+        "admission_rejections": admission_rejections,
         "first_audio_packet_s": (
             audio_times[0] - input_times[0] if audio_times and input_times else None
         ),
@@ -703,6 +833,7 @@ def evaluate_trace(
         ),
     }
     return {
+        "failure_kind": "runtime" if violations else None,
         "status": (
             "fail"
             if violations
@@ -715,6 +846,11 @@ def evaluate_trace(
         "violations": violations,
         "coverage": coverage,
         "metrics": metrics,
+        "end_wait": (
+            None
+            if end_wait is None
+            else end_wait.model_dump(include={"end_wait_s", "open_response_ids"})
+        ),
     }
 
 
@@ -768,7 +904,7 @@ def evaluate_legacy_trace(
                 )
                 check(
                     max_admission_attempts is None
-                    or admission.attempt <= max_admission_attempts,
+                    or admission.attempt <= max_admission_attempts + 1,
                     f"admission attempt {admission.attempt} exceeds the recorded "
                     f"limit {max_admission_attempts}",
                 )
@@ -800,6 +936,11 @@ def evaluate_legacy_trace(
                         session_id is not None, "session.update before session.created"
                     )
                     if updates_sent == 0:
+                        check(
+                            max_admission_attempts is None
+                            or admissions <= max_admission_attempts,
+                            f"admission retry exceeds the recorded limit {max_admission_attempts}",
+                        )
                         turn = session_fields.get("turn_detection")
                         requested_type = (
                             turn.get("type") if isinstance(turn, dict) else None
@@ -985,6 +1126,17 @@ def evaluate_legacy_trace(
         except (ValidationError, ValueError, binascii.Error) as exc:
             violations.append(f"record {index}: {exc}")
 
+    if (
+        admissions > 0
+        and not event_ids["send"]
+        and not event_ids["receive"]
+        and not violations
+        and (max_admission_attempts is None or admissions == max_admission_attempts + 1)
+    ):
+        return admission_rejection_result(admissions, 0)
+    else:
+        pass
+
     check(
         counts["receive", "session.created"] == 1,
         "expected exactly one receive session.created",
@@ -1018,6 +1170,7 @@ def evaluate_legacy_trace(
         ),
         "input_output_overlap": coverage["input_output_overlap"],
         "probe_ack_s": probe_ack_s,
+        "admission_rejections": 0,
         "responses_created": len(response_states),
         "responses_overlapped_by_speech": len(interrupted),
         "responses_open_at_close": sum(
@@ -1026,6 +1179,7 @@ def evaluate_legacy_trace(
         ),
     }
     return {
+        "failure_kind": "runtime" if violations else None,
         "status": "fail" if violations else "pass",
         "violations": violations,
         "coverage": coverage,

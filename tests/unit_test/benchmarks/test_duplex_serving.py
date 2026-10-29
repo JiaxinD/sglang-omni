@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 
-from benchmarks.duplex.client import SEND_RECEIPTS_FILE
+from benchmarks.duplex.client import (
+    ADMISSION_BACKOFF_S,
+    ADMISSION_RETRIES,
+    SEND_RECEIPTS_FILE,
+)
+from benchmarks.duplex.oracle import evaluate_trace
 from benchmarks.duplex.serving import score_session, serving_report, summarize_level
 from benchmarks.eval import benchmark_duplex_serving
 
@@ -21,7 +26,8 @@ TURN_BASED_PROFILE = "qwen3-omni-half-duplex"
 PLAYBACK_RESERVE_S = 0.3
 START_S = 100.0
 INPUT_S = 2.5
-OUTPUT_SECOND = base64.b64encode(b"\x00\x00" * 24000).decode()
+OUTPUT_SECOND = base64.b64encode(b"\x01\x00" * 24000).decode()
+REJECTION_RESPONSE_SECONDS = 0.01
 
 
 def record_session(
@@ -32,14 +38,23 @@ def record_session(
     reply_unit: int = 1,
     reply_audio_unit: int = 1,
     reply_audio_s: list[float] | None = None,
+    reply_pcm: list[bytes] | None = None,
     reply_created_s: float | None = None,
     is_legacy: bool = False,
+    rejected_updates: int = 0,
+    http_denied: bool = False,
+    is_admission_rejected: bool = False,
 ) -> Path:
     """Write a paced 80 ms session whose unit k completes at unit_done_s[k].
 
     A legacy reply carries no unit metadata and uses the legacy audio event name.
     """
     variant_dir.mkdir(parents=True)
+    if is_admission_rejected:
+        assert not unit_done_s and reply_audio_s is None
+        rejected_updates = ADMISSION_RETRIES + 1 - int(http_denied)
+    else:
+        pass
     packets = math.ceil(input_s * 1000 / 80)
     (variant_dir / "input.pcm").write_bytes(b"\x00\x00" * round(input_s * 16000))
     (variant_dir / SEND_RECEIPTS_FILE).write_text(
@@ -52,7 +67,7 @@ def record_session(
                         "start_s": START_S + seq * 0.08,
                         "completed_s": START_S + seq * 0.08,
                     }
-                    for seq in range(packets)
+                    for seq in range(0 if is_admission_rejected else packets)
                 ]
             }
         )
@@ -81,7 +96,52 @@ def record_session(
             },
         }
 
-    add(START_S + input_s, "send", "sglang.input_audio.end")
+    attempt_interval_s = ADMISSION_BACKOFF_S + REJECTION_RESPONSE_SECONDS
+    first_update_s = START_S - rejected_updates * attempt_interval_s
+    if http_denied:
+        add(
+            first_update_s - ADMISSION_BACKOFF_S - 2 * REJECTION_RESPONSE_SECONDS,
+            "admission",
+            "connection_denied",
+            http_status=503,
+            attempt=1,
+        )
+    else:
+        pass
+    if is_admission_rejected:
+        add(
+            first_update_s - REJECTION_RESPONSE_SECONDS,
+            "receive",
+            "session.created",
+            session={"id": "rejected_session"},
+        )
+    else:
+        pass
+    for attempt in range(rejected_updates):
+        sent_s = first_update_s + attempt * attempt_interval_s
+        add(sent_s, "send", "session.update", session={"output_modalities": ["audio"]})
+        add(
+            sent_s + REJECTION_RESPONSE_SECONDS,
+            "receive",
+            "error",
+            sglang={"fatal": False},
+            error={
+                "code": "admission_rejected",
+                "event_id": records[-1]["event"]["event_id"],
+            },
+        )
+    if is_admission_rejected:
+        close_s = records[-1]["time_s"] + REJECTION_RESPONSE_SECONDS
+        add(close_s, "send", "session.close")
+        add(
+            close_s + REJECTION_RESPONSE_SECONDS,
+            "receive",
+            "session.closed",
+            client_event_id=records[-1]["event"]["event_id"],
+            reason="client_closed",
+        )
+    else:
+        add(START_S + input_s, "send", "sglang.input_audio.end")
     for unit, done_s in enumerate(unit_done_s):
         add(
             done_s,
@@ -98,13 +158,17 @@ def record_session(
             response={"id": "response0", "status": "in_progress"},
             **({} if is_legacy else {"sglang": media(reply_unit)}),
         )
-        for arrival_s in reply_audio_s:
+        for index, arrival_s in enumerate(reply_audio_s):
             add(
                 arrival_s,
                 "receive",
                 "response.audio.delta" if is_legacy else "response.output_audio.delta",
                 response_id="response0",
-                delta=OUTPUT_SECOND,
+                delta=(
+                    OUTPUT_SECOND
+                    if reply_pcm is None
+                    else base64.b64encode(reply_pcm[index]).decode()
+                ),
                 **({} if is_legacy else {"sglang": media(reply_audio_unit)}),
             )
     else:
@@ -124,20 +188,32 @@ def record_run(
     admission_denials: int = 0,
     profile: str = PROFILE,
     reply_audio_s: list[float] | None = None,
+    reply_pcm: list[bytes] | None = None,
+    rejected_updates: int = 0,
+    rejected_session_index: int | None = None,
 ) -> Path:
     """Write a complete recording whose sessions are (status, unit_done_s) pairs."""
     samples = []
     for index, (status, unit_done_s) in enumerate(sessions):
+        is_admission_rejected = index == rejected_session_index
         directory = f"samples/{index}/input"
         record_session(
             run_dir / directory,
             unit_done_s,
             reply_audio_s=reply_audio_s,
+            reply_pcm=reply_pcm,
             is_legacy=profile == TURN_BASED_PROFILE,
+            rejected_updates=rejected_updates,
+            http_denied=index < admission_denials,
+            is_admission_rejected=is_admission_rejected,
         )
-        samples.append(
-            {"variants": {"input": {"directory": directory, "status": status}}}
-        )
+        variant_state = {"directory": directory, "status": status}
+        if is_admission_rejected:
+            assert status == "fail"
+            variant_state["failure_kind"] = "admission_rejected"
+        else:
+            pass
+        samples.append({"variants": {"input": variant_state}})
     (run_dir / "manifest.json").write_text(
         json.dumps({"kind": "full-duplex-bench-v1.0", "profile": profile})
     )
@@ -184,6 +260,19 @@ def test_unit_without_receipt_is_missed(tmp_path: Path) -> None:
 
     assert session["units_done"] == 2
     assert session["units_missed"] == 1
+
+
+def test_units_of_tail_silence_after_the_input_are_not_scored(tmp_path: Path) -> None:
+    variant_dir = record_session(
+        tmp_path / "session", [START_S + 1.1, START_S + 2.1, START_S + 3.1], input_s=3.0
+    )
+    (variant_dir / "input.pcm").write_bytes(b"\x00\x00" * 32000)
+
+    session = score_session(variant_dir, PROFILE, PLAYBACK_RESERVE_S)
+
+    assert session["units_expected"] == 2
+    assert len(session["unit_lag_s"]) == 2
+    assert session["units_missed"] == 0
 
 
 @pytest.mark.parametrize(
@@ -240,6 +329,58 @@ def test_reply_latency_underrun_and_real_time_factor(
     assert reply["real_time_factor"] == pytest.approx(1.2)
 
 
+def pcm(silent_s: float, audible_s: float) -> bytes:
+    return b"\x00\x00" * round(silent_s * 24000) + b"\x01\x00" * round(
+        audible_s * 24000
+    )
+
+
+@pytest.mark.parametrize(
+    ("reply_pcm", "first_audio_latency_s"),
+    [
+        # Leading zeros of the first chunk play before the first audible sample.
+        ([pcm(0.84, 0.16), pcm(0.0, 1.0)], 1.92),
+        # An all-zero first chunk plays out, then sound waits for the late chunk.
+        ([pcm(1.0, 0.0), pcm(0.0, 1.0)], 2.28),
+        ([pcm(1.0, 0.0), pcm(1.0, 0.0)], None),
+    ],
+)
+def test_first_audio_is_the_first_audible_sample(
+    tmp_path: Path, reply_pcm: list[bytes], first_audio_latency_s: float | None
+) -> None:
+    session = score_session(
+        record_session(
+            tmp_path / "session",
+            [101.16, 103.0, 103.1],
+            reply_audio_s=[103.0, 104.2],
+            reply_pcm=reply_pcm,
+        ),
+        PROFILE,
+        PLAYBACK_RESERVE_S,
+    )
+
+    (reply,) = session["replies"]
+    assert reply["first_audio_latency_s"] == pytest.approx(first_audio_latency_s)
+    assert reply["audio_s"] == pytest.approx(2.0)
+
+
+def test_level_leaves_a_silent_reply_out_of_first_audio(tmp_path: Path) -> None:
+    level = summarize_level(
+        record_run(
+            tmp_path / "run",
+            1,
+            [("pass", [101.16, 103.0, 103.1])],
+            reply_audio_s=[103.0],
+            reply_pcm=[pcm(1.0, 0.0)],
+        ),
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert level["replies"] == 1
+    assert level["first_audio_latency_s"]["count"] == 0
+    assert level["first_audio_latency_s"]["p90"] is None
+
+
 def test_reply_latency_starts_at_the_unit_with_the_first_audio(tmp_path: Path) -> None:
     session = score_session(
         record_session(
@@ -275,6 +416,67 @@ def test_level_counts_every_unit_of_a_failed_session_as_missed(tmp_path: Path) -
         "no failed sessions",
         "unit miss rate at most 1%",
     ]
+
+
+def test_level_counts_rejected_sessions_apart_from_failures(tmp_path: Path) -> None:
+    """Rejected sessions send no audio but still contribute their expected missed units."""
+    run_dir = record_run(
+        tmp_path / "run",
+        3,
+        [("pass", ON_TIME), ("fail", []), ("fail", [101.16])],
+        rejected_updates=2,
+        rejected_session_index=1,
+    )
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_text())
+    run["samples"][2]["variants"]["input"]["failure_kind"] = "runtime"
+    run_path.write_text(json.dumps(run))
+    report = serving_report(
+        [run_dir],
+        PLAYBACK_RESERVE_S,
+    )
+    level = report["levels"][0]
+    header, _, row = benchmark_duplex_serving.format_table(report).splitlines()[:3]
+    cells = dict(
+        zip(
+            [cell.strip() for cell in header.split("|")],
+            [cell.strip() for cell in row.split("|")],
+        )
+    )
+
+    assert level["sessions_failed"] == 1
+    assert level["sessions_rejected"] == 1
+    assert level["sessions_with_admission_events"] == 3
+    assert level["sessions_with_admission_rejections"] == 3
+    assert "admission_rejections" not in level
+    assert level["admission_denial_events"] == 8
+    assert level["units_expected"] == 9
+    assert level["units_missed"] == 6
+    assert cells["rejected"] == "1"
+    assert cells["affected"] == "3"
+    assert cells["denial events"] == "8"
+    assert level["unmet_targets"] == [
+        "no failed sessions",
+        "no admission rejections",
+        "unit miss rate at most 1%",
+    ]
+
+    rejected_dir = run_dir / run["samples"][1]["variants"]["input"]["directory"]
+    assert json.loads((rejected_dir / SEND_RECEIPTS_FILE).read_text())["appends"] == []
+    rejected_trace = [
+        json.loads(line)
+        for line in (rejected_dir / "continuous.jsonl").read_text().splitlines()
+    ]
+    assert not any(
+        record["event"]["type"]
+        in ("input_audio_buffer.append", "sglang.input_audio.end")
+        for record in rejected_trace
+    )
+    verdict = evaluate_trace(
+        rejected_trace, profile=PROFILE, max_admission_attempts=ADMISSION_RETRIES
+    )
+    assert verdict["failure_kind"] == "admission_rejected", verdict
+    assert verdict["metrics"]["admission_rejections"] == ADMISSION_RETRIES + 1
 
 
 def test_capacity_is_the_level_below_the_first_unmet_target(tmp_path: Path) -> None:

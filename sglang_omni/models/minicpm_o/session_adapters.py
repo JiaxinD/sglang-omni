@@ -9,7 +9,7 @@ from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.sampling.sampling_params import SamplingParams
 from transformers import PreTrainedTokenizerBase
 
-from sglang_omni.audio.vad import StatelessVAD
+from sglang_omni.audio.vad import SileroSpeechModel, StatelessVAD
 from sglang_omni.client.client import Client
 from sglang_omni.models.minicpm_o.components.code2wav import OUTPUT_SAMPLE_RATE
 from sglang_omni.models.minicpm_o.components.streaming_perception import (
@@ -18,6 +18,7 @@ from sglang_omni.models.minicpm_o.components.streaming_perception import (
     PerceptionStepPlan,
 )
 from sglang_omni.models.minicpm_o.native_config import (
+    MAX_DRAIN_UNITS,
     MiniCPMODuplexPipelineConfig,
     MiniCPMODuplexSampling,
 )
@@ -82,6 +83,8 @@ class ThinkerAdapter(ARSessionAdapter):
         self.special: MiniCPMOSpecialTokenIds = resolve_special_token_ids(
             tokenizer, bad_token_ids=tuple(tokenizer.bad_token_ids)
         )
+        # Note (wenyao): Loading silero per session stalled the thinker's scheduler thread ~30 ms per open, which at 32 concurrent sessions cost units.
+        self.speech_model: SileroSpeechModel = SileroSpeechModel()
         self.states: dict[SessionIdentity, MiniCPMOThinkerSessionState] = {}
 
     def open(self, session_identity: SessionIdentity, request: OmniRequest) -> None:
@@ -92,7 +95,7 @@ class ThinkerAdapter(ARSessionAdapter):
                     for key in MiniCPMODuplexSampling.model_fields
                 }
             ),
-            speech_detector=StatelessVAD(),
+            speech_detector=StatelessVAD(model=self.speech_model.fork()),
         )
 
     def close(self, session_identity: SessionIdentity) -> None:
@@ -105,6 +108,7 @@ class ThinkerAdapter(ARSessionAdapter):
             state.is_listen_held = True
             # note (luojiaxuan): The detector hears no unit between holds, so each hold starts it afresh.
             state.speech_detector.reset()
+            state.drain_units_left = 0
             state.is_latest_reply_ended = True
             self.cut_reply(state, keep_through_unit_of(event))
         elif control_type(event) == TRUNCATE:
@@ -175,7 +179,12 @@ class ThinkerAdapter(ARSessionAdapter):
         self, session_identity: SessionIdentity, payload: StagePayload
     ) -> StagePayload:
         payload.data = dict(
-            talker_conditions=[], text="", is_listen=True, end_of_turn=True
+            talker_conditions=[],
+            text="",
+            is_listen=True,
+            end_of_turn=True,
+            is_interrupted=self.states[session_identity].is_interrupt_pending,
+            hears_user=False,
         )
         return payload
 
@@ -189,20 +198,22 @@ class ThinkerAdapter(ARSessionAdapter):
         plan: PerceptionStepPlan = payload.data
         is_interrupted = state.is_interrupt_pending
         state.is_interrupt_pending = False
-        if state.is_listen_held:
+        if state.is_listen_held or state.drain_units_left > 0:
             pcm = (
                 chunk.payload["pcm"]
                 if isinstance(chunk.payload, dict)
                 else chunk.payload
             )
-            state.is_listen_held = all(
-                state.speech_detector.step(frame, in_speech=False) is None
+            hears_user = any(
+                state.speech_detector.step(frame, in_speech=False) is not None
                 for frame in state.speech_detector.score(
                     pcm, round(chunk.t_start_ms * SAMPLE_RATE / 1000)
                 )
             )
         else:
-            pass
+            hears_user = False
+        state.is_listen_held = state.is_listen_held and not hears_user
+        state.drain_units_left = 0 if hears_user else max(state.drain_units_left - 1, 0)
         prefix = (
             []
             if state.is_prefix_pending
@@ -270,6 +281,7 @@ class ThinkerAdapter(ARSessionAdapter):
             or state.is_listen_held
             or state.force_listen_counter < sampling.force_listen_count,
             is_interrupted=is_interrupted,
+            hears_user=hears_user,
             unit_index=chunk.seq,
             perception_token_ids=plan["token_ids"],
             perception_embedding_spans=perception_embedding_spans,
@@ -288,11 +300,16 @@ class ThinkerAdapter(ARSessionAdapter):
         else:
             pass
         output_token_ids = [int(token_id) for token_id in data.output_ids]
-        is_turn_ending = (
-            data.is_interrupted
-            or self.special.turn_eos in output_token_ids
+        ends_own_turn = not data.is_interrupted and (
+            self.special.turn_eos in output_token_ids
             or any(ends_turn for _, _, ends_turn in data.talker_conditions)
         )
+        is_turn_ending = data.is_interrupted or ends_own_turn
+        if ends_own_turn:
+            state.drain_units_left = MAX_DRAIN_UNITS
+            state.speech_detector.reset()
+        else:
+            pass
         if data.generated_unit_ids and data.is_turn_ended_at_start:
             # note (ruoyu): A new reply begins here, so the reply before it can no longer be cut.
             state.reply_units = []
@@ -335,6 +352,8 @@ class ThinkerAdapter(ARSessionAdapter):
                 output_token_ids and output_token_ids[0] == self.special.listen
             ),
             end_of_turn=is_turn_ending,
+            is_interrupted=data.is_interrupted,
+            hears_user=data.hears_user,
         )
         return data.stage_payload
 

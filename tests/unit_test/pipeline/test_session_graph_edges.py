@@ -38,6 +38,7 @@ from sglang_omni.proto.streams import (
     control_type,
 )
 from sglang_omni.scheduling.session import (
+    DEFAULT_MAX_OPEN_SESSIONS,
     ChunkEmitter,
     SessionContext,
     SessionHooks,
@@ -46,6 +47,7 @@ from sglang_omni.scheduling.session import (
 from tests.unit_test.fixtures.session_outputs import control_chunk
 from tests.unit_test.fixtures.session_pipeline import (
     StageEvent,
+    block_session_cleanup,
     event_log,
     pipeline,
     wait_until,
@@ -175,6 +177,28 @@ class FrontHooks(SessionHooks):
         return payload
 
 
+class WatchHooks(SessionHooks):
+    """Logs each session control it reads, as the cascade's aligner reads the dialog's."""
+
+    def __init__(self, name: str, events: Queue[StageEvent]) -> None:
+        self.name = name
+        self.events = events
+
+    def open(self, session_identity: SessionIdentity, request: OmniRequest) -> None:
+        pass
+
+    def close(self, session_identity: SessionIdentity) -> None:
+        pass
+
+    def append(
+        self, chunk: TimedChunk, payload: StagePayload, context: SessionContext
+    ) -> StagePayload:
+        self.events.put(
+            ("append", self.name, context.session_identity.id, control_type(chunk))
+        )
+        return payload
+
+
 class ToolHooks(SessionHooks):
     """Answers each tool call with an empty tool_response of the call's turn."""
 
@@ -202,14 +226,20 @@ class ToolHooks(SessionHooks):
 
 
 def create_edge_stage(
-    name: str, events: Queue[StageEvent], gates: dict[str, Event]
+    name: str,
+    events: Queue[StageEvent],
+    gates: dict[str, Event],
+    max_open_sessions: int,
 ) -> SessionScheduler:
     if name == "front":
-        return SessionScheduler(FrontHooks())
+        hooks = FrontHooks()
     elif name == "tool":
-        return SessionScheduler(ToolHooks())
+        hooks = ToolHooks()
+    elif name == "watch":
+        hooks = WatchHooks(name, events)
     else:
-        return SessionScheduler(EdgeHooks(name, events, gates))
+        hooks = EdgeHooks(name, events, gates)
+    return SessionScheduler(hooks, max_open_sessions=max_open_sessions)
 
 
 def text_chunk(text: str, seq: int, turn: int | None = None) -> TimedChunk:
@@ -235,16 +265,18 @@ def cascade_graph(order: tuple[str, ...] = ("front", "llm", "tts")) -> SessionGr
     return SessionGraph({name: nodes[name] for name in order}, {"tts": ("text",)})
 
 
-def dialog_graph() -> SessionGraph:
-    """A dialog-like front that publishes its turn controls and feeds the llm, which takes its interrupt as a preempting control."""
+def dialog_graph(*, watched: bool = False) -> SessionGraph:
+    """A dialog-like front that publishes its turn controls and feeds the llm, which takes its interrupt as a preempting control; a watched front also has its session controls read by a node, as the cascade's aligner reads the dialog's."""
     interrupt = ControlEdge("front", INTERRUPT, should_preempt=True)
-    return SessionGraph(
-        {
-            "front": SessionNode(("front",), ("input:pcm16",)),
-            "llm": SessionNode(("llm",), ("front:text",), controls=(interrupt,)),
-        },
-        {"front": (SESSION_CONTROL,), "llm": ("text",)},
-    )
+    nodes = {
+        "front": SessionNode(("front",), ("input:pcm16",)),
+        "llm": SessionNode(("llm",), ("front:text",), controls=(interrupt,)),
+    }
+    if watched:
+        nodes["watch"] = SessionNode(("watch",), (f"front:{SESSION_CONTROL}",))
+    else:
+        pass
+    return SessionGraph(nodes, {"front": (SESSION_CONTROL,), "llm": ("text",)})
 
 
 def edge_graph(edge: DataEdge) -> SessionGraph:
@@ -301,13 +333,14 @@ async def open_graph(
     names: tuple[str, ...],
     params: dict[str, object] | None = None,
     limits: SessionLimits = LIMITS,
+    max_open_sessions: int = DEFAULT_MAX_OPEN_SESSIONS,
 ) -> AsyncIterator[tuple[Coordinator, SessionIdentity, Gates, Log]]:
     gates = Gates(names)
     async with pipeline(
         tmp_path,
         names=list(names),
         factories={name: FACTORY for name in names},
-        factory_kwargs={"gates": gates.events},
+        factory_kwargs={"gates": gates.events, "max_open_sessions": max_open_sessions},
     ) as (coordinator, events, _):
         coordinator.session_graph = graph
         identity = await coordinator.open_session(
@@ -477,6 +510,41 @@ async def test_an_owner_slow_to_take_an_interrupt_holds_neither_the_input_acks_n
 
 
 @pytest.mark.asyncio
+async def test_the_client_hears_a_stop_its_readers_hear_only_after_the_owner_takes_the_interrupt(
+    tmp_path,
+):
+    """A turn.interrupted another node also reads reaches the client while the interrupt it follows is still on its way to an owner; the reader hears it only once the owner has taken the interrupt."""
+    async with open_graph(
+        tmp_path, dialog_graph(watched=True), ("front", "llm", "watch")
+    ) as (coordinator, identity, gates, log):
+        outputs = coordinator.session_outputs(identity)
+
+        async def hear_the_stop() -> int | None:
+            while control_type(output := await anext(outputs)) != TURN_INTERRUPTED:
+                pass
+            return output.turn
+
+        gates.hold("llm", "control")
+        try:
+            await append(coordinator, identity, speech_chunk(0, turn=1))
+            await wait_until(lambda: "llm" in log.names("control"))
+            hearing = asyncio.create_task(hear_the_stop())
+            # A timed-out read of the outputs would close the session behind the held owner, so this wait leaves the read running.
+            heard_while_held, _ = await asyncio.wait(
+                {hearing}, timeout=OUTPUT_TIMEOUT_S
+            )
+            await settle()
+            read_while_held = log.of("append", "watch")
+        finally:
+            gates.release("llm", "control")
+        assert heard_while_held == {hearing}
+        assert await hearing == 1
+        assert read_while_held == []
+        await wait_until(lambda: log.of("append", "watch") == [TURN_INTERRUPTED])
+        await outputs.aclose()
+
+
+@pytest.mark.asyncio
 async def test_drop_oldest_edge_keeps_newest_without_blocking_producer(tmp_path):
     graph = edge_graph(DataEdge("src:text", capacity=2, overflow="drop_oldest"))
     async with open_graph(tmp_path, graph, ("src", "sink")) as (
@@ -639,3 +707,43 @@ async def test_node_failure_fails_outputs_and_closes_the_rest(tmp_path):
         assert sorted(log.names("close")) == ["llm", "tts"]
         with pytest.raises(ValueError, match="unknown or stale session"):
             await coordinator.append_session(identity, text_chunk("late", 1, turn=1))
+
+
+@pytest.mark.asyncio
+async def test_an_open_waits_for_a_closing_session_to_free_its_stage(
+    tmp_path, monkeypatch
+):
+    """A client that closed its session and opened the next one at once was refused with QueueFullError: the close had not reached the full stage yet.
+
+    The open now waits for that close. With no session closing, it still fails with QueueFullError at once.
+    """
+    graph = SessionGraph(
+        {"rt": SessionNode(("rt",), ("input:text",))}, {"rt": ("text",)}
+    )
+    async with open_graph(tmp_path, graph, ("rt",), max_open_sessions=1) as (
+        coordinator,
+        first,
+        _,
+        _,
+    ):
+        with pytest.raises(QueueFullError):
+            await asyncio.wait_for(
+                coordinator.open_session(OmniRequest(None), limits=LIMITS),
+                OUTPUT_TIMEOUT_S,
+            )
+        entered, release = block_session_cleanup(monkeypatch, coordinator)
+        closing = asyncio.create_task(coordinator.close_session(first))
+        await entered.wait()
+        opening = asyncio.create_task(
+            coordinator.open_session(
+                OmniRequest(None), limits=LIMITS, session_id="next"
+            )
+        )
+        await wait_until(
+            lambda: "next:rt" in coordinator.sessions
+            and coordinator.sessions["next:rt"].is_closing
+        )
+        release.set()
+        await closing
+        second = await asyncio.wait_for(opening, OUTPUT_TIMEOUT_S)
+        await coordinator.close_session(second)

@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from sglang_omni.audio.vad import StatelessVAD
+from sglang_omni.audio.vad import VAD_FRAME_SAMPLES, StatelessVAD
 from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
 from sglang_omni.model_runner.thinker_model_runner import ThinkerModelRunner
 from sglang_omni.models.minicpm_o.components.streaming_perception import (
@@ -382,6 +382,36 @@ def open_duplex_adapter() -> tuple[ThinkerAdapter, OmniRequest]:
     return adapter, request
 
 
+def test_sessions_share_one_silero_load_with_recurrent_state_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening sessions loads the Silero network once, at the adapter, and the frames one session scores leave the probabilities of the others as a fresh detector's."""
+    import silero_vad
+
+    loads = Mock(side_effect=silero_vad.load_silero_vad)
+    monkeypatch.setattr(silero_vad, "load_silero_vad", loads)
+    adapter, request = open_duplex_adapter()
+    noisy, untouched, fresh = (
+        SessionIdentity(name) for name in ("noisy", "untouched", "fresh")
+    )
+    for session in (noisy, untouched, fresh):
+        adapter.open(session, request)
+    assert loads.call_count == 1
+
+    noise = np.random.default_rng(0).normal(0, 0.3, 10 * VAD_FRAME_SAMPLES)
+    noise_pcm = (noise.clip(-1, 1) * 32767).astype("<i2").tobytes()
+    silence_pcm = bytes(VAD_FRAME_SAMPLES * PCM16_BYTES_PER_SAMPLE)
+    detector_of = {
+        s: adapter.states[s].speech_detector for s in (noisy, untouched, fresh)
+    }
+    detector_of[noisy].score(noise_pcm, 0)
+    [untouched_frame] = detector_of[untouched].score(silence_pcm, 0)
+    [fresh_frame] = detector_of[fresh].score(silence_pcm, 0)
+    [noisy_frame] = detector_of[noisy].score(silence_pcm, len(noise))
+    assert untouched_frame.probability == fresh_frame.probability
+    assert noisy_frame.probability != fresh_frame.probability
+
+
 def listen_after_a_stop(
     adapter: ThinkerAdapter,
     request: OmniRequest,
@@ -437,8 +467,20 @@ def test_a_stop_holds_the_listen_through_silence_until_the_user_speaks(
         *[[SPECIAL_TOKENS.unit_end, PLAIN_TOKEN_ID]] * 3,
     ]
     assert [result.data for _, result in finished_units] == [
-        dict(talker_conditions=[], text="", is_listen=True, end_of_turn=end_of_turn)
-        for end_of_turn in (True, False, False, False)
+        dict(
+            talker_conditions=[],
+            text="",
+            is_listen=True,
+            end_of_turn=end_of_turn,
+            is_interrupted=end_of_turn,
+            hears_user=hears_user,
+        )
+        for end_of_turn, hears_user in (
+            (True, False),
+            (False, False),
+            (False, True),
+            (False, False),
+        )
     ]
     assert state.is_turn_ended is True
 
@@ -483,6 +525,30 @@ def test_after_a_stop_only_the_users_voice_frees_the_model(
     ] == [True, is_listen_held, is_listen_held]
 
 
+@pytest.mark.parametrize(
+    ("units_after_the_stop", "is_interrupted"),
+    [(0, True), (1, False)],
+    ids=["no_unit_carried_the_stop", "a_unit_carried_the_stop"],
+)
+def test_the_input_end_reports_a_stop_no_unit_has_carried(
+    units_after_the_stop: int, is_interrupted: bool
+) -> None:
+    """A stop just before the input ends reaches the talker only through the input end's result, which must report it so the talker drops the speech a turn the model ended still owes; a stop a unit already carried is not reported again."""
+    adapter, request = open_duplex_adapter()
+
+    listen_after_a_stop(adapter, request, [SILENT_UNIT_PCM] * units_after_the_stop)
+    input_end = adapter.finish_input(SESSION, step_plan_payload(request))
+
+    assert input_end.data == dict(
+        talker_conditions=[],
+        text="",
+        is_listen=True,
+        end_of_turn=True,
+        is_interrupted=is_interrupted,
+        hears_user=False,
+    )
+
+
 def speak_two_units(
     adapter: ThinkerAdapter,
     request: OmniRequest,
@@ -518,6 +584,35 @@ def speak_two_units(
         output_ids=second_output_ids,
         generated_unit_ids=second_generated_ids,
     )
+
+
+@pytest.mark.parametrize(
+    ("second_unit_ends_turn", "hears_user"),
+    [(True, [False, True]), (False, [False, False])],
+    ids=["after_the_model_ended_its_turn", "mid_reply"],
+)
+def test_units_after_the_model_ends_its_turn_report_the_users_voice(
+    second_unit_ends_turn: bool, hears_user: list[bool]
+) -> None:
+    """The talker goes on speaking a turn the model ended only while no one speaks, so the units after that turn end report the user's voice; units of an open reply run no detector."""
+    adapter, request = open_duplex_adapter()
+    speak_two_units(
+        adapter,
+        request,
+        first_unit_ends_turn=False,
+        second_unit_ends_turn=second_unit_ends_turn,
+    )
+    results = []
+    for input_seq, payload in enumerate(
+        [SILENT_UNIT_PCM, unit_pcm(speech(UNIT_SAMPLES), VOICE_DBFS)], start=2
+    ):
+        unit_request = adapter.build(
+            SESSION, audio_unit(input_seq, payload), step_plan_payload(request)
+        )
+        unit_request.output_ids = [SPECIAL_TOKENS.listen]
+        results.append(adapter.result(SESSION, unit_request).data["hears_user"])
+
+    assert results == hears_user
 
 
 @pytest.mark.parametrize(

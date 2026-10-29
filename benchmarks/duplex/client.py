@@ -5,16 +5,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import io
 import json
+import queue
+import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
 
 import websockets
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from benchmarks.duplex.oracle_models import turn_detection_type
+from benchmarks.duplex.oracle_models import is_admission_rejection, turn_detection_type
 from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName, Protocol
 
 SAMPLE_RATE = 16000
@@ -32,6 +38,10 @@ ADMISSION_DENIED_STATUS = 503
 ADMISSION_RETRIES = 3
 ADMISSION_BACKOFF_S = 0.25
 SEND_RECEIPTS_FILE = "input-send-receipts.json"
+# Trace lines reach the disk in batches at most this far apart.
+TRACE_FLUSH_INTERVAL_S = 0.5
+# Sessions that end together are closed in one batch gathered for this long.
+TRACE_CLOSE_BATCH_S = 0.05
 # note (wenyao): Keepalive and compression would perturb packet timing.
 TRANSPORT: dict[str, JsonValue] = {
     "max_message_bytes": MAX_MESSAGE_BYTES,
@@ -58,6 +68,23 @@ TURN_BASED_TRANSPORT: dict[str, JsonValue] = {
     "after sglang.input_audio.drained, which follows the server's answer to the "
     "last utterance; no deadline other than the session timeout bounds that wait",
 }
+# note (luojiaxuan): An end-of-input rule two compared clients can share: tail_silence_s of
+# zero PCM16 streamed after the input at the input's pace, the input end after that tail,
+# then at most end_wait_s for the server to finish before the close. A reply counts as
+# finished only if its response.done arrived before that input end.
+END_OF_INPUT_RULE = (
+    "tail_silence_s of zero PCM16 appended after the input, paced by media time; the "
+    "input end (EOS) after the tail; then at most end_wait_s for the server to finish "
+    "(sglang.input_audio.drained) before session.close; when end_wait_s expires first "
+    "the session closes all the same, with an end_wait record naming the replies still "
+    "open; a reply is finished only if its response.done arrived before the input end"
+)
+PLAYBACK_REPORT = (
+    "conversation.item.truncate on each response.done with status cancelled, with "
+    "audio_end_ms the part of that reply a zero-buffer player had played at its "
+    "receipt: each audio delta plays from the later of its arrival and the end of "
+    "the previous delta, and the cut drops what is still unplayed"
+)
 
 
 class TurnDetection(BaseModel):
@@ -93,6 +120,171 @@ class SendReceipt(TypedDict):
     completed_s: float
 
 
+@dataclass(frozen=True, kw_only=True)
+class TraceLine:
+    trace_file: io.TextIOWrapper
+    line: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReceiptsWrite:
+    trace_file: io.TextIOWrapper
+    receipts_path: Path
+    receipts: list[SendReceipt]
+
+
+@dataclass(frozen=True, kw_only=True)
+class TraceClose:
+    trace_file: io.TextIOWrapper
+    loop: asyncio.AbstractEventLoop
+    closed: asyncio.Future[None]
+
+
+def settle_close(closed: asyncio.Future[None], failure: OSError | None) -> None:
+    if closed.done():
+        pass
+    elif failure is None:
+        closed.set_result(None)
+    else:
+        closed.set_exception(failure)
+
+
+def reject_constant(constant: str) -> float:
+    raise ValueError(f"Out of range float values are not JSON compliant: {constant}")
+
+
+# A frame lands in the trace as received, so it must already be strict JSON.
+SERVER_EVENT_DECODER = json.JSONDecoder(parse_constant=reject_constant)
+
+
+# note (kangwenqiao): A write can wait hundreds of ms for disk writeback of its page,
+# so it leaves the loop that paces every session. Every other thread that wakes takes
+# the GIL from that loop, so one thread writes on a fixed period for all sessions.
+class TraceWriter:
+    """One thread writes the trace and receipts of every session of the process."""
+
+    def __init__(self) -> None:
+        self.pending: queue.SimpleQueue[TraceLine | ReceiptsWrite | TraceClose] = (
+            queue.SimpleQueue()
+        )
+        self.close_requested: threading.Event = threading.Event()
+        self.lock: threading.Lock = threading.Lock()
+        self.open_traces: int = 0
+        self.thread: threading.Thread | None = None
+
+    def open(self, trace_path: Path) -> io.TextIOWrapper:
+        trace_file = trace_path.open("x", encoding="utf-8")
+        with self.lock:
+            self.open_traces += 1
+            if self.thread is None:
+                # A session that never closes has no lines left that it waits for.
+                self.thread = threading.Thread(
+                    target=self.run, name="trace-writer", daemon=True
+                )
+                self.thread.start()
+            else:
+                pass
+        return trace_file
+
+    def write_line(self, trace_file: io.TextIOWrapper, line: str) -> None:
+        self.pending.put(TraceLine(trace_file=trace_file, line=line))
+
+    def write_receipts(
+        self,
+        trace_file: io.TextIOWrapper,
+        receipts_path: Path,
+        receipts: list[SendReceipt],
+    ) -> None:
+        self.pending.put(
+            ReceiptsWrite(
+                trace_file=trace_file, receipts_path=receipts_path, receipts=receipts
+            )
+        )
+
+    async def close(self, trace_file: io.TextIOWrapper) -> None:
+        """Returns once the session's files are on disk; raises their write error."""
+        loop = asyncio.get_running_loop()
+        closed: asyncio.Future[None] = loop.create_future()
+        self.pending.put(TraceClose(trace_file=trace_file, loop=loop, closed=closed))
+        self.close_requested.set()
+        await closed
+
+    def run(self) -> None:
+        failures: dict[io.TextIOWrapper, OSError] = {}
+        while True:
+            if self.close_requested.wait(TRACE_FLUSH_INTERVAL_S):
+                time.sleep(TRACE_CLOSE_BATCH_S)
+            else:
+                pass
+            self.close_requested.clear()
+            batches: dict[io.TextIOWrapper, list[str]] = {}
+            receipts_writes: list[ReceiptsWrite] = []
+            closes: list[TraceClose] = []
+            while not self.pending.empty():
+                request = self.pending.get_nowait()
+                if isinstance(request, TraceLine):
+                    batches.setdefault(request.trace_file, []).append(request.line)
+                elif isinstance(request, ReceiptsWrite):
+                    receipts_writes.append(request)
+                else:
+                    closes.append(request)
+            for trace_file, lines in batches.items():
+                if trace_file not in failures:
+                    try:
+                        trace_file.write("".join(lines))
+                    except OSError as exc:
+                        failures[trace_file] = exc
+                else:
+                    pass
+            for receipts_write in receipts_writes:
+                try:
+                    # note (kangwenqiao): Compact, because the indented dump is
+                    # pure Python and holds the GIL from the pacing loop.
+                    receipts_write.receipts_path.write_text(
+                        json.dumps(
+                            {"appends": receipts_write.receipts}, allow_nan=False
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    failures.setdefault(receipts_write.trace_file, exc)
+            for close_request in closes:
+                try:
+                    close_request.trace_file.close()
+                except OSError as exc:
+                    failures.setdefault(close_request.trace_file, exc)
+                try:
+                    close_request.loop.call_soon_threadsafe(
+                        settle_close,
+                        close_request.closed,
+                        failures.pop(close_request.trace_file, None),
+                    )
+                except RuntimeError:
+                    # A loop torn down mid-session has nobody left to wake.
+                    pass
+            with self.lock:
+                self.open_traces -= len(closes)
+                if self.open_traces == 0 and self.pending.empty():
+                    self.thread = None
+                    return
+                else:
+                    pass
+
+
+TRACE_WRITER = TraceWriter()
+
+
+@contextlib.asynccontextmanager
+async def open_trace(trace_path: Path) -> AsyncIterator[io.TextIOWrapper]:
+    """Trace file written by TRACE_WRITER; complete on exit, or raises its write error."""
+    trace_file = TRACE_WRITER.open(trace_path)
+    try:
+        yield trace_file
+    finally:
+        await TRACE_WRITER.close(trace_file)
+
+
 async def run_session(
     url: str,
     pcm: bytes,
@@ -102,11 +294,18 @@ async def run_session(
     profile: ProfileName = DEFAULT_PROFILE,
     turn_detection: TurnDetection | None = None,
     tail_s: float = LEGACY_TAIL_S,
+    report_playback: bool = False,
+    tail_silence_s: float = 0.0,
+    end_wait_s: float | None = None,
 ) -> None:
     """Save observations and failures; classification belongs to offline replay.
 
     turn_detection configures a legacy-protocol or turn-based session; tail_s is the
-    delay after the input end before a legacy-protocol session's liveness probe.
+    delay after the input end before a legacy-protocol session's liveness probe;
+    report_playback makes a turn-based session report each cancelled reply's played
+    audio as PLAYBACK_REPORT describes; tail_silence_s and end_wait_s set the
+    end of input as END_OF_INPUT_RULE describes (end_wait_s None: only the session
+    timeout bounds the drain, and a drain that never comes fails the session).
     """
     if not pcm or len(pcm) % 2:
         raise ValueError("Input must be nonempty PCM16")
@@ -130,17 +329,25 @@ async def run_session(
                 "input": {"turn_detection": turn_detection.model_dump(mode="json")}
             },
         }
-    input_s = len(pcm) / (2 * SAMPLE_RATE)
+    tail_bytes = round(tail_silence_s * SAMPLE_RATE) * 2
+    input_s = (len(pcm) + tail_bytes) / (2 * SAMPLE_RATE)
+    # note (luojiaxuan): The tail starts its own packets, so the input's appends stay
+    # exactly as without it.
+    packet_offsets = [*range(0, len(pcm), PACKET_BYTES)] + [
+        *range(len(pcm), len(pcm) + tail_bytes, PACKET_BYTES)
+    ]
+    output_rate = PROFILES[profile].output_sample_rate
 
     receipts: list[SendReceipt] = []
-    with trace_path.open("x", encoding="utf-8", buffering=1) as trace_file:
+    async with open_trace(trace_path) as trace_file:
 
         def record(
-            direction: Literal["send", "receive", "error", "admission"],
+            direction: Literal["send", "receive", "error", "admission", "end_wait"],
             event: dict[str, JsonValue],
         ) -> float:
             observed_time_s = time.perf_counter()
-            trace_file.write(
+            TRACE_WRITER.write_line(
+                trace_file,
                 json.dumps(
                     {
                         "direction": direction,
@@ -149,14 +356,39 @@ async def run_session(
                     },
                     allow_nan=False,
                 )
-                + "\n"
+                + "\n",
             )
             return observed_time_s
 
-        async def admit() -> websockets.ClientConnection:
-            attempt = 0
+        # note (edwingao28): Embedding the frame saves a second encode on the pacing
+        # loop; a non-ASCII or multi-line frame is encoded again to keep ASCII lines.
+        def record_frame(
+            direction: Literal["send", "receive"],
+            frame: str,
+            event: dict[str, JsonValue],
+            observed_time_s: float,
+        ) -> None:
+            if not frame.isascii() or "\n" in frame or "\r" in frame:
+                line = json.dumps(
+                    {
+                        "direction": direction,
+                        "time_s": observed_time_s,
+                        "event": event,
+                    },
+                    allow_nan=False,
+                )
+            else:
+                line = (
+                    f'{{"direction": "{direction}", "time_s": {observed_time_s!r}, '
+                    f'"event": {frame}}}'
+                )
+            TRACE_WRITER.write_line(trace_file, line + "\n")
+
+        admission_denials = 0
+
+        async def admit() -> websockets.ClientConnection | None:
+            nonlocal admission_denials
             while True:
-                attempt += 1
                 try:
                     return await websockets.connect(
                         url,
@@ -167,40 +399,48 @@ async def run_session(
                 except websockets.InvalidStatus as exc:
                     if exc.response.status_code != ADMISSION_DENIED_STATUS:
                         raise
-                    elif attempt > ADMISSION_RETRIES:
-                        raise RuntimeError(
-                            f"admission denied {attempt} times with HTTP "
-                            f"{ADMISSION_DENIED_STATUS}"
-                        ) from exc
                     else:
+                        admission_denials += 1
                         record(
                             "admission",
                             {
                                 "type": "connection_denied",
                                 "http_status": exc.response.status_code,
-                                "attempt": attempt,
+                                "attempt": admission_denials,
                             },
                         )
-                        await asyncio.sleep(ADMISSION_BACKOFF_S)
+                        if admission_denials > ADMISSION_RETRIES:
+                            return None
+                        else:
+                            await asyncio.sleep(ADMISSION_BACKOFF_S)
 
         async def exchange() -> None:
-            async with await admit() as websocket:
+            connection = await admit()
+            if connection is None:
+                return
+            else:
+                pass
+            async with connection as websocket:
                 seen: dict[str, asyncio.Event] = {}
                 latest: dict[str, dict[str, JsonValue]] = {}
                 aborted = asyncio.Event()
+                rejected = asyncio.Event()
                 fatal = False
+                open_response_ids: dict[str, None] = {}
 
                 async def send(
                     event_type: Literal[
                         "session.update",
                         "input_audio_buffer.append",
                         "sglang.input_audio.end",
+                        "conversation.item.truncate",
                         "session.close",
                     ],
                     *,
                     session: dict[str, JsonValue] | None = None,
                     audio: str | None = None,
                     sglang: InputAudioMetadata | None = None,
+                    truncate: dict[str, JsonValue] | None = None,
                 ) -> None:
                     event_id = uuid.uuid4().hex
                     event: dict[str, JsonValue] = {
@@ -219,8 +459,14 @@ async def run_session(
                         event["sglang"] = sglang
                     else:
                         pass
-                    send_started_s = record("send", event)
-                    await websocket.send(json.dumps(event))
+                    if truncate is not None:
+                        event.update(truncate)
+                    else:
+                        pass
+                    send_started_s = time.perf_counter()
+                    frame = json.dumps(event, allow_nan=False)
+                    record_frame("send", frame, event, send_started_s)
+                    await websocket.send(frame)
                     if event_type == "input_audio_buffer.append":
                         assert sglang is not None
                         receipts.append(
@@ -239,6 +485,7 @@ async def run_session(
                     waiters = (
                         asyncio.create_task(receipt.wait()),
                         asyncio.create_task(aborted.wait()),
+                        asyncio.create_task(rejected.wait()),
                     )
                     try:
                         await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
@@ -248,11 +495,58 @@ async def run_session(
                         await asyncio.gather(*waiters, return_exceptions=True)
                     return receipt.is_set()
 
+                # note (luojiaxuan): the zero-buffer player of report_playback: when
+                # its cursor frees, and each reply's (start, seconds) deltas.
+                playout_cursor_s = 0.0
+                reply_audio: dict[str, list[tuple[float, float]]] = {}
+                reply_items: dict[str, str] = {}
+
+                async def report_played(
+                    event: dict[str, JsonValue], now_s: float
+                ) -> None:
+                    nonlocal playout_cursor_s
+                    event_type = event["type"]
+                    if event_type == "response.output_audio.delta":
+                        seconds = (
+                            len(base64.b64decode(event["delta"])) / 2 / output_rate
+                        )
+                        start_s = max(playout_cursor_s, now_s)
+                        playout_cursor_s = start_s + seconds
+                        reply_audio.setdefault(event["response_id"], []).append(
+                            (start_s, seconds)
+                        )
+                        reply_items[event["response_id"]] = event["item_id"]
+                    elif (
+                        event_type == "response.done"
+                        and event["response"]["status"] == "cancelled"
+                    ):
+                        response_id = event["response"]["id"]
+                        playout_cursor_s = min(playout_cursor_s, now_s)
+                        if response_id in reply_items:
+                            played_s = sum(
+                                min(seconds, max(0.0, now_s - start_s))
+                                for start_s, seconds in reply_audio[response_id]
+                            )
+                            await send(
+                                "conversation.item.truncate",
+                                truncate={
+                                    "item_id": reply_items[response_id],
+                                    "content_index": 0,
+                                    "audio_end_ms": int(played_s * 1000),
+                                },
+                            )
+                        else:
+                            pass
+                    else:
+                        pass
+
                 async def receive() -> None:
-                    nonlocal fatal
+                    nonlocal fatal, admission_denials
                     async for frame in websocket:
+                        received_s = time.perf_counter()
                         try:
-                            event = json.loads(frame)
+                            text = frame if isinstance(frame, str) else frame.decode()
+                            event = SERVER_EVENT_DECODER.decode(text)
                             if not isinstance(event, dict):
                                 raise ValueError("server event must be a JSON object")
                             else:
@@ -262,7 +556,7 @@ async def run_session(
                                 raise ValueError("server event type must be a string")
                             else:
                                 pass
-                            record("receive", event)
+                            record_frame("receive", text, event, received_s)
                         except ValueError as exc:
                             raise ValueError(
                                 "malformed server frame "
@@ -271,7 +565,26 @@ async def run_session(
                             ) from exc
                         latest[event_type] = event
                         seen.setdefault(event_type, asyncio.Event()).set()
-                        if event_type == "error":
+                        response = event.get("response")
+                        response_id = (
+                            response.get("id") if isinstance(response, dict) else None
+                        )
+                        if not isinstance(response_id, str):
+                            pass
+                        elif event_type == "response.created":
+                            open_response_ids[response_id] = None
+                        elif event_type == "response.done":
+                            open_response_ids.pop(response_id, None)
+                        else:
+                            pass
+                        if report_playback:
+                            await report_played(event, received_s)
+                        else:
+                            pass
+                        if is_admission_rejection(event):
+                            admission_denials += 1
+                            rejected.set()
+                        elif event_type == "error":
                             # note (wenyao): Close waits for adapter teardown.
                             extension = event.get("sglang")
                             fatal = fatal or bool(
@@ -291,7 +604,19 @@ async def run_session(
                         await send("session.update", session=configure)
                     else:
                         pass
-                    if await settle("session.updated"):
+                    admitted = await settle("session.updated")
+                    # note (IcyDesert): The manifest retry limit now spans HTTP and session rejections; older recordings used separate budgets.
+                    while rejected.is_set() and admission_denials <= ADMISSION_RETRIES:
+                        rejected.clear()
+                        # note (Yucheng Hu): The server's session_update_timeout waits behind a slow open, so it can fail the session right after a rejection; the backoff ends on that abort.
+                        try:
+                            await asyncio.wait_for(aborted.wait(), ADMISSION_BACKOFF_S)
+                        except asyncio.TimeoutError:
+                            await send("session.update", session=configure)
+                            admitted = await settle("session.updated")
+                        else:
+                            break
+                    if admitted:
                         # note (luojiaxuan): The legacy facade substitutes server_vad
                         # when no Smart Turn model is loaded, so the echo is the only
                         # evidence of which detector ran.
@@ -310,28 +635,38 @@ async def run_session(
                         else:
                             pass
                         streamed = True
-                        start_s = time.perf_counter()
-                        for sequence, byte_offset in enumerate(
-                            range(0, len(pcm), PACKET_BYTES)
-                        ):
-                            await asyncio.sleep(
-                                max(
-                                    0.0,
-                                    start_s
-                                    + sequence * PACKET_MS / 1000
-                                    - time.perf_counter(),
+                        for sequence, byte_offset in enumerate(packet_offsets):
+                            # note (edwingao28): Replay measures pacing from the
+                            # first append's send, so the deadlines start there too.
+                            if receipts:
+                                await asyncio.sleep(
+                                    max(
+                                        0.0,
+                                        receipts[0]["start_s"]
+                                        + byte_offset / (2 * SAMPLE_RATE)
+                                        - time.perf_counter(),
+                                    )
                                 )
-                            )
+                            else:
+                                pass
                             if aborted.is_set():
                                 streamed = False
                                 break
                             else:
                                 pass
+                            payload = (
+                                pcm[byte_offset : byte_offset + PACKET_BYTES]
+                                if byte_offset < len(pcm)
+                                else bytes(
+                                    min(
+                                        PACKET_BYTES,
+                                        len(pcm) + tail_bytes - byte_offset,
+                                    )
+                                )
+                            )
                             await send(
                                 "input_audio_buffer.append",
-                                audio=base64.b64encode(
-                                    pcm[byte_offset : byte_offset + PACKET_BYTES]
-                                ).decode("ascii"),
+                                audio=base64.b64encode(payload).decode("ascii"),
                                 sglang={
                                     "seq": sequence,
                                     "t_start_ms": byte_offset / 2 / SAMPLE_RATE * 1000,
@@ -360,7 +695,29 @@ async def run_session(
                             await settle("session.updated")
                         else:
                             await send("sglang.input_audio.end")
-                            await settle("sglang.input_audio.drained")
+                            if end_wait_s is None:
+                                await settle("sglang.input_audio.drained")
+                            else:
+                                try:
+                                    await asyncio.wait_for(
+                                        settle("sglang.input_audio.drained"),
+                                        end_wait_s,
+                                    )
+                                except asyncio.TimeoutError:
+                                    # note (wenyao): A reply still generating when the end wait runs out is unfinished, not a failed session: the session closes and the trace names the replies still open, unless the drain landed with the timeout.
+                                    if not seen["sglang.input_audio.drained"].is_set():
+                                        record(
+                                            "end_wait",
+                                            {
+                                                "type": "expired",
+                                                "end_wait_s": end_wait_s,
+                                                "open_response_ids": list(
+                                                    open_response_ids
+                                                ),
+                                            },
+                                        )
+                                    else:
+                                        pass
                     else:
                         pass
                     if legacy:
@@ -413,7 +770,6 @@ async def run_session(
         ) as exc:
             record("error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:
-            trace_path.with_name(SEND_RECEIPTS_FILE).write_text(
-                json.dumps({"appends": receipts}, indent=2, allow_nan=False) + "\n",
-                encoding="utf-8",
+            TRACE_WRITER.write_receipts(
+                trace_file, trace_path.with_name(SEND_RECEIPTS_FILE), receipts
             )
